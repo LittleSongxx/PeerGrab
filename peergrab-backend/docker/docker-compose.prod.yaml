@@ -1,0 +1,178 @@
+# Production stack for one ECS host. This file is standalone: do not combine it
+# with docker-compose.yaml or docker-compose.full.yaml (the local demo stack).
+# Only the frontend is published, on the host loopback interface for a reverse proxy.
+name: ${COMPOSE_PROJECT_NAME:-peergrab-prod}
+
+services:
+  mysql:
+    image: mysql:8.0.40
+    environment:
+      MYSQL_ROOT_PASSWORD: ${PEERGRAB_MYSQL_ROOT_PASSWORD:?Set PEERGRAB_MYSQL_ROOT_PASSWORD in .env.prod}
+      MYSQL_DATABASE: peer_grab
+      MYSQL_USER: peergrab
+      MYSQL_PASSWORD: ${PEERGRAB_MYSQL_APP_PASSWORD:?Set PEERGRAB_MYSQL_APP_PASSWORD in .env.prod}
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --transaction-isolation=READ-COMMITTED
+      - --max_connections=150
+      - --innodb_buffer_pool_size=512M
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - peergrab-mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_ROOT_PASSWORD}\" mysql -h 127.0.0.1 -uroot -N -e 'SELECT 1' >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - peergrab-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  rmqnamesrv:
+    image: apache/rocketmq:5.3.1
+    command: sh mqnamesrv
+    environment:
+      JAVA_OPT_EXT: "-server -Xms256m -Xmx256m -Xmn128m"
+    healthcheck:
+      test: ["CMD-SHELL", "ps -ef | grep -q '[N]amesrvStartup'"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    restart: unless-stopped
+
+  rmq-store-init:
+    image: redis:7.4-alpine
+    user: "0:0"
+    entrypoint: ["sh", "-c"]
+    command: ["chown -R 3000:3000 /home/rocketmq/store"]
+    volumes:
+      - peergrab-rmq-broker-store:/home/rocketmq/store
+    restart: "no"
+
+  rmqbroker:
+    image: apache/rocketmq:5.3.1
+    command: sh mqbroker -n rmqnamesrv:9876 --enable-proxy
+    depends_on:
+      rmqnamesrv:
+        condition: service_healthy
+      rmq-store-init:
+        condition: service_completed_successfully
+    environment:
+      JAVA_OPT_EXT: "-server -Xms512m -Xmx512m -Xmn256m"
+      BROKER_IP1: rmqbroker
+    volumes:
+      - peergrab-rmq-broker-store:/home/rocketmq/store
+    healthcheck:
+      test: ["CMD-SHELL", "ps -ef | grep -qE '[P]roxyStartup|[B]rokerStartup'"]
+      interval: 10s
+      timeout: 5s
+      retries: 9
+      start_period: 60s
+    stop_grace_period: 60s
+    restart: unless-stopped
+
+  mq-init:
+    image: apache/rocketmq:5.3.1
+    volumes:
+      - ./init-mq-container.sh:/init-mq-container.sh:ro
+    command: ["sh", "/init-mq-container.sh"]
+    depends_on:
+      rmqbroker:
+        condition: service_healthy
+    restart: "no"
+
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+      target: app
+    environment:
+      JAVA_TOOL_OPTIONS: -Xms128m -Xmx768m
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/peer_grab?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai&rewriteBatchedStatements=true
+      SPRING_DATASOURCE_USERNAME: peergrab
+      SPRING_DATASOURCE_PASSWORD: ${PEERGRAB_MYSQL_APP_PASSWORD:?Set PEERGRAB_MYSQL_APP_PASSWORD in .env.prod}
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      PEERGRAB_MQ_ENDPOINTS: rmqbroker:8081
+      PEERGRAB_MQ_ENABLED: "true"
+      PEERGRAB_WORKER_ID: 1
+      PEERGRAB_AUTH_MODE: session
+      PEERGRAB_WEB_CORS_ORIGINS: https://peergrab.cn
+      PEERGRAB_AUTH_ALLOW_HEADER_IDENTITY: "false"
+      PEERGRAB_AUTH_DEMO_ENABLED: "true"
+      PEERGRAB_AUTH_DEMO_PASSWORD_1001: ${PEERGRAB_AUTH_DEMO_PASSWORD_1001:?Set a unique demo password in .env.prod}
+      PEERGRAB_AUTH_DEMO_PASSWORD_2001: ${PEERGRAB_AUTH_DEMO_PASSWORD_2001:?Set a unique demo password in .env.prod}
+      PEERGRAB_AUTH_DEMO_PASSWORD_2002: ${PEERGRAB_AUTH_DEMO_PASSWORD_2002:?Set a unique demo password in .env.prod}
+      PEERGRAB_AUTH_DEMO_PASSWORD_9001: ${PEERGRAB_AUTH_DEMO_PASSWORD_9001:?Set a unique demo password in .env.prod}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mq-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 90s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+      target: worker
+    environment:
+      JAVA_TOOL_OPTIONS: -Xms128m -Xmx512m
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/peer_grab?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai
+      SPRING_DATASOURCE_USERNAME: peergrab
+      SPRING_DATASOURCE_PASSWORD: ${PEERGRAB_MYSQL_APP_PASSWORD:?Set PEERGRAB_MYSQL_APP_PASSWORD in .env.prod}
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      PEERGRAB_MQ_ENDPOINTS: rmqbroker:8081
+      PEERGRAB_MQ_ENABLED: "true"
+      PEERGRAB_WORKER_ID: 2
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mq-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ../../peergrab-frontend
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:${PEERGRAB_WEB_PORT:-25173}:80"
+    depends_on:
+      app:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  peergrab-mysql-data:
+  peergrab-redis-data:
+  peergrab-rmq-broker-store:

@@ -47,3 +47,9 @@ jobs:
           PEERGRAB_AUTH_DEMO_PASSWORD_2001: ci-only-2001
           PEERGRAB_AUTH_DEMO_PASSWORD_2002: ci-only-2002
           PEERGRAB_AUTH_DEMO_PASSWORD_9001: ci-only-9001
+      - name: Validate production Compose config
+        run: docker compose --env-file .env.prod.example -f docker-compose.prod.yaml config --quiet
+        working-directory: peergrab-backend/docker
+        env:
+          PEERGRAB_MYSQL_ROOT_PASSWORD: ci-only-root
+          PEERGRAB_MYSQL_APP_PASSWORD: ci-only-app
