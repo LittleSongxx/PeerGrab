@@ -1,0 +1,106 @@
+# 本文件提供本机开发用中间件；完整应用栈叠加 docker-compose.full.yaml。
+# 宿主机端口只监听回环地址，可通过 .env 中的 PEERGRAB_*_PORT 覆盖。
+name: ${COMPOSE_PROJECT_NAME:-peergrab-local}
+
+services:
+  mysql:
+    image: mysql:8.0.40
+    ports:
+      - "127.0.0.1:${PEERGRAB_MYSQL_PORT:-3307}:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${PEERGRAB_MYSQL_PASSWORD:-peergrab123456}
+      MYSQL_DATABASE: peer_grab
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      # RC 隔离级别：本项目写操作都是带条件的点更新，不依赖可重复读。
+      # RC 下没有间隙锁，能显著降低并发更新的锁冲突与死锁概率。
+      - --transaction-isolation=READ-COMMITTED
+      - --max_connections=500
+      - --innodb_buffer_pool_size=512M
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - peergrab-mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_ROOT_PASSWORD}\" mysql -h 127.0.0.1 -uroot -N -e 'SELECT 1' >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7.4-alpine
+    ports:
+      - "127.0.0.1:${PEERGRAB_REDIS_PORT:-6380}:6379"
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - peergrab-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # ---------- P2 新增：RocketMQ 5.x ----------
+  # 只有 5.x 客户端支持任意时间定时消息（setDeliveryTimestamp）；
+  # 4.x 的 remoting 客户端只有 18 个固定 delay level，满足不了"5 分钟后精确投递"。
+  rmqnamesrv:
+    image: apache/rocketmq:5.3.1
+    command: sh mqnamesrv
+    ports:
+      - "127.0.0.1:${PEERGRAB_RMQ_NAMESRV_PORT:-9876}:9876"
+    environment:
+      # 官方镜像默认 -Xms8g -Xmx8g，本机内存吃紧必须覆盖，否则容器直接起不来。
+      # 这是接入 RocketMQ 最容易踩的第一个坑。
+      JAVA_OPT_EXT: "-server -Xms256m -Xmx256m -Xmn128m"
+    healthcheck:
+      # 镜像里没有 netstat/ss/curl，只能用 ps 判进程存活。
+      # 这不检查端口，但足以区分"进程挂了"和"还在启动"；用 [N] 技巧避免 grep 匹配到自己。
+      test: ["CMD-SHELL", "ps -ef | grep -q '[N]amesrvStartup'"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+  # Docker creates a fresh named volume as root, while the RocketMQ image runs as uid 3000.
+  # Initialize ownership before the broker opens its commitlog and timer store.
+  rmq-store-init:
+    image: redis:7.4-alpine
+    user: "0:0"
+    entrypoint: ["sh", "-c"]
+    command: ["chown -R 3000:3000 /home/rocketmq/store"]
+    volumes:
+      - peergrab-rmq-broker-store:/home/rocketmq/store
+
+  rmqbroker:
+    image: apache/rocketmq:5.3.1
+    # --enable-proxy 让 broker 同时启动 gRPC proxy(8081)，5.x 客户端走它
+    command: sh mqbroker -n rmqnamesrv:9876 --enable-proxy
+    depends_on:
+      rmqnamesrv:
+        condition: service_started
+      rmq-store-init:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:${PEERGRAB_RMQ_BROKER_PORT:-10911}:10911"
+      - "127.0.0.1:${PEERGRAB_RMQ_FAST_PORT:-10909}:10909"
+      - "127.0.0.1:${PEERGRAB_RMQ_PROXY_PORT:-8081}:8081"
+    environment:
+      JAVA_OPT_EXT: "-server -Xms512m -Xmx512m -Xmn256m"
+      # macOS 上不配这个，客户端会拿到容器内网 IP 而连不上 broker
+      BROKER_IP1: ${PEERGRAB_RMQ_ADVERTISED_IP:-127.0.0.1}
+    volumes:
+      - peergrab-rmq-broker-store:/home/rocketmq/store
+    healthcheck:
+      # 注意：--enable-proxy 模式下进程名是 ProxyStartup 而不是 BrokerStartup，
+      # 按 BrokerStartup 匹配会让容器永远 unhealthy（实测踩过）
+      test: ["CMD-SHELL", "ps -ef | grep -qE '[P]roxyStartup|[B]rokerStartup'"]
+      interval: 10s
+      timeout: 5s
+      retries: 9
+      start_period: 60s
+
+volumes:
+  peergrab-mysql-data:
+  peergrab-redis-data:
+  peergrab-rmq-broker-store:

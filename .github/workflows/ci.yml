@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: 'peergrab-backend/**/pom.xml'
+      - name: Unit tests
+        run: mvn -B -ntp test
+        working-directory: peergrab-backend
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: peergrab-frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+        working-directory: peergrab-frontend
+      - name: Build
+        run: npm run build
+        working-directory: peergrab-frontend
+
+  compose-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate full Compose config
+        run: docker compose -f docker-compose.yaml -f docker-compose.full.yaml config --quiet
+        working-directory: peergrab-backend/docker
+        env:
+          PEERGRAB_AUTH_DEMO_PASSWORD_1001: ci-only-1001
+          PEERGRAB_AUTH_DEMO_PASSWORD_2001: ci-only-2001
+          PEERGRAB_AUTH_DEMO_PASSWORD_2002: ci-only-2002
+          PEERGRAB_AUTH_DEMO_PASSWORD_9001: ci-only-9001

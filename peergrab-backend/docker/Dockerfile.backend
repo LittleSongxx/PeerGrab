@@ -1,0 +1,22 @@
+# syntax=docker/dockerfile:1
+FROM maven:3.9-eclipse-temurin-21 AS build
+WORKDIR /workspace
+COPY . .
+RUN --mount=type=cache,target=/root/.m2,sharing=locked \
+    mvn -B -ntp -Dmaven.test.skip=true -pl peergrab-bootstrap,peergrab-worker -am package
+
+FROM eclipse-temurin:21-jre-alpine AS runtime
+RUN apk add --no-cache curl \
+    && addgroup -S peergrab \
+    && adduser -S -G peergrab peergrab
+WORKDIR /app
+USER peergrab
+
+FROM runtime AS app
+COPY --from=build --chown=peergrab:peergrab /workspace/peergrab-bootstrap/target/peergrab-bootstrap-1.0.0-SNAPSHOT.jar /app/app.jar
+EXPOSE 8080
+ENTRYPOINT ["java", "-jar", "/app/app.jar"]
+
+FROM runtime AS worker
+COPY --from=build --chown=peergrab:peergrab /workspace/peergrab-worker/target/peergrab-worker-1.0.0-SNAPSHOT.jar /app/worker.jar
+ENTRYPOINT ["java", "-jar", "/app/worker.jar"]

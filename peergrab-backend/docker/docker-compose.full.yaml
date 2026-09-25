@@ -1,0 +1,98 @@
+# 与 docker-compose.yaml 叠加：
+# docker compose -f docker-compose.yaml -f docker-compose.full.yaml --env-file .env up -d --build
+services:
+  rmqbroker:
+    environment:
+      # 容器内应用通过此服务名访问 broker；本机开发模式仍使用基础文件的 127.0.0.1。
+      BROKER_IP1: rmqbroker
+
+  mq-init:
+    image: apache/rocketmq:5.3.1
+    volumes:
+      - ./init-mq-container.sh:/init-mq-container.sh:ro
+    command: ["sh", "/init-mq-container.sh"]
+    depends_on:
+      rmqbroker:
+        condition: service_started
+    restart: "no"
+
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+      target: app
+    ports:
+      - "127.0.0.1:${PEERGRAB_API_PORT:-28080}:8080"
+    environment:
+      JAVA_TOOL_OPTIONS: -Xms128m -Xmx768m
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/peer_grab?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai&rewriteBatchedStatements=true
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: ${PEERGRAB_MYSQL_PASSWORD:-peergrab123456}
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      PEERGRAB_MQ_ENDPOINTS: rmqbroker:8081
+      PEERGRAB_MQ_ENABLED: "true"
+      PEERGRAB_WORKER_ID: 1
+      PEERGRAB_AUTH_MODE: ${PEERGRAB_AUTH_MODE:-session}
+      PEERGRAB_AUTH_JWT_SECRET: ${PEERGRAB_AUTH_JWT_SECRET:-}
+      PEERGRAB_WEB_CORS_ORIGINS: http://127.0.0.1:${PEERGRAB_WEB_PORT:-25173},http://localhost:${PEERGRAB_WEB_PORT:-25173},http://127.0.0.1:5173,http://localhost:5173
+      PEERGRAB_AUTH_ALLOW_HEADER_IDENTITY: "false"
+      PEERGRAB_AUTH_DEMO_ENABLED: "true"
+      PEERGRAB_AUTH_DEMO_PASSWORD_1001: ${PEERGRAB_AUTH_DEMO_PASSWORD_1001:?Set PEERGRAB_AUTH_DEMO_PASSWORD_1001 in docker/.env}
+      PEERGRAB_AUTH_DEMO_PASSWORD_2001: ${PEERGRAB_AUTH_DEMO_PASSWORD_2001:?Set PEERGRAB_AUTH_DEMO_PASSWORD_2001 in docker/.env}
+      PEERGRAB_AUTH_DEMO_PASSWORD_2002: ${PEERGRAB_AUTH_DEMO_PASSWORD_2002:?Set PEERGRAB_AUTH_DEMO_PASSWORD_2002 in docker/.env}
+      PEERGRAB_AUTH_DEMO_PASSWORD_9001: ${PEERGRAB_AUTH_DEMO_PASSWORD_9001:?Set PEERGRAB_AUTH_DEMO_PASSWORD_9001 in docker/.env}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mq-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 90s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+      target: worker
+    environment:
+      JAVA_TOOL_OPTIONS: -Xms128m -Xmx512m
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/peer_grab?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: ${PEERGRAB_MYSQL_PASSWORD:-peergrab123456}
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      PEERGRAB_MQ_ENDPOINTS: rmqbroker:8081
+      PEERGRAB_MQ_ENABLED: "true"
+      PEERGRAB_WORKER_ID: 2
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mq-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ../../peergrab-frontend
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:${PEERGRAB_WEB_PORT:-25173}:80"
+    depends_on:
+      app:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
