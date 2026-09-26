@@ -59,6 +59,31 @@ mvn -B -ntp -pl peergrab-bench exec:java \
   -Dexec.args="$PEERGRAB_BENCH_BASE_URL 1 1 2 8 5000"
 ```
 
+ECS 同机首轮可在**全新独立栈完成至少 10,000 条 S2 造数和 Maven 编译后**运行：
+
+```bash
+python3 bench/scripts/seed_bench.py s2 --count 10000
+python3 bench/scripts/run_first_round.py --dry-run
+python3 bench/scripts/run_first_round.py
+# 完成低档位后，可在同样的安全门禁下单独运行有限的更高档位：
+python3 bench/scripts/run_first_round.py --rates 40,80,160
+```
+
+执行器默认只向预检通过的回环 API 发 5/10/20 offered RPS；`--rates` 仅允许从 5/10/20/40/80/160/320 中选择不超过三个递增档位。客户端 `--max-in-flight` 默认 32，仅可选 32/64/128；对照轮必须保持同一设置。每档预热 10 秒、采样 30 秒；并行采集容器与宿主机资源。每档前后以低频 GET 检查公开站 `/api/health`；公开站异常或响应明显变慢、宿主机可用内存低于 3 GiB、连续两次 CPU 超过 85%、iowait 超过 10%、资源采集失效或 `bench_run.status` 非 `PASS` 均停止后续档位。独立目录 `bench/runs/first-round-*` 保存每档日志、资源 JSONL、run ID、状态、摘要和停止原因。此轮是同机有限档位试跑，不能当作异机容量结论。
+
+S2 是只读场景，线程池消融可在**同一个已验证的隔离项目**保留相同数据库、Worker 和种子，仅重建隔离 app；脚本会核对所有 Compose 叠加文件与 CPU/内存配额，失败时恢复原始配置。ECS 专用资源限制叠加文件属于本机文件，不提交到仓库：
+
+```bash
+python3 bench/scripts/run_s2_ablations.py \
+  --env-file "$PWD/docker/.env.bench.trial01" \
+  --compose-overlay "$PWD/docker/docker-compose.bench.ecs.yaml" --rate 80 --dry-run
+python3 bench/scripts/run_s2_ablations.py \
+  --env-file "$PWD/docker/.env.bench.trial01" \
+  --compose-overlay "$PWD/docker/docker-compose.bench.ecs.yaml" --rate 80 --no-warm-round
+```
+
+默认顺序为 Hikari/Tomcat `20/200 → 8/200 → 20/200 → 20/64 → 20/200`；每次先做 20/80 RPS 预热爬坡，再测两轮 80 RPS、`maxInFlight=64`。若实际栈没有第四个 Compose 文件，省略 `--compose-overlay`。S1、S3、S4、S5 的写入或缓存状态对照仍需新卷。
+
 其他入口：`SpikeLoadClient <baseUrl> <concurrency> <slotTotal>`、`RampLoadClient <baseUrl> <concurrencyCsv> <stageSeconds>`、`CacheLoadClient <a|b|c|d> <baseUrl>`、`FundsHttpLoadClient <baseUrl> <distinctCount> <concurrency> [sameTaskAttempts] [timeoutMillis]`。S4 和 S5 的客户端均自行造数；旧 `seed.sql`、`seed_s4.sql`、`seed_s5.sql` 已禁用。S5 的 Worker 到期配置必须与探针命令一致。
 
 ## 采集与对比
