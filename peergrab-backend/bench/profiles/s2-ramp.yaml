@@ -17,7 +17,7 @@ outputs:
   bench_run:
     scenario: S2
     summary_fields: [stage, requests, errors, qps, p50Ms, p95Ms, p99Ms, maxMs]
-  report: bench/reports/report-P7-<timestamp>.md
+  report: bench/reports/peergrab-current/report-P7-<timestamp>.md
 environment:
   app: JDK 21 / Spring Boot 3.5.8 / 单实例
   mysql: 8.0.40 (docker, RC 隔离级别, 3307)

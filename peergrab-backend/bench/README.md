@@ -2,6 +2,8 @@
 
 这些工具只用于**可销毁的独立压测栈**。同机客户端要求本地 Docker 预检；异机 S2 客户端先通过 SSH 核对 ECS 的隔离栈，再走回环隧道或经身份校验的临时 HTTPS 白名单路由。公开演示库与旧项目卷绝不能作为压测目标。
 
+原版历史报告与 PeerGrab 当前实测分开存放，见[评测报告索引](reports/README.md)。
+
 ## 建立隔离栈
 
 需要 Java 21、Maven、Python 3、Docker Compose 2.24.4+。以下命令在仓库根目录执行。每一轮使用新的 `peergrab-bench-*` 项目名和新的 env 文件；生成器会创建随机口令、独立端口和权限为 `0600` 的文件。
@@ -129,7 +131,7 @@ python3 peergrab-backend/bench/scripts/run_remote_s2.py \
 
 客户端在每档之前、预热之后、档位之后及运行中每 10 秒重验远端容器、卷、数据库标记与回环绑定；检测到身份变化即停止。SSH `-L` 只把本机随机回环端口转给经验证的 ECS 回环 API，**无需新增安全组端口**。`--direct --direct-base-url https://www.peergrab.cn/__bench_<随机前缀>/` 可在有备份、仅允许发压机 IP、仅开放登录和列表两个精确路径的临时 HTTPS 代理上发压；脚本会先把公网列表 ID 与经 SSH 核对的隔离库 ID 比较。该路由测后必须删除，生产配置不能指向压测库。逐档升压；首档出现 5xx、业务错误、超时、网络异常、发压端在途名额拒载或采样窗口完成率低于 95% 即停止。结果保存每秒原始计数、`okPerSecInWindow`（成功 API QPS）、成功请求及全部尝试的 P50/P95/P99、超时阈值、Python 与 SSH 进程 CPU、近似响应体 Mbps 到 `bench/runs/`。密码和令牌只存在内存中，不写入结果。
 
-判读拐点时，`schedulerMissed` 是客户端未按时送出的请求，`capacityRejected` 是本地 `maxInFlight` 拒载，两者都不能算服务端失败。只有按时送出的请求仍持续积压，才能把吞吐平台和 P99 上升作为服务端拐点。同步采 ECS 的整机 CPU、网卡、容器 CPU、数据库活跃连接与线程；与当轮带宽上限比较，`responseMbpsInWindowApprox` 只是响应体近似值。SSH 加密会占用 ECS CPU，因此 SSH 隧道轮与直连 HTTPS 轮不得混算容量。[2026-09-26 ECS 极限轮](reports/report-ecs-max-20260926.md)记录当日配置和结果。
+判读拐点时，`schedulerMissed` 是客户端未按时送出的请求，`capacityRejected` 是本地 `maxInFlight` 拒载，两者都不能算服务端失败。只有按时送出的请求仍持续积压，才能把吞吐平台和 P99 上升作为服务端拐点。同步采 ECS 的整机 CPU、网卡、容器 CPU、数据库活跃连接与线程；与当轮带宽上限比较，`responseMbpsInWindowApprox` 只是响应体近似值。SSH 加密会占用 ECS CPU，因此 SSH 隧道轮与直连 HTTPS 轮不得混算容量。[2026-09-26 ECS 极限轮](reports/peergrab-current/report-ecs-max-20260926.md)记录当日配置和结果。
 
 `run_remote_s2_vegeta.py` 提供另一个固定到达率发压器，默认只做隔离栈和临时路由的身份预检；真正发压还要求 `--execute --confirm-project <隔离项目名>`。它只保存汇总 JSON，`status=0` 统计为无 HTTP 响应，不能算 HTTP 200 或应用 5xx。长档应同时报告采样秒数和全部错误数。
 

@@ -1,0 +1,131 @@
+{
+  "schemaVersion": 1,
+  "project": "PeerGrab",
+  "series": "peergrab-ecs-2026-09-26",
+  "provenance": "PeerGrab measurements on the owner's Alibaba Cloud ECS; separate from archived original-project experiments",
+  "measurementDatesLocal": ["2026-09-26", "2026-09-27"],
+  "source": {
+    "ecsBenchCheckoutBaseCommit": "1d26dd2970fed5f62116af805e331251e3047cc4",
+    "ecsBenchCheckoutHadUncommittedToolChanges": true,
+    "finalRepositoryCommitContainingToolChangesAndReport": "5bdb73980341ca77be5d0f2776a4150e3356097f",
+    "note": "The final commit was created after the measurements. The source hashes below identify the measurement tools now in that commit; the ECS-side tool changes were checked against the ECS checkout and matched. External load generators ran on a separate workstation. The application and worker ran from the separately identified container images."
+  },
+  "environment": {
+    "platform": "Alibaba Cloud ECS, Hong Kong",
+    "vcpus": 4,
+    "publicBandwidthMbpsAtPrimaryMeasurements": 50,
+    "earlierExploratoryMeasurementsMayUse10Mbps": true,
+    "productionStoppedDuringMaxCampaign": true,
+    "loadTarget": "disposable isolated PeerGrab stack with separate MySQL, Redis, RocketMQ and volumes",
+    "appAndDatabaseDockerCpuHardLimits": false,
+    "appImageSha256": "0fe9d367862f5942e7eca97150cf39dfb0497892d51e9743e4a6440641ce1273",
+    "workerImageSha256": "a525c1d220c18bf5348f403ef0fd5dc45ec1e42971c2cf4d0cda78a6e59a8782"
+  },
+  "privateEvidenceArchive": {
+    "pathRelativeToThisManifest": "../../runs/ecs-max-evidence-20260926.tar.gz",
+    "sha256": "9995339a36d9106a917d08875825a4203d3bced44adc1a2d5a3948b0e128b7c9",
+    "gitIgnored": true,
+    "ecsPrivateReplicaVerifiedSameSha256": true,
+    "fileCount": 100,
+    "nestedS2ResourcesArchive": {
+      "pathInsideArchive": "ecs-max-s2-resources.tar.gz",
+      "sha256": "222de47a595b3db02a6e648e35f979833c8fc5414e6e32edd932dde1d6dfc0ab"
+    }
+  },
+  "workloads": [
+    {
+      "scenario": "S2 isolated app route",
+      "request": "authenticated first page of published errands, 20 rows from a 10000-row published seed",
+      "model": "external fixed-arrival HTTP/1.1 via HTTPS",
+      "measurementWindowSeconds": 60,
+      "keyRawFiles": [
+        "external-s2-vegeta-20260926T132139Z.json",
+        "external-s2-vegeta-20260926T132549Z.json",
+        "external-s2-vegeta-20260926T131911Z.json",
+        "ecs-max-s2-resources.tar.gz"
+      ],
+      "interpretation": "700 offered QPS passed a 60-second zero-error round; 720 QPS varied between rounds and 750 QPS showed growing tail latency and no-response errors. This is one read endpoint, not overall business capacity."
+    },
+    {
+      "scenario": "S2 complete public proxy path",
+      "request": "authenticated first page of published errands, 20 rows from the same isolated seed",
+      "model": "external fixed-arrival HTTP/1.1 via Host Nginx, frontend Nginx and app",
+      "measurementWindowSeconds": [60, 180],
+      "keyRawFiles": [
+        "external-s2-vegeta-20260926T140638Z.json",
+        "external-s2-vegeta-20260926T141355Z.json",
+        "external-s2-vegeta-20260926T141733Z.json",
+        "external-s2-vegeta-20260926T142611Z.json",
+        "external-s2-vegeta-20260926T143042Z.json",
+        "ecs-max-s2-resources.tar.gz"
+      ],
+      "keyResult": "450 offered QPS, 81000/81000 HTTP 200 over 180 seconds, P99 169.4 ms; at 500 offered QPS over 180 seconds, 6 of 90000 requests had no HTTP response",
+      "interpretation": "The sustained zero-error observation applies only to this request, seed, path and three-minute window."
+    },
+    {
+      "scenario": "S2 proxy connection reuse and Hikari/Tomcat ablations",
+      "measurementWindowSeconds": 60,
+      "keyRawFiles": [
+        "external-s2-vegeta-20260926T142026Z.json",
+        "external-s2-vegeta-20260926T142333Z.json",
+        "external-s2-vegeta-20260926T133512Z.json",
+        "external-s2-vegeta-20260926T134831Z.json",
+        "external-s2-vegeta-20260926T135653Z.json",
+        "ecs-max-s2-resources.tar.gz"
+      ],
+      "interpretation": "Connection reuse had a repeated full-path A/B/A benefit; single warm-state Hikari/Tomcat rounds do not establish a reliable ranking."
+    },
+    {
+      "scenario": "S4 settlement and S1 same-task grab spike",
+      "model": "finite write batches with database correctness checks",
+      "keyRawFiles": ["s1-s4-maint-20260926T144639Z/manifest.json", "ecs-max-s1-s4-resources.jsonl"],
+      "benchRunIds": {
+        "s4-20-4": "20260926-224644",
+        "s4-50-8": "20260926-224715",
+        "s4-100-16": "20260926-224750",
+        "s1-16": "20260926-224838",
+        "s1-64": "20260926-224903",
+        "s1-128": "20260926-224933"
+      },
+      "interpretation": "S4 TPS counts durable settlements. S1 spike request count divided by elapsed time is not steady-state QPS."
+    },
+    {
+      "scenario": "S3 detail cache on/off",
+      "model": "two finite closed-loop batches of 5000 reads per isolated cache configuration",
+      "keyRawFiles": [
+        "peergrab-bench-s3a0926/runs.tsv",
+        "peergrab-bench-s3b0926/runs.tsv",
+        "peergrab-bench-s3a0926/resources.jsonl",
+        "peergrab-bench-s3b0926/resources.jsonl"
+      ],
+      "benchRunIds": ["20260926-230112", "20260926-230153", "20260926-230858", "20260926-230936"],
+      "interpretation": "Closed-loop completion RPS is not a fixed-arrival capacity ceiling."
+    },
+    {
+      "scenario": "S5 natural expiration by MQ or fallback scan",
+      "model": "1000 and 5000 future-due tasks in separate disposable stacks; latency measured from due time to durable database transition",
+      "keyRawFiles": [
+        "peergrab-bench-s5mq0926/s5-completions.json",
+        "peergrab-bench-s5fallback0926/s5-completions.json",
+        "peergrab-bench-s5mq5k0926/s5-completions.json",
+        "peergrab-bench-s5scan5k0926/s5-completions.json"
+      ],
+      "benchRunIds": ["20260926-151630", "20260926-232728", "20260926-153841", "20260926-235112"],
+      "interpretation": "MQ and scan are different exclusive processing mechanisms, not a single-variable speedup experiment."
+    }
+  ],
+  "sourceFileSha256": {
+    "bench/scripts/run_remote_s2_vegeta.py": "974ea1e2e48a8e2a6fa410332e5c0157bf11a7c36c528ce7d2c00028a019e21f",
+    "bench/scripts/run_remote_s2.py": "67dc9ab0af3b414b66995a0ae675145774eb8f0973e4a5eb19c2f0ae9afe237e",
+    "bench/scripts/collect_metrics.py": "14a08bb2cc69968a9fc6f63707175d7536019fbf649bc7f5af9df9f734ee1afd",
+    "bench/scripts/run_s2_knee.py": "247ab9c0afa23f6582274de35b0dec016c9090ffe71d00893bd35c590cacd8e3",
+    "bench/scripts/run_s1_s4_maintenance.py": "467314df4e48380b0a3def04dcf7c4589a3a518686d405d72349d416ace0b695",
+    "bench/scripts/preflight.py": "fb8a05861c718e4fa1c66e0f44febc4106856660da86ce1e81722b5350c0d0f6",
+    "bench/scripts/run_mq_probe.py": "2e9b73de6e3e5593c27add9b571a80199313131e253fd9723abe57a8a3d3508c",
+    "bench/scripts/set_s2_near_knee_variant.py": "99c98cb2d7590b15dad9dc82e1e9c20f2ae506b1d573ac41e364afed9342d178",
+    "bench/scripts/start_s2_fullpath_frontend.py": "6746d50af01156816205dc74a69b165f9810f458df2f927db6daf1fd931194d9",
+    "peergrab-bench/src/main/java/com/peergrab/bench/BenchSafety.java": "fb86215f515944c2e8144f2f2ece1f1f14d2133479b4bfea347a8cc21bc24df4",
+    "peergrab-bench/src/main/java/com/peergrab/bench/CacheLoadClient.java": "6cad3128f41fc0ed3746f170fa026e90c98c7a7beea95b2176cb192b20ae0074",
+    "peergrab-bench/src/main/java/com/peergrab/bench/S5TimelineProbe.java": "07ce7fe51d56845586b8e276f8302b0bbaf049e9cbd3fea1bd92cfc8959244be"
+  }
+}

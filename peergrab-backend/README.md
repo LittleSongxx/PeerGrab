@@ -84,6 +84,6 @@ docker compose -f docker/docker-compose.yaml --env-file docker/.env exec -T mysq
 
 ## 实验记录与边界
 
-[2026-09-26 阿里云 ECS 实测](bench/reports/report-ecs-max-20260926.md)记录 4 vCPU、50 Mbps 下的任务广场拐点、完整公网代理路径、资金结算 TPS、抢单正确性、缓存和自然到期结果；每项均注明工作负载与采样时长。[旧版 P6/P7 报告](bench/reports/report-P6-P7-20260822-complete.md)与 [2026-09-25 冒烟](bench/reports/smoke-20260925-current.md)属于不同环境的历史证据。复测从[压测运行手册](bench/README.md)建立独立环境；造数、加压和 `cleanup.sh` 不得作用于演示库。
+[2026-09-26 阿里云 ECS 实测](bench/reports/peergrab-current/report-ecs-max-20260926.md)记录 4 vCPU、50 Mbps 下的任务广场拐点、完整公网代理路径、资金结算 TPS、抢单正确性、缓存和自然到期结果；每项均注明工作负载与采样时长。[旧版 P6/P7 报告](bench/reports/original-project/report-P6-P7-20260822-complete.md)与 [2026-09-25 冒烟](bench/reports/peergrab-current/smoke-20260925-current.md)属于不同环境的历史证据。复测从[压测运行手册](bench/README.md)建立独立环境；造数、加压和 `cleanup.sh` 不得作用于演示库。
 
 当前公开 API 限制 `slotTotal=1`；Redis 或 MQ 故障注入后的完整性能恢复、多库资金方案仍待验证。ES/Canal 已退出运行架构，缓存一致性靠失效、TTL 与校验任务，不使用 binlog 秒级纠偏。[设计演进](docs/设计演进记录.md)、[分片取舍](docs/数据库分片相关思考.md)和[压测实验方案](docs/压测方案与容量评估.md)保存了相关设计和历史证据。

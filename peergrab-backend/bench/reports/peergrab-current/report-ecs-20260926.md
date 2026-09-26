@@ -93,8 +93,8 @@ S1 是同一任务的瞬时竞争；`请求数 ÷ 爆发耗时` **不是稳态 Q
 ## 结论与证据
 
 - 当前配置下，**详情缓存开关**的热状态效果最明显；Hikari 20→8 与 Tomcat 200→64 在 80 RPS 首屏查询中没有可信的性能收益。
-- [S2 列表查询](../../peergrab-infrastructure/src/main/java/com/peergrab/infrastructure/persistence/JdbcErrandQueryAdapter.java)直接读 MySQL，[S3 详情查询](../../peergrab-application/src/main/java/com/peergrab/application/usecase/query/GetErrandDetailUseCase.java)才经过缓存，不能拿 S2 做缓存消融。
-- S4 的[共享钱包过账](../../peergrab-application/src/main/java/com/peergrab/application/usecase/WalletPosting.java)、S5 的[顺序批处理扫描](../../peergrab-worker/src/main/java/com/peergrab/worker/TimeoutScanJob.java)与 CPU 配额，比盲目加大线程池更值得下一轮测量。
+- [S2 列表查询](../../../peergrab-infrastructure/src/main/java/com/peergrab/infrastructure/persistence/JdbcErrandQueryAdapter.java)直接读 MySQL，[S3 详情查询](../../../peergrab-application/src/main/java/com/peergrab/application/usecase/query/GetErrandDetailUseCase.java)才经过缓存，不能拿 S2 做缓存消融。
+- S4 的[共享钱包过账](../../../peergrab-application/src/main/java/com/peergrab/application/usecase/WalletPosting.java)、S5 的[顺序批处理扫描](../../../peergrab-worker/src/main/java/com/peergrab/worker/TimeoutScanJob.java)与 CPU 配额，比盲目加大线程池更值得下一轮测量。
 - 生产健康检查在压测前后均返回 200；S5 一轮结束时出现过一次 684 ms 的健康响应，随后连续 10 次均恢复至约 40–80 ms。没有直接向公开域名发压。
 - 所有一次性压测容器与专属卷已核对后销毁；最终 `docker compose ls` 只剩 `peergrab-prod`，生产镜像和数据库未替换。
 

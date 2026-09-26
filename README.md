@@ -54,6 +54,8 @@ API 与 Worker 复用应用用例；领域层定义状态规则和端口，基�
 | 后端 | Java 21 · Spring Boot 3.5.8 · Maven |
 | 数据与消息 | MySQL 8 · Redis 7 · RocketMQ 5 |
 
+[PeerGrab ECS 实测与原版历史评测](peergrab-backend/bench/reports/README.md)按来源分别归档。
+
 ## 快速开始
 
 需要 Docker 与 Compose v2：
