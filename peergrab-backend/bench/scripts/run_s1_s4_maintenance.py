@@ -25,7 +25,8 @@ import preflight
 BACKEND = Path(__file__).resolve().parents[2]
 SCRIPTS = Path(__file__).resolve().parent
 RUNS = BACKEND / "bench" / "runs"
-PROJECT = "peergrab-bench-max0926"
+DEFAULT_PROJECT = "peergrab-bench-max0926"
+BENCH_PROJECT = re.compile(r"peergrab-bench-[a-z0-9][a-z0-9_-]*\Z")
 SEED_FIRST = 930000000001
 SEED_LAST = 930000010000
 RUN_ID = re.compile(r"\brunId=(\d{8}-\d{6}(?:-\d+)?)\b")
@@ -86,9 +87,16 @@ def resource_gate():
         raise Stopped("Docker data disk has less than 5 GiB free")
 
 
-def identity():
+def selected_project():
+    project = os.environ.get("PEERGRAB_BENCH_PROJECT", DEFAULT_PROJECT)
+    if not BENCH_PROJECT.fullmatch(project):
+        raise Stopped("PEERGRAB_BENCH_PROJECT must be a peergrab-bench-* project name")
+    return project
+
+
+def identity(project):
     ids = command("docker", "ps", "-aq", "--no-trunc", "--filter",
-                  f"label=com.docker.compose.project={PROJECT}").splitlines()
+                  f"label=com.docker.compose.project={project}").splitlines()
     if not ids or not all(re.fullmatch(r"[a-f0-9]{64}", value) for value in ids):
         raise Stopped("Benchmark container IDs are absent or abbreviated")
     return sorted(ids)
@@ -97,16 +105,16 @@ def identity():
 def checked_stack(base_url, initial_ids=None):
     production_stopped()
     resource_gate()
-    project = os.getenv("PEERGRAB_BENCH_PROJECT")
+    project = selected_project()
     host = os.getenv("PEERGRAB_TEST_DB_HOST")
     port = os.getenv("PEERGRAB_TEST_DB_PORT")
-    if project != PROJECT or os.getenv("COMPOSE_PROJECT_NAME") != PROJECT:
-        raise Stopped(f"Only the existing {PROJECT} project is permitted")
+    if os.getenv("COMPOSE_PROJECT_NAME") != project:
+        raise Stopped("COMPOSE_PROJECT_NAME must match PEERGRAB_BENCH_PROJECT")
     if not all((os.getenv("PEERGRAB_TEST_DB_PASSWORD"),
                 os.getenv("PEERGRAB_AUTH_JWT_SECRET"))):
         raise Stopped("Benchmark database password or JWT secret is missing")
     stack = preflight.check(project, base_url, host, port)
-    ids = identity()
+    ids = identity(project)
     if initial_ids is not None and ids != initial_ids:
         raise Stopped("Benchmark container set changed during the run")
     return stack, ids
@@ -325,11 +333,12 @@ def main():
     os.umask(0o077)
     base_url = os.getenv("PEERGRAB_BENCH_BASE_URL", "")
     try:
+        project = selected_project()
         stack, initial_ids = checked_stack(base_url)
         baseline = snapshot(stack["mysql_container_id"])
         fixture_gate(baseline, baseline)
         if args.dry_run:
-            print(json.dumps({"project": PROJECT, "baseUrl": base_url,
+            print(json.dumps({"project": project, "baseUrl": base_url,
                               "s2Rows": baseline["s2Rows"],
                               "s2Sha256": baseline["s2Sha256"],
                               "walletTotal": baseline["walletTotal"],
@@ -339,7 +348,7 @@ def main():
             return 0
         output = RUNS / ("s1-s4-maint-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
         output.mkdir(parents=True, mode=0o700)
-        manifest = {"project": PROJECT, "baseUrl": base_url,
+        manifest = {"project": project, "baseUrl": base_url,
                     "startedAtUtc": datetime.now(timezone.utc).isoformat(),
                     "status": "RUNNING", "baseline": baseline, "stages": []}
         write_manifest(output / "manifest.json", manifest)

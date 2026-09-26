@@ -1,5 +1,8 @@
 """Offline gates for the maintenance-only S1/S4 runner."""
 
+from contextlib import redirect_stdout
+from io import StringIO
+import json
 from pathlib import Path
 import sys
 import unittest
@@ -17,6 +20,51 @@ BASE = {"s2Rows": 10000, "s2Published": 10000, "s2Sha256": "a" * 64,
 
 
 class MaintenanceRunnerTest(unittest.TestCase):
+    def test_project_defaults_to_legacy_stack_and_accepts_new_disposable_stack(self):
+        with patch.dict(runner.os.environ, {}, clear=True):
+            self.assertEqual(runner.selected_project(), "peergrab-bench-max0926")
+        with patch.dict(runner.os.environ,
+                        {"PEERGRAB_BENCH_PROJECT": "peergrab-bench-8cpu0927"}, clear=True):
+            self.assertEqual(runner.selected_project(), "peergrab-bench-8cpu0927")
+
+    def test_project_rejects_production_and_unsafe_names(self):
+        for project in ("", "peergrab-prod", "peergrab-bench-", "PeerGrab-bench-test",
+                        "peergrab-bench-test;rm", "peergrab-bench-../other",
+                        "peergrab-bench-test\nother"):
+            with self.subTest(project=project), patch.dict(
+                    runner.os.environ, {"PEERGRAB_BENCH_PROJECT": project}, clear=True):
+                with self.assertRaisesRegex(runner.Stopped, "peergrab-bench-\\*"):
+                    runner.selected_project()
+
+    def test_checked_stack_uses_only_matching_disposable_project(self):
+        project = "peergrab-bench-8cpu0927"
+        variables = {"PEERGRAB_BENCH_PROJECT": project,
+                     "COMPOSE_PROJECT_NAME": project,
+                     "PEERGRAB_TEST_DB_HOST": "127.0.0.1",
+                     "PEERGRAB_TEST_DB_PORT": "33307",
+                     "PEERGRAB_TEST_DB_PASSWORD": "private",
+                     "PEERGRAB_AUTH_JWT_SECRET": "private"}
+        with patch.dict(runner.os.environ, variables, clear=True), \
+             patch.object(runner, "production_stopped"), \
+             patch.object(runner, "resource_gate"), \
+             patch.object(runner.preflight, "check", return_value={"mysql_container_id": "id"}) as check, \
+             patch.object(runner, "command", return_value="a" * 64) as command:
+            _, ids = runner.checked_stack("http://127.0.0.1:38080")
+            self.assertEqual(ids, ["a" * 64])
+            check.assert_called_once_with(project, "http://127.0.0.1:38080",
+                                          "127.0.0.1", "33307")
+            self.assertEqual(command.call_args.args[-1],
+                             "label=com.docker.compose.project=" + project)
+        with patch.dict(runner.os.environ,
+                        {**variables, "COMPOSE_PROJECT_NAME": "peergrab-bench-other"},
+                        clear=True), \
+             patch.object(runner, "production_stopped"), \
+             patch.object(runner, "resource_gate"), \
+             patch.object(runner.preflight, "check") as check:
+            with self.assertRaisesRegex(runner.Stopped, "must match"):
+                runner.checked_stack("http://127.0.0.1:38080")
+            check.assert_not_called()
+
     def test_workloads_put_funds_before_spike(self):
         self.assertEqual([stage[0] for stage in runner.STAGES],
                          ["s4-20-4", "s4-50-8", "s4-100-16",
@@ -76,12 +124,18 @@ class MaintenanceRunnerTest(unittest.TestCase):
 
     def test_dry_run_never_starts_maven_load(self):
         stack = {"mysql_container_id": "bench-mysql"}
-        with patch.dict(runner.os.environ, {"PEERGRAB_BENCH_BASE_URL": "http://127.0.0.1:38080"}), \
+        with patch.dict(runner.os.environ, {"PEERGRAB_BENCH_BASE_URL": "http://127.0.0.1:38080",
+                                           "PEERGRAB_BENCH_PROJECT": "peergrab-bench-8cpu0927"},
+                        clear=True), \
              patch.object(runner, "checked_stack", return_value=(stack, ["a" * 64])), \
              patch.object(runner, "snapshot", return_value=BASE), \
              patch.object(runner, "run_stage") as stage, \
              patch.object(sys, "argv", ["run_s1_s4_maintenance.py", "--dry-run"]):
-            self.assertEqual(runner.main(), 0)
+            output = StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(runner.main(), 0)
+            self.assertEqual(json.loads(output.getvalue())["project"],
+                             "peergrab-bench-8cpu0927")
             stage.assert_not_called()
 
 
