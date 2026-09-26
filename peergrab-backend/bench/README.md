@@ -114,7 +114,7 @@ python3 bench/scripts/collect_metrics.py \
 
 ## 异机 S2 固定到达率
 
-目标 ECS 为 4 vCPU、约 15 GiB 可见内存；公网带宽以每轮实测和云端配置为准，2026-09-26 极限轮升至 50 Mbps。先建立、预检和造数至少 10,000 条的**独立栈**；本机需有 Python 3、`aiohttp`、SSH 私钥及已核对的 ECS host key。先设置 `PEERGRAB_BENCH_SSH_HOST=user@host` 与 `PEERGRAB_BENCH_SSH_KEY=/path/to/key`，不要把个人主机或密钥路径写进仓库。以下命令在**发压工作站**执行，远端路径换成实际 checkout；`--dry-run` 只读预检和造数，不建立隧道、不登录、不发压。
+目标 ECS 为 4 vCPU、约 15 GiB 可见内存；公网带宽以每轮实测和云端配置为准，2026-09-26 极限轮升至 50 Mbps。先建立、预检和造数至少 10,000 条的**独立栈**；本机需有 Python 3、[Python 发压依赖](requirements.txt)、SSH 私钥及已核对的 ECS host key。先设置 `PEERGRAB_BENCH_SSH_HOST=user@host` 与 `PEERGRAB_BENCH_SSH_KEY=/path/to/key`，不要把个人主机或密钥路径写进仓库。以下命令在**发压工作站**执行，远端路径换成实际 checkout；`--dry-run` 只读预检和造数，不建立隧道、不登录、不发压。
 
 ```bash
 python3 peergrab-backend/bench/scripts/run_remote_s2.py \

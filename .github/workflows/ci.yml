@@ -83,7 +83,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Test benchmark safety and environment helpers
-        run: python3 -m unittest discover -s peergrab-backend/bench/scripts -p 'test_*.py'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/peergrab-bench-venv"
+          "$RUNNER_TEMP/peergrab-bench-venv/bin/python" -m pip install \
+            --disable-pip-version-check -r peergrab-backend/bench/requirements.txt
+          "$RUNNER_TEMP/peergrab-bench-venv/bin/python" -m unittest discover \
+            -s peergrab-backend/bench/scripts -p 'test_*.py'
       - name: Check benchmark shell syntax
         run: |
           bash -n peergrab-backend/bench/scripts/cleanup.sh
