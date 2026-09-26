@@ -44,9 +44,13 @@ sudo certbot certonly --webroot -w /var/www/letsencrypt \
   -d peergrab.cn -d www.peergrab.cn \
   --email '<你的邮箱>' --agree-tos --no-eff-email
 sudo install -m 644 nginx/peergrab.conf /etc/nginx/sites-available/peergrab.cn
+sudo install -m 644 nginx/peergrab-default-deny.conf /etc/nginx/sites-available/peergrab-default-deny.conf
+sudo ln -sfn /etc/nginx/sites-available/peergrab-default-deny.conf /etc/nginx/sites-enabled/peergrab-default-deny.conf
 sudo nginx -t
 sudo systemctl reload nginx
 ```
+
+默认站点拒绝未配置的域名，避免已移除项目的旧 DNS 记录落到 PeerGrab 页面。
 
 将下面的证书续期钩子保存到 `/etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh`，设为可执行；确认 Certbot 自动续期计时器启用，再运行 `sudo certbot renew --dry-run`。
 
