@@ -110,7 +110,7 @@ services:
       PEERGRAB_MQ_ENABLED: "true"
       PEERGRAB_WORKER_ID: 1
       PEERGRAB_AUTH_MODE: session
-      PEERGRAB_WEB_CORS_ORIGINS: https://peergrab.cn
+      PEERGRAB_WEB_CORS_ORIGINS: https://www.peergrab.cn
       PEERGRAB_AUTH_ALLOW_HEADER_IDENTITY: "false"
       PEERGRAB_AUTH_DEMO_ENABLED: "true"
       PEERGRAB_AUTH_DEMO_PASSWORD_1001: ${PEERGRAB_AUTH_DEMO_PASSWORD_1001:?Set a unique demo password in .env.prod}

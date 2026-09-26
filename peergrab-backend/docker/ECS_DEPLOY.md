@@ -1,10 +1,10 @@
-# peergrab.cn 单机部署
+# www.peergrab.cn 单机部署
 
 适用 Ubuntu 24.04、4 vCPU / 16 GiB 的 ECS。`docker-compose.prod.yaml` 是独立栈，不与本机的两个 Compose 文件叠加。MySQL、Redis、RocketMQ 和 API 只在 Docker 网络内；前端只绑定 ECS 的 `127.0.0.1:25173`，由宿主 Nginx 对外提供 80/443 和 HTTPS。
 
 ## 1. 准备
 
-- 在阿里云 DNS 为 `peergrab.cn` 和 `www.peergrab.cn` 设置 A 记录，均指向 ECS 当前公网 IP；确认解析生效。`www` 将跳转到根域。
+- 在阿里云 DNS 为 `peergrab.cn` 和 `www.peergrab.cn` 设置 A 记录，均指向 ECS 当前公网 IP；确认解析生效。根域将跳转到 `www`。
 - 安全组和主机防火墙允许 TCP 80/443。管理用 SSH 端口只向可信来源开放。确认 ECS 上 80/443 由宿主 Nginx 监听、25173 尚未占用，且磁盘有足够空间存储镜像和三个数据卷。
 - 安装 Docker Engine、Compose v2、Nginx 和 Certbot。已有其他站点时，先备份并按迁移安排处理其服务及虚拟主机，避免重复的 `server_name peergrab.cn`。
 
@@ -64,13 +64,13 @@ systemctl reload nginx
 ## 3. 验收与维护
 
 ```bash
-curl -fsS https://peergrab.cn/api/health
-curl -I https://peergrab.cn/
+curl -fsS https://www.peergrab.cn/api/health
 curl -I https://www.peergrab.cn/
+curl -I https://peergrab.cn/
 docker compose --env-file .env.prod -f docker-compose.prod.yaml ps
 docker compose --env-file .env.prod -f docker-compose.prod.yaml logs --tail=100 app worker
 ```
 
-用浏览器检查四个预填演示身份的登录、任务广场、任务详情和 `wss://peergrab.cn/ws`。证书须同时匹配根域和 `www`；`www` 的 HTTP/HTTPS 都应 301 到 `https://peergrab.cn`。宿主机 `ss -lntp` 应显示 80/443 对外监听、25173 只监听 `127.0.0.1`；MySQL 3306、Redis 6379、RocketMQ 9876/10911/8081 与 API 8080 不应有宿主机监听。
+用浏览器检查四个预填演示身份的登录、任务广场、任务详情和 `wss://www.peergrab.cn/ws`。证书须同时匹配根域和 `www`；根域的 HTTP/HTTPS 都应 301 到 `https://www.peergrab.cn`。宿主机 `ss -lntp` 应显示 80/443 对外监听、25173 只监听 `127.0.0.1`；MySQL 3306、Redis 6379、RocketMQ 9876/10911/8081 与 API 8080 不应有宿主机监听。
 
 更新代码时，在该目录执行 `git pull` 和 `docker compose --env-file .env.prod -f docker-compose.prod.yaml up -d --build`。备份三个命名卷与 `.env.prod`；停止栈时用 `docker compose ... down`，**不要加 `-v`**，以免删除业务数据。公开演示只使用虚拟资金，用户可操作的数据应与本机开发、压测环境隔离。
