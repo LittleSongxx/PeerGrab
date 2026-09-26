@@ -2,6 +2,8 @@
 
 校园跑腿交易平台：发布悬赏、资金托管、并发抢单、履约结算、退款与仲裁。
 
+[在线体验：peergrab.cn](https://peergrab.cn)
+
 ![PeerGrab 任务广场](docs/assets/screenshots/square.png)
 
 ## 核心流程
