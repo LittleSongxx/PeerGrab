@@ -36,6 +36,9 @@ public class CacheLoadClient {
     public static void main(String[] args) throws Exception {
         String mode = args.length > 0 ? args[0] : "b";
         String baseUrl = args.length > 1 ? args[1] : "http://127.0.0.1:8080";
+        if (!List.of("a", "b", "c", "d").contains(mode)) {
+            throw new IllegalArgumentException("mode must be a, b, c, or d");
+        }
         BenchSafety.requireDisposableStack(baseUrl);
 
         HttpClient client = HttpClient.newBuilder()
@@ -102,12 +105,15 @@ public class CacheLoadClient {
         }
         System.out.println("=================================================");
 
-        boolean pass = fail.get() == 0 && (diffs < 0 || diffs == 0);
+        boolean pass = total == (long) CONCURRENCY * ROUNDS_PER_THREAD && fail.get() == 0
+                && (!"c".equals(mode) || (writeCount.get() == total / 10 && diffs == 0));
         recorder.finishRun(runId, pass ? "PASS" : "FAIL", String.format(
                 "{\"mode\":\"S3-%s\",\"concurrency\":%d,\"requests\":%d,\"elapsedMs\":%d,"
-                        + "\"rps\":%d,\"p99Ms\":%d,\"diffs\":%d,\"stats\":%s}",
+                        + "\"rps\":%d,\"p99Ms\":%d,\"ok\":%d,\"fail\":%d,\"writes\":%d,"
+                        + "\"diffs\":%d,\"stats\":%s}",
                 mode, CONCURRENCY, total, elapsed, rps,
-                sorted.isEmpty() ? -1 : pct(sorted, 99), diffs, stats));
+                sorted.isEmpty() ? -1 : pct(sorted, 99), ok.get(), fail.get(), writeCount.get(),
+                diffs, stats));
         recorder.close();
         if (!pass) {
             System.exit(1);

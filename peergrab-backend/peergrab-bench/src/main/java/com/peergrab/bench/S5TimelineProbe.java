@@ -60,6 +60,7 @@ public final class S5TimelineProbe {
         BenchSafety.requireDisposableStack();
         BenchSafety.requireBenchmarkMqMode(mode.equals("mq"));
         BenchSafety.requireTimeoutScanMode(mode.equals("fallback"));
+        BenchSafety.requireConfirmSeconds(confirmSeconds);
         if (mode.equals("mq")) {
             BenchSafety.requireBenchmarkMqEndpoint(mqEndpoint);
         }

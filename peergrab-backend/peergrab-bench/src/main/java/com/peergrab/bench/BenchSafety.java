@@ -22,21 +22,26 @@ final class BenchSafety {
     }
 
     static void requireDisposableStack(String baseUrl) {
-        runPreflight(baseUrl, null, null);
+        runPreflight(baseUrl, null, null, null);
     }
 
     static void requireBenchmarkMqMode(boolean enabled) {
-        runPreflight(System.getenv("PEERGRAB_BENCH_BASE_URL"), enabled, null);
+        runPreflight(System.getenv("PEERGRAB_BENCH_BASE_URL"), enabled, null, null);
     }
 
     static void requireTimeoutScanMode(boolean enabled) {
-        runPreflight(System.getenv("PEERGRAB_BENCH_BASE_URL"), null, enabled);
+        runPreflight(System.getenv("PEERGRAB_BENCH_BASE_URL"), null, enabled, null);
+    }
+
+    static void requireConfirmSeconds(long seconds) {
+        runPreflight(System.getenv("PEERGRAB_BENCH_BASE_URL"), null, null, seconds);
     }
 
     private static void runPreflight(String baseUrl, Boolean requiredMqEnabled,
-                                     Boolean requiredTimeoutScanEnabled) {
+                                     Boolean requiredTimeoutScanEnabled, Long requiredConfirmSeconds) {
         if ("container".equals(System.getenv("PEERGRAB_BENCH_RUNNER_CONTEXT"))) {
-            requireContainerRunner(baseUrl, requiredMqEnabled, requiredTimeoutScanEnabled);
+            requireContainerRunner(baseUrl, requiredMqEnabled, requiredTimeoutScanEnabled,
+                    requiredConfirmSeconds);
             return;
         }
         if (baseUrl == null || baseUrl.isBlank()) {
@@ -53,6 +58,10 @@ final class BenchSafety {
             if (requiredTimeoutScanEnabled != null) {
                 builder.command().add("--require-timeout-scan-enabled");
                 builder.command().add(requiredTimeoutScanEnabled.toString());
+            }
+            if (requiredConfirmSeconds != null) {
+                builder.command().add("--require-confirm-seconds");
+                builder.command().add(requiredConfirmSeconds.toString());
             }
             process = builder.redirectErrorStream(true).start();
             if (!process.waitFor(30, TimeUnit.SECONDS)) {
@@ -89,7 +98,8 @@ final class BenchSafety {
     }
 
     private static void requireContainerRunner(String baseUrl, Boolean requiredMqEnabled,
-                                               Boolean requiredTimeoutScanEnabled) {
+                                               Boolean requiredTimeoutScanEnabled,
+                                               Long requiredConfirmSeconds) {
         String project = System.getenv("PEERGRAB_BENCH_PROJECT");
         String id = System.getenv("PEERGRAB_BENCH_RUNNER_ID");
         String ip = System.getenv("PEERGRAB_BENCH_RUNNER_IP");
@@ -147,6 +157,11 @@ final class BenchSafety {
                 && !requiredTimeoutScanEnabled.toString().equals(
                     System.getenv("PEERGRAB_BENCH_VERIFIED_SCAN_MODE"))) {
             throw new IllegalStateException("Timeout scan mode does not match host-inspected benchmark worker");
+        }
+        if (requiredConfirmSeconds != null
+                && !requiredConfirmSeconds.toString().equals(
+                    System.getenv("PEERGRAB_BENCH_VERIFIED_CONFIRM_SECONDS"))) {
+            throw new IllegalStateException("Confirmation timeout does not match host-inspected benchmark worker");
         }
     }
 

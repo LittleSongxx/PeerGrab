@@ -43,7 +43,8 @@ def run(kind, values):
     preflight.require(all((project, base_url, db_host, db_port)),
                       "Export the benchmark environment shown in bench/README.md")
     verified = preflight.check(project, base_url, db_host, db_port, "true",
-                               "false" if kind == "s5" else None)
+                               "false" if kind == "s5" else None,
+                               values.confirm_seconds if kind == "s5" else None)
     app = service_container(project, "app")
     worker = service_container(project, "worker")
     broker = service_container(project, "rmqbroker")
@@ -73,19 +74,22 @@ def run(kind, values):
         "PEERGRAB_TEST_MQ_PORT": "8081",
         "PEERGRAB_BENCH_VERIFIED_MQ_MODE": "true",
         "PEERGRAB_BENCH_VERIFIED_SCAN_MODE": "false" if kind == "s5" else "",
+        "PEERGRAB_BENCH_VERIFIED_CONFIRM_SECONDS": str(values.confirm_seconds) if kind == "s5" else "",
     })
     if verified["worker_scan_interval_ms"] is not None:
         env["PEERGRAB_BENCH_WORKER_SCAN_INTERVAL_MS"] = str(verified["worker_scan_interval_ms"])
     passed_env = (
         "PEERGRAB_BENCH_RUNNER_CONTEXT", "PEERGRAB_BENCH_BASE_URL", "PEERGRAB_TEST_DB_HOST",
         "PEERGRAB_TEST_DB_PORT", "PEERGRAB_TEST_MQ_PORT", "PEERGRAB_BENCH_VERIFIED_MQ_MODE",
-        "PEERGRAB_BENCH_VERIFIED_SCAN_MODE",
+        "PEERGRAB_BENCH_VERIFIED_SCAN_MODE", "PEERGRAB_BENCH_VERIFIED_CONFIRM_SECONDS",
         "PEERGRAB_TEST_DB_PASSWORD", "PEERGRAB_BENCH_PROJECT", "COMPOSE_PROJECT_NAME",
         "PEERGRAB_BENCH_DISPOSABLE",
     )
     if "PEERGRAB_BENCH_WORKER_SCAN_INTERVAL_MS" in env:
         passed_env += ("PEERGRAB_BENCH_WORKER_SCAN_INTERVAL_MS",)
     preflight.require(bool(env.get("PEERGRAB_TEST_DB_PASSWORD")), "Missing benchmark DB password")
+    runner_lifetime = (max(600, values.lead_seconds + values.timeout_seconds + 120)
+                       if kind == "s5" else 600)
     runner_id = None
     try:
         runner_id = command("docker", "run", "-d", "--read-only", "--tmpfs", "/tmp:rw,exec,mode=1777",
@@ -97,7 +101,7 @@ def run(kind, values):
                             *[flag for key in passed_env for flag in ("-e", key)],
                             "-e", "HOME=/tmp",
                             "-e", "MAVEN_OPTS=-Dmaven.repo.local=/m2/repository -Drocketmq.log.root=/tmp/rocketmq",
-                            IMAGE, "sleep", "600", env=env)
+                            IMAGE, "sleep", str(runner_lifetime), env=env)
         preflight.require(re.fullmatch(r"[a-f0-9]{64}", runner_id) is not None,
                           "Docker returned an invalid runner ID")
         runner = preflight.inspect("container", [runner_id])[0]

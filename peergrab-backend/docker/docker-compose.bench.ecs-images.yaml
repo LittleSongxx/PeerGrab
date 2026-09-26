@@ -1,0 +1,12 @@
+# Optional last overlay for a maintenance-window ECS benchmark. Reuses the
+# already deployed images while retaining the disposable bench project's own
+# containers, network and volumes. No CPU or memory quota is applied here.
+services:
+  app:
+    image: peergrab-prod-app:latest
+    build: !reset null
+    restart: "no"
+  worker:
+    image: peergrab-prod-worker:latest
+    build: !reset null
+    restart: "no"

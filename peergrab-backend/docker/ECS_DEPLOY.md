@@ -59,7 +59,7 @@ sudo systemctl reload nginx
 systemctl reload nginx
 ```
 
-如果改了 `PEERGRAB_WEB_PORT`，同步修改 `nginx/peergrab.conf` 的三个 `proxy_pass` 端口。Certbot 的 [webroot 和续期钩子说明](https://eff-certbot.readthedocs.io/en/stable/using.html)可用于核对证书流程。
+如果改了 `PEERGRAB_WEB_PORT`，同步修改 `nginx/peergrab.conf` 中 `peergrab_frontend` 上游的端口。Certbot 的 [webroot 和续期钩子说明](https://eff-certbot.readthedocs.io/en/stable/using.html)可用于核对证书流程。
 
 ## 3. 验收与维护
 

@@ -52,7 +52,7 @@ class Stopped(RuntimeError):
     """A safety or correctness gate stopped the experiment."""
 
 
-def private_env(path):
+def private_env(path, *, require_baseline=True):
     path = Path(path)
     if path.is_symlink() or path.parent.resolve() != DOCKER_DIR.resolve():
         raise Stopped("env file must be a regular file directly in the repository docker directory")
@@ -85,8 +85,9 @@ def private_env(path):
         raise Stopped("env file lacks benchmark identity, port, password or tuning key")
     if not preflight.PROJECT_RE.fullmatch(values["COMPOSE_PROJECT_NAME"]):
         raise Stopped("env file is not for a disposable benchmark project")
-    if (int(values["PEERGRAB_BENCH_HIKARI_POOL_SIZE"]) != 20
-            or int(values["PEERGRAB_BENCH_TOMCAT_THREADS_MAX"]) != 200):
+    if (require_baseline
+            and (int(values["PEERGRAB_BENCH_HIKARI_POOL_SIZE"]) != 20
+                 or int(values["PEERGRAB_BENCH_TOMCAT_THREADS_MAX"]) != 200)):
         raise Stopped("A/B/A requires an initial 20/200 Hikari/Tomcat baseline")
     return raw, values
 

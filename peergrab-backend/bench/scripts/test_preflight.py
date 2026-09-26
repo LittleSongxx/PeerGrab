@@ -80,12 +80,13 @@ class PreflightTest(unittest.TestCase):
             return [{"Labels": {preflight.PROJECT_LABEL: PROJECT, preflight.BENCH_LABEL: "true"}}]
         raise AssertionError(kind)
 
-    def check(self, url=URL, mq_mode=None, scan_mode=None):
+    def check(self, url=URL, mq_mode=None, scan_mode=None, confirm_seconds=None):
         with patch.object(preflight, "docker", self.fake_docker), \
              patch.object(preflight, "inspect", self.fake_inspect), \
              patch.object(preflight, "urlopen", return_value=Health(
                  b'{"code":"OK","data":{"status":"UP"}}')):
-            return preflight.check(PROJECT, url, "127.0.0.1", "33307", mq_mode, scan_mode)
+            return preflight.check(PROJECT, url, "127.0.0.1", "33307", mq_mode, scan_mode,
+                                   confirm_seconds)
 
     def test_verified_stack_passes(self):
         result = self.check()
@@ -120,6 +121,12 @@ class PreflightTest(unittest.TestCase):
         self.containers["worker"]["Config"]["Env"].append("PEERGRAB_TIMEOUT_SCAN_ENABLED=true")
         with self.assertRaisesRegex(preflight.Refused, "timeout scan mode"):
             self.check(scan_mode="false")
+
+    def test_confirmation_timeout_mismatch_refused(self):
+        self.containers["worker"]["Config"]["Env"].append("PEERGRAB_TIMEOUT_CONFIRM_SECONDS=300")
+        with self.assertRaisesRegex(preflight.Refused, "confirmation timeout"):
+            self.check(confirm_seconds=5)
+        self.check(confirm_seconds=300)
 
 
 if __name__ == "__main__":

@@ -57,7 +57,7 @@ def mapped_port(container, internal):
 
 
 def check(project, base_url, db_host, db_port, required_mq_mode=None,
-          required_timeout_scan_mode=None):
+          required_timeout_scan_mode=None, required_confirm_seconds=None):
     require(os.getenv("PEERGRAB_BENCH_DISPOSABLE") == "YES", "Missing disposable opt-in")
     require(PROJECT_RE.fullmatch(project) is not None, "Invalid benchmark project name")
     require(os.getenv("PEERGRAB_BENCH_PROJECT") == project, "Project env mismatch")
@@ -139,6 +139,9 @@ def check(project, base_url, db_host, db_port, required_mq_mode=None,
 
     worker_env = dict(value.split("=", 1) for value in by_service["worker"]["Config"]["Env"]
                       if "=" in value)
+    if required_confirm_seconds is not None:
+        require(worker_env.get("PEERGRAB_TIMEOUT_CONFIRM_SECONDS") == str(required_confirm_seconds),
+                "Worker confirmation timeout differs from S5 probe parameter")
     if required_timeout_scan_mode is not None:
         require(worker_env.get("PEERGRAB_TIMEOUT_SCAN_ENABLED", "").lower()
                 == required_timeout_scan_mode,
@@ -175,12 +178,14 @@ def main():
     parser.add_argument("--db-port", default=os.getenv("PEERGRAB_TEST_DB_PORT"))
     parser.add_argument("--require-mq-enabled", choices=("true", "false"))
     parser.add_argument("--require-timeout-scan-enabled", choices=("true", "false"))
+    parser.add_argument("--require-confirm-seconds", type=int)
     args = parser.parse_args()
     try:
         require(all((args.project, args.base_url, args.db_host, args.db_port)),
                 "Set project, API URL, DB host and DB port explicitly")
         print(json.dumps(check(args.project, args.base_url, args.db_host, args.db_port,
-                               args.require_mq_enabled, args.require_timeout_scan_enabled), sort_keys=True))
+                               args.require_mq_enabled, args.require_timeout_scan_enabled,
+                               args.require_confirm_seconds), sort_keys=True))
     except Exception as exc:
         print(f"Benchmark preflight refused: {exc}", file=sys.stderr)
         return 1
