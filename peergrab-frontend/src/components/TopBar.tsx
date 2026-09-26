@@ -116,7 +116,7 @@ export default function TopBar({ route, userId, onLogout }: Props) {
           <strong className="workspace-crumb-current">{activeSection}</strong>
         </div>
         <div className="workspace-tools">
-          <span className="environment-pill"><span /> 本地演示</span>
+          <span className="environment-pill"><span /> 在线演示</span>
           <a className="topbar-balance" href="#/wallet" title="查看我的钱包">
             <UiIcon name="wallet" size={17} /> {balance === null ? '余额加载中' : yuan(balance)}
           </a>

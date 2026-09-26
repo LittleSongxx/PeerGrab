@@ -88,7 +88,7 @@ export default function App() {
                 <div><span className="story-benefit-icon"><UiIcon name="activity" size={18} /></span><strong>进度清晰</strong><small>每一步都有记录</small></div>
               </div>
             </div>
-            <div className="story-footer"><span className="story-online-dot" /> 本地演示环境已就绪 <span>·</span> 真实业务流程体验</div>
+            <div className="story-footer"><span className="story-online-dot" /> 在线演示环境已就绪 <span>·</span> 真实业务流程体验</div>
           </section>
 
           <section className="login-form-side">
@@ -134,7 +134,7 @@ export default function App() {
                   {loggingIn ? '正在进入…' : '进入工作台'} <UiIcon name="arrowRight" size={18} />
                 </button>
               </form>
-              <div className="login-hint"><UiIcon name="shield" size={15} /> 密码已按身份自动填写，可直接进入工作台；仅用于本地演示。</div>
+              <div className="login-hint"><UiIcon name="shield" size={15} /> 密码已按身份自动填写；所有金额均为演示数据。</div>
             </div>
           </section>
         </div>
