@@ -40,10 +40,17 @@ STAGES = (
     ("s1-64", "com.peergrab.bench.SpikeLoadClient", (64, 1), 600),
     ("s1-128", "com.peergrab.bench.SpikeLoadClient", (128, 1), 600),
 )
+S4_HIGH_STAGE = ("s4-200-32", "com.peergrab.bench.FundsHttpLoadClient",
+                 (200, 32, 8, 30000), 1200)
 
 
 class Stopped(RuntimeError):
     """A benchmark guard or correctness invariant failed."""
+
+
+def selected_stages(only, include_s4_high):
+    stages = STAGES[:3] + ((S4_HIGH_STAGE,) if include_s4_high else ()) + STAGES[3:]
+    return tuple(stage for stage in stages if only == "all" or stage[0].startswith(only))
 
 
 def command(*args, input_text=None):
@@ -329,7 +336,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--only", choices=("all", "s1", "s4"), default="all")
+    parser.add_argument("--include-s4-high", action="store_true",
+                        help="also run the optional S4 200-task / 32-thread stage")
     args = parser.parse_args()
+    stages = selected_stages(args.only, args.include_s4_high)
     os.umask(0o077)
     base_url = os.getenv("PEERGRAB_BENCH_BASE_URL", "")
     try:
@@ -343,8 +353,7 @@ def main():
                               "s2Sha256": baseline["s2Sha256"],
                               "walletTotal": baseline["walletTotal"],
                               "publisherAvailable": baseline["publisherAvailable"],
-                              "stages": [s[0] for s in STAGES if args.only == "all"
-                                         or s[0].startswith(args.only)]}, sort_keys=True))
+                              "stages": [stage[0] for stage in stages]}, sort_keys=True))
             return 0
         output = RUNS / ("s1-s4-maint-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
         output.mkdir(parents=True, mode=0o700)
@@ -353,9 +362,7 @@ def main():
                     "status": "RUNNING", "baseline": baseline, "stages": []}
         write_manifest(output / "manifest.json", manifest)
         try:
-            for stage in STAGES:
-                if args.only != "all" and not stage[0].startswith(args.only):
-                    continue
+            for stage in stages:
                 manifest["stages"].append(run_stage(stage, base_url, initial_ids,
                                                    baseline, output))
                 write_manifest(output / "manifest.json", manifest)

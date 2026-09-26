@@ -70,6 +70,20 @@ class MaintenanceRunnerTest(unittest.TestCase):
                          ["s4-20-4", "s4-50-8", "s4-100-16",
                           "s1-16", "s1-64", "s1-128"])
 
+    def test_optional_s4_high_stage_is_only_selected_for_s4_or_all(self):
+        for only, include_high, expected in (
+                ("all", False, ["s4-20-4", "s4-50-8", "s4-100-16",
+                                "s1-16", "s1-64", "s1-128"]),
+                ("all", True, ["s4-20-4", "s4-50-8", "s4-100-16", "s4-200-32",
+                               "s1-16", "s1-64", "s1-128"]),
+                ("s4", True, ["s4-20-4", "s4-50-8", "s4-100-16", "s4-200-32"]),
+                ("s1", True, ["s1-16", "s1-64", "s1-128"]),
+        ):
+            with self.subTest(only=only, include_high=include_high):
+                self.assertEqual([stage[0] for stage in
+                                  runner.selected_stages(only, include_high)], expected)
+        self.assertEqual(runner.S4_HIGH_STAGE[2], (200, 32, 8, 30000))
+
     def test_production_must_be_stopped_with_explicit_maintenance_guard(self):
         with patch.dict(runner.os.environ, {}, clear=True), \
              patch.object(runner, "command") as command:
@@ -136,6 +150,25 @@ class MaintenanceRunnerTest(unittest.TestCase):
                 self.assertEqual(runner.main(), 0)
             self.assertEqual(json.loads(output.getvalue())["project"],
                              "peergrab-bench-8cpu0927")
+            stage.assert_not_called()
+
+    def test_dry_run_lists_optional_high_stage_only_with_s4(self):
+        stack = {"mysql_container_id": "bench-mysql"}
+        variables = {"PEERGRAB_BENCH_BASE_URL": "http://127.0.0.1:38080",
+                     "PEERGRAB_BENCH_PROJECT": "peergrab-bench-8cpu0927"}
+        with patch.dict(runner.os.environ, variables, clear=True), \
+             patch.object(runner, "checked_stack", return_value=(stack, ["a" * 64])), \
+             patch.object(runner, "snapshot", return_value=BASE), \
+             patch.object(runner, "run_stage") as stage:
+            for only, includes_high in (("s4", True), ("all", True), ("s1", False)):
+                with self.subTest(only=only), \
+                     patch.object(sys, "argv", ["run_s1_s4_maintenance.py", "--dry-run",
+                                                "--only", only, "--include-s4-high"]):
+                    output = StringIO()
+                    with redirect_stdout(output):
+                        self.assertEqual(runner.main(), 0)
+                    self.assertEqual("s4-200-32" in json.loads(output.getvalue())["stages"],
+                                     includes_high)
             stage.assert_not_called()
 
 
