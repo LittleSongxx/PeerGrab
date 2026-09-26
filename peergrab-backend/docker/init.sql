@@ -132,7 +132,7 @@ INSERT INTO wallet_account (id, owner_id, owner_type, available, frozen, version
   (2, -2, 'COMMISSION', 0, 0, 0)
 ON DUPLICATE KEY UPDATE id = id;
 
--- 演示账户：1001 发单人，2001/2002 跑腿。其余压测用户由 bench/scripts/seed.sql 初始化。
+-- 演示账户：1001 发单人，2001/2002 跑腿；独立压测栈按场景另行造数。
 INSERT INTO wallet_account (id, owner_id, owner_type, available, frozen, version) VALUES
   (1001, 1001, 'USER', 100000, 0, 0),
   (2001, 2001, 'USER', 5000, 0, 0),

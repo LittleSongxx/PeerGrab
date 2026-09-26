@@ -6,6 +6,7 @@ import com.peergrab.domain.errand.ports.ErrandRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -24,6 +25,7 @@ import java.util.List;
  * 幂等三件套也保证不会流转两次。
  */
 @Component
+@ConditionalOnProperty(name = "peergrab.timeout.scan.enabled", havingValue = "true", matchIfMissing = true)
 public class TimeoutScanJob {
 
     private static final Logger log = LoggerFactory.getLogger(TimeoutScanJob.class);

@@ -33,7 +33,7 @@ import static org.junit.jupiter.api.Assertions.*;
 @org.junit.jupiter.api.condition.EnabledIfSystemProperty(named = "peergrab.it", matches = "true")
 class SettleConcurrencyIT {
 
-    /** 与 seed_s4.sql 保持一致的 id 段 */
+    /** 历史 S4 集成测试专用 ID 段；仅用于明确隔离的测试库。 */
     private static final long BASE = 900_000_000_000L;
     private static final long SECOND_BASE = BASE + 2_000_000L;
     private static final long REWARD = 2000L;
@@ -71,7 +71,7 @@ class SettleConcurrencyIT {
         }
     }
 
-    /** 造数：等价于 seed_s4.sql，放在测试里是为了让 S4 能一条命令跑完 */
+    /** 历史测试造数会重置固定 ID 段；当前压测使用隔离栈的 FundsHttpLoadClient。 */
     private void seed(long base, int count) {
         jdbc.update("DELETE FROM wallet_ledger WHERE ref_id >= ? AND ref_id < ?", base, base + 1_000_000);
         jdbc.update("DELETE FROM escrow_order WHERE errand_id >= ? AND errand_id < ?", base, base + 1_000_000);

@@ -53,3 +53,39 @@ jobs:
         env:
           PEERGRAB_MYSQL_ROOT_PASSWORD: ci-only-root
           PEERGRAB_MYSQL_APP_PASSWORD: ci-only-app
+      - name: Validate isolated benchmark Compose model
+        run: |
+          docker compose -p peergrab-bench-ci --env-file bench.env.example \
+            -f docker-compose.yaml -f docker-compose.full.yaml \
+            -f docker-compose.bench.yaml config --format json | python3 -c '
+          import json, sys
+          model = json.load(sys.stdin)
+          assert model["name"] == "peergrab-bench-ci"
+          services = model["services"]
+          assert "frontend" not in services
+          for name, target in (("app", 8080), ("mysql", 3306),
+                               ("redis", 6379), ("rmqbroker", 8081)):
+              ports = services[name].get("ports", [])
+              assert len(ports) == 1 and ports[0]["host_ip"] == "127.0.0.1"
+              assert ports[0]["target"] == target
+              assert services[name]["labels"]["org.peergrab.bench.disposable"] == "true"
+          assert not services["rmqnamesrv"].get("ports")
+          volumes = model["volumes"]
+          assert set(volumes) == {"peergrab-mysql-data", "peergrab-redis-data",
+                                  "peergrab-rmq-broker-store"}
+          assert all(v["labels"]["org.peergrab.bench.disposable"] == "true"
+                     for v in volumes.values())
+          '
+        working-directory: peergrab-backend/docker
+
+  benchmark-assets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test benchmark safety and environment helpers
+        run: python3 -m unittest discover -s peergrab-backend/bench/scripts -p 'test_*.py'
+      - name: Check benchmark shell syntax
+        run: |
+          bash -n peergrab-backend/bench/scripts/cleanup.sh
+          sh -n peergrab-backend/bench/scripts/init-mq-probe.sh
+          sh -n peergrab-backend/docker/bench-guard-init.sh

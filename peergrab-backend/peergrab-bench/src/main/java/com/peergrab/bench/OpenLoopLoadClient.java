@@ -65,7 +65,7 @@ public final class OpenLoopLoadClient {
 
     public static void main(String[] args) throws Exception {
         Config config = parseArguments(args);
-        BenchSafety.requireDisposableStack();
+        BenchSafety.requireDisposableStack(config.baseUrl());
 
         try (ExecutorService executor = Executors.newFixedThreadPool(
                 Math.min(config.maxInFlight(), 64))) {

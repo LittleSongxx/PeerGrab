@@ -16,22 +16,25 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 /**
- * RocketMQ 定时消息连通性探针（最小 demo）。
- *
- * 在写业务代码之前先跑这个：验证 broker 起得来、proxy 通、定时消息按时投递。
- * 不先验证的话，后面业务出问题时分不清是业务逻辑错了还是 MQ 根本没通——
- * 尤其 macOS 上 broker 会向客户端返回容器内网 IP，这个坑不提前踩会浪费很多时间。
+ * 隔离压测栈上的 RocketMQ 定时消息连通性探针。
+ * 独占 topic 和 consumer group，绝不能加入业务消费者组并确认业务消息。
  *
  * 用法：java -cp ... DelayMessageProbe [endpoint] [delaySeconds]
  */
 public class DelayMessageProbe {
 
-    private static final String TOPIC = "errand-confirm-timeout";
-    private static final String GROUP = "peergrab-timeout-consumer";
+    private static final String TOPIC = "peergrab-bench-delay-probe";
+    private static final String GROUP = "peergrab-bench-delay-probe-consumer";
 
     public static void main(String[] args) throws Exception {
-        String endpoint = args.length > 0 ? args[0] : "127.0.0.1:8081";
+        String endpoint = args.length > 0 ? args[0]
+                : "127.0.0.1:" + System.getenv("PEERGRAB_TEST_MQ_PORT");
         int delaySeconds = args.length > 1 ? Integer.parseInt(args[1]) : 5;
+        if (delaySeconds < 1 || delaySeconds > 3600) {
+            throw new IllegalArgumentException("delaySeconds must be 1..3600");
+        }
+        BenchSafety.requireDisposableStack();
+        BenchSafety.requireBenchmarkMqEndpoint(endpoint);
 
         ClientServiceProvider provider = ClientServiceProvider.loadService();
         ClientConfiguration config = ClientConfiguration.newBuilder()
@@ -54,7 +57,7 @@ public class DelayMessageProbe {
                         receivedAt[0] = System.currentTimeMillis();
                         received.countDown();
                     }
-                    // 非本次探针的历史消息也要 ACK，避免堆积影响后续测试
+                    // 独占探针 topic；历史探针消息可以安全 ACK。
                     return ConsumeResult.SUCCESS;
                 })
                 .build()) {

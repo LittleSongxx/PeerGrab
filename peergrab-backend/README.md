@@ -84,6 +84,6 @@ docker compose -f docker/docker-compose.yaml --env-file docker/.env exec -T mysq
 
 ## 实验记录与边界
 
-[2026-08-22 的 P6/P7 报告](bench/reports/report-P6-P7-20260822-complete.md)记录旧版同机 60 秒任务广场固定 GET 测试，400 并发档约 6455 QPS、P99 151ms；800 并发档出现过网络异常。它不能说明现行版本的安全容量，也不能代表抢单或完整交易吞吐。[2026-09-25 隔离栈冒烟](bench/reports/smoke-20260925-current.md)仅覆盖短时链路检查。任何正式容量结论都需按[新版压测方案](docs/性能压测与架构决策方案.md)在独立环境重测，造数、加压和 `cleanup.sh` 不得作用于演示库。
+[2026-08-22 的 P6/P7 报告](bench/reports/report-P6-P7-20260822-complete.md)记录旧版同机 60 秒任务广场固定 GET 测试，400 并发档约 6455 QPS、P99 151ms；800 并发档出现过网络异常。它不能说明现行版本的安全容量，也不能代表抢单或完整交易吞吐。[2026-09-25 隔离栈冒烟](bench/reports/smoke-20260925-current.md)仅覆盖短时链路检查。正式测试从[压测运行手册](bench/README.md)建立独立环境，再按[压测方案](docs/性能压测与架构决策方案.md)设计实验；造数、加压和 `cleanup.sh` 不得作用于演示库。
 
 当前公开 API 限制 `slotTotal=1`；Redis 或 MQ 故障下的完整性能恢复、自然到期流转 P99 和多库资金方案仍待验证。ES/Canal 已退出运行架构，缓存一致性靠失效、TTL 与校验任务，不使用 binlog 秒级纠偏。[设计演进](docs/设计演进记录.md)、[分片取舍](docs/数据库分片相关思考.md)和[压测实验方案](docs/压测方案与容量评估.md)保存了相关设计和历史证据。

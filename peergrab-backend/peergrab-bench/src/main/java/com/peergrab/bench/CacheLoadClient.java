@@ -36,7 +36,7 @@ public class CacheLoadClient {
     public static void main(String[] args) throws Exception {
         String mode = args.length > 0 ? args[0] : "b";
         String baseUrl = args.length > 1 ? args[1] : "http://127.0.0.1:8080";
-        BenchSafety.requireDisposableStack();
+        BenchSafety.requireDisposableStack(baseUrl);
 
         HttpClient client = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(5))

@@ -35,7 +35,7 @@ public class RampLoadClient {
         int[] stages = parseStages(args.length > 1 ? args[1] : "50,100,200,400,800");
         int durationSeconds = args.length > 2 ? Integer.parseInt(args[2]) : 180;
         int warmupSeconds = Integer.parseInt(System.getenv().getOrDefault("PEERGRAB_BENCH_WARMUP_SECONDS", "10"));
-        BenchSafety.requireDisposableStack();
+        BenchSafety.requireDisposableStack(baseUrl);
         if (durationSeconds < 1 || warmupSeconds < 0) {
             throw new IllegalArgumentException("Duration must be positive and warmup must be nonnegative");
         }

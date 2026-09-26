@@ -35,7 +35,7 @@ public class SpikeLoadClient {
         String baseUrl = args.length > 0 ? args[0] : DEFAULT_BASE;
         int concurrency = args.length > 1 ? Integer.parseInt(args[1]) : 2000;
         int slotTotal = args.length > 2 ? Integer.parseInt(args[2]) : 1;
-        BenchSafety.requireDisposableStack();
+        BenchSafety.requireDisposableStack(baseUrl);
         if (concurrency < 1 || slotTotal < 1 || slotTotal > concurrency) {
             throw new IllegalArgumentException("Require 1 <= slotTotal <= concurrency");
         }

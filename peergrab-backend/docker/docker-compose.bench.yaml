@@ -1,0 +1,86 @@
+# Apply after docker-compose.yaml and docker-compose.full.yaml with a unique -p.
+# Requires Docker Compose 2.24.4+ for !override/!reset merge semantics.
+services:
+  mysql:
+    environment:
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:?Set a unique peergrab-bench-* project}
+    ports: !override
+      - "127.0.0.1:${PEERGRAB_MYSQL_PORT:?Set a unique benchmark MySQL port}:3306"
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./bench-guard-init.sh:/docker-entrypoint-initdb.d/zz-bench-guard.sh:ro
+      - peergrab-mysql-data:/var/lib/mysql
+    labels:
+      org.peergrab.bench.disposable: "true"
+  redis:
+    ports: !override
+      - "127.0.0.1:${PEERGRAB_REDIS_PORT:?Set a unique benchmark Redis port}:6379"
+    labels:
+      org.peergrab.bench.disposable: "true"
+  rmqnamesrv:
+    ports: !reset []
+    labels:
+      org.peergrab.bench.disposable: "true"
+  rmq-store-init:
+    labels:
+      org.peergrab.bench.disposable: "true"
+  rmqbroker:
+    ports: !override
+      - "127.0.0.1:${PEERGRAB_RMQ_PROXY_PORT:?Set a unique benchmark RocketMQ proxy port}:8081"
+    labels:
+      org.peergrab.bench.disposable: "true"
+  mq-init:
+    labels:
+      org.peergrab.bench.disposable: "true"
+  mq-probe-init:
+    image: apache/rocketmq:5.3.1
+    volumes:
+      - ../bench/scripts/init-mq-probe.sh:/init-mq-probe.sh:ro
+    command: ["sh", "/init-mq-probe.sh"]
+    depends_on:
+      rmqbroker:
+        condition: service_healthy
+    labels:
+      org.peergrab.bench.disposable: "true"
+  app:
+    environment:
+      PEERGRAB_MQ_ENABLED: ${PEERGRAB_BENCH_MQ_ENABLED:-true}
+      PEERGRAB_CACHE_ENABLED: ${PEERGRAB_BENCH_CACHE_ENABLED:-true}
+      PEERGRAB_CACHE_SHARDS: ${PEERGRAB_BENCH_CACHE_SHARDS:-4}
+      PEERGRAB_GRAB_LIMIT_ENABLED: ${PEERGRAB_BENCH_LIMIT_ENABLED:-true}
+      PEERGRAB_GRAB_LIMIT_TYPE: ${PEERGRAB_BENCH_LIMIT_TYPE:-sentinel}
+      PEERGRAB_GRAB_LIMIT_PER_SECOND: ${PEERGRAB_BENCH_LIMIT_PER_SECOND:-500}
+      SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: ${PEERGRAB_BENCH_HIKARI_POOL_SIZE:-20}
+      SERVER_TOMCAT_THREADS_MAX: ${PEERGRAB_BENCH_TOMCAT_THREADS_MAX:-200}
+      PEERGRAB_TIMEOUT_CONFIRM_SECONDS: ${PEERGRAB_BENCH_CONFIRM_SECONDS:-300}
+    ports: !override
+      - "127.0.0.1:${PEERGRAB_API_PORT:?Set a unique benchmark API port}:8080"
+    labels:
+      org.peergrab.bench.disposable: "true"
+  worker:
+    depends_on:
+      mq-probe-init:
+        condition: service_completed_successfully
+    environment:
+      PEERGRAB_MQ_ENABLED: ${PEERGRAB_BENCH_MQ_ENABLED:-true}
+      PEERGRAB_TIMEOUT_CONFIRM_SECONDS: ${PEERGRAB_BENCH_CONFIRM_SECONDS:-300}
+      PEERGRAB_TIMEOUT_SCAN_ENABLED: ${PEERGRAB_BENCH_TIMEOUT_SCAN_ENABLED:-true}
+      PEERGRAB_TIMEOUT_SCAN_INTERVAL_MS: ${PEERGRAB_BENCH_TIMEOUT_SCAN_INTERVAL_MS:-5000}
+      PEERGRAB_SETTLE_SCAN_INTERVAL_MS: ${PEERGRAB_BENCH_SETTLE_SCAN_INTERVAL_MS:-5000}
+    labels:
+      org.peergrab.bench.disposable: "true"
+  frontend:
+    profiles: [web]
+    ports: !reset []
+    labels:
+      org.peergrab.bench.disposable: "true"
+volumes:
+  peergrab-mysql-data:
+    labels:
+      org.peergrab.bench.disposable: "true"
+  peergrab-redis-data:
+    labels:
+      org.peergrab.bench.disposable: "true"
+  peergrab-rmq-broker-store:
+    labels:
+      org.peergrab.bench.disposable: "true"

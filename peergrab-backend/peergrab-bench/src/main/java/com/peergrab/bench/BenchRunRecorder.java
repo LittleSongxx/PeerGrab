@@ -13,8 +13,9 @@ import java.util.List;
  *
  * 存在的理由：P1 阶段所有轮次的数据混在一起，verify SQL 一次列出 31 行任务（含预热），
  * 轮次多了报告就没法读，清理也只能全表 DELETE。
- * 有了 run_id 之后，每轮数据可以精确查询、跨轮对比、按轮清理，
+ * 有了 run_id 之后，每轮数据可以精确查询、跨轮对比，
  * 于是"改动前后同档位对比"才真正可行。
+ * 清理只销毁经核验的独立压测栈，不再按 run_id 删除业务资金数据。
  *
  * 刻意用纯 JDBC 而不依赖 Spring：压测客户端要能独立运行，
  * 集成测试也能以 test scope 复用同一份实现，避免两处重复。
@@ -88,7 +89,7 @@ public class BenchRunRecorder implements AutoCloseable {
         }
     }
 
-    /** 登记本轮产生的任务，清理脚本据此精确删除，不会误伤 seed 数据 */
+    /** 登记本轮产生的任务，供正确性核对与跨轮查询。 */
     public void trackErrand(String runId, long errandId) {
         trackErrands(runId, List.of(errandId));
     }
