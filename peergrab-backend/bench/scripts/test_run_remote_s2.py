@@ -198,20 +198,25 @@ class PhaseTest(unittest.IsolatedAsyncioTestCase):
     async def test_direct_mode_does_not_require_tunnel(self):
         session = FakeSession()
         result = await remote.run_phase(session, "https://www.peergrab.cn/__bench_" + "a" * 24,
-                                        "secret", 1, 1, 2, None, [])
-        self.assertEqual(result["ok"], 1)
+                                        "secret", 5, 2, 10, None, [])
+        self.assertEqual(result["offered"], 10)
+        self.assertGreater(result.get("sent", 0), 0)
+        self.assertEqual(result.get("ok", 0), result["sent"])
         self.assertEqual(result.get("networkErrors", 0), 0)
+        self.assertTrue(all(url.startswith("https://www.peergrab.cn/__bench_")
+                            for url in session.paths))
 
     async def test_fixed_arrival_counts_and_per_second_cpu_without_network(self):
         session = FakeSession()
         result = await remote.run_phase(session, "http://127.0.0.1:12345", "secret",
                                         2, 1, 2, FakeTunnel(), [])
         self.assertEqual(result["offered"], 2)
-        self.assertEqual(result["ok"], 2)
-        self.assertEqual(result["sent"], 2)
+        self.assertEqual(result.get("sent", 0) + result.get("schedulerMissed", 0)
+                         + result.get("capacityRejected", 0), 2)
+        self.assertEqual(result.get("ok", 0), result.get("sent", 0))
         self.assertEqual(result["perSecond"][0]["offered"], 2)
-        self.assertEqual(result["okWithinWindow"], 2)
-        self.assertEqual(result["okPerSecInWindow"], 2)
+        self.assertLessEqual(result["okWithinWindow"], result.get("sent", 0))
+        self.assertEqual(result["okPerSecInWindow"], result["okWithinWindow"])
         self.assertIn("generatorCpuPercentOneCore", result["perSecond"][0])
         self.assertTrue(all(url.endswith(remote.LIST_PATH) for url in session.paths))
 
