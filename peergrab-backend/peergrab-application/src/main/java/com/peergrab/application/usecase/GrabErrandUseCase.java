@@ -137,7 +137,7 @@ public class GrabErrandUseCase {
             return Result.failed(ErrorCode.TOO_MANY_ONGOING, null);
         }
 
-        // L3：Redis Lua 原子判定。绝大多数失败请求在这一步就被挡住，不会打到数据库
+        // L3：Redis Lua 原子判定，减少后续竞争性数据库写入；前面的身份和资格校验已读数据库。
         SlotOutcome outcome;
         try {
             outcome = grabSlotPort.tryAcquire(cmd.errandId(), cmd.runnerId(), cmd.requestId());
