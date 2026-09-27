@@ -105,7 +105,7 @@ compose=(docker compose --env-file .env.prod -f docker-compose.prod.yaml)
 
 重复执行迁移脚本应保持安全；正式执行前仍要在可丢弃的恢复副本上走一遍。停止栈时用 `docker compose ... down`，**不要加 `-v`**。公开演示只使用虚拟资金，压测必须使用独立库和卷。
 
-容器就绪检查现在访问内部 `/actuator/health/readiness`：生产 API 核验 MySQL，Worker 另核验 Redis 和调度心跳；公开 `/api/health` 仍只表示进程存活。`/actuator/prometheus` 仅在容器网络内提供，包括 JVM、HTTP、Hikari、`Result.code` 业务结果计数，以及资金 outbox、延迟消息、对账差异和缓存失效失败指标。建议至少告警：就绪失败、资金 outbox 最老 PENDING 持续增长、到期任务处理滞后、对账差异非零，并定期做独立恢复演练，实测记录 RPO/RTO 后再承诺可用性目标。
+容器就绪检查现在访问内部 `/actuator/health/readiness`：生产 API 核验 MySQL 和雪花节点发号租约，Worker 还核验 Redis、调度心跳及发号租约；公开 `/api/health` 仍只表示进程存活。`/actuator/prometheus` 仅在容器网络内提供，包括 JVM、HTTP、Hikari、`Result.code` 业务结果计数，以及资金 outbox、延迟消息、对账差异和缓存失效失败指标。建议至少告警：就绪失败、资金 outbox 最老 PENDING 持续增长、到期任务处理滞后、对账差异非零，并定期做独立恢复演练，实测记录 RPO/RTO 后再承诺可用性目标。
 
 ## 4. 多主机部署边界
 

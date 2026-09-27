@@ -37,6 +37,8 @@ docker compose -f docker-compose.yaml -f docker-compose.full.yaml --env-file .en
 
 本机完整演示栈默认使用 Redis Session；[生产栈](docker/ECS_DEPLOY.md)使用 MySQL 真值的 JWT，以便 Redis 故障时仍能校验已签发令牌，并要求至少 32 个 UTF-8 字节的 `PEERGRAB_AUTH_JWT_SECRET`。已有旧卷升级前必须先执行迁移脚本；仅重建镜像不会重新运行 `init.sql`。[旧项目迁移](docker/UPGRADE.md)另有独立步骤。停止演示栈使用相同两个 `-f` 参数执行 `docker compose down`，保留数据时不要加 `-v`。
 
+2026-09-27 已在单 ECS 演示站部署 `2370c45`：旧卷先备份、在隔离 MySQL 中恢复并试跑迁移，再停写执行正式迁移。新资金事件使用 `errand-fund-event-v2` 普通 Topic；一笔上线验收交易的 outbox 为 `SENT`、持久通知已落库、消费组积压为 0。S5 压测夹具的截止时间修正见后续提交 `7da0a92`，不改变线上 API/Worker 镜像。
+
 ## 本机开发
 
 需要 JDK 21、Maven 3.9+ 和 Node 20+。基础 Compose 栈提供 MySQL、Redis、RocketMQ；本机默认连接端口分别是 `3307`、`6380`、`8081`。以下命令以基础 Compose 默认端口为例：
@@ -75,6 +77,8 @@ export PEERGRAB_TEST_DB_PASSWORD='<独立测试 MySQL 密码>'
 mvn -Dpeergrab.it=true test
 ```
 
+本轮在可丢弃 MySQL/Redis 上运行的 **214 项后端测试为 0 失败、0 跳过**；前端 `npm run build` 与后端 `mvn -DskipTests package` 通过。真实 RocketMQ 的普通 Topic 类型、发送和消费读回另经独立契约脚本验证。
+
 在可丢弃的本地演示库上可运行 `python3 bench/scripts/smoke_e2e.py --env-file docker/.env`；脚本验证发布、抢单、结算、退款、仲裁和通知，**会创建任务并改变演示账户余额**。只读资金不变式检查可执行：
 
 ```bash
@@ -85,6 +89,6 @@ docker compose -f docker/docker-compose.yaml --env-file docker/.env exec -T mysq
 
 ## 实验记录与边界
 
-[8 vCPU／100 Mbps ECS 复测](bench/reports/peergrab-current/report-ecs-8cpu-20260927.md)记录任务广场完整公网路径拐点、结算 TPS 和抢单正确性；此前的[4 vCPU／50 Mbps 实测](bench/reports/peergrab-current/report-ecs-max-20260926.md)还覆盖缓存与自然到期。两轮及[原版 P6/P7 报告](bench/reports/original-project/report-P6-P7-20260822-complete.md)分开归档。复测从[压测运行手册](bench/README.md)建立独立环境；造数、加压和 `cleanup.sh` 不得作用于演示库。
+[上线后 8 vCPU ECS 隔离复测](bench/reports/peergrab-current/report-ecs-release-20260927.md)覆盖 S1–S5：异机 S2 的 400 offered RPS 档实际发出 23,997／24,000 次且已发请求全成功，100 个不同任务／16 线程的 S4 持久结算为 44.64 TPS；S3 缓存热态命中 100% 但吞吐与无缓存接近，S5 的 MQ 与扫描独占组各 1,000 条任务均完成。旧镜像的[8 vCPU 公网实测](bench/reports/peergrab-current/report-ecs-8cpu-20260927.md)、[4 vCPU 实测](bench/reports/peergrab-current/report-ecs-max-20260926.md)和[原版 P6/P7 报告](bench/reports/original-project/report-P6-P7-20260822-complete.md)单独保留；不同发压路径和代码版本不能直接计算优化增益。复测从[压测运行手册](bench/README.md)建立独立环境；造数、加压和 `cleanup.sh` 不得作用于演示库。
 
 当前公开 API 限制 `slotTotal=1`；Redis 或 MQ 故障注入后的完整性能恢复、多库资金方案仍待验证。ES/Canal 已退出运行架构，缓存一致性靠失效、TTL 与校验任务，不使用 binlog 秒级纠偏。[设计演进](docs/设计演进记录.md)、[分片取舍](docs/数据库分片相关思考.md)和[压测实验方案](docs/压测方案与容量评估.md)保存了相关设计和历史证据。
