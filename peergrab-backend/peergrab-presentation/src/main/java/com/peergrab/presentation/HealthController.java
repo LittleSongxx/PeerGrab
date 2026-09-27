@@ -6,7 +6,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.Map;
 
-/** 健康检查：前端用它探测后端，不走认证 */
+/** Public liveness endpoint. Container readiness checks use Actuator's dependency checks. */
 @RestController
 public class HealthController {
 

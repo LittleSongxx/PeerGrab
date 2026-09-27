@@ -32,6 +32,8 @@ public class Errand {
     private long version;
     private Instant lockedAt;
     private Instant deliveredAt;
+    private Instant confirmDeadlineAt;
+    private Instant autoSettleDeadlineAt;
 
     /** 系统操作者标识：自动结算、超时流转等无人工触发的动作用它 */
     public static final long SYSTEM_OPERATOR = -1L;
@@ -40,7 +42,8 @@ public class Errand {
 
     private Errand(long id, long campusId, long publisherId, ErrandType type, String title,
                    Money reward, int slotTotal, Long grabberId, ErrandStatus status,
-                   int slotTaken, int round, long version, Instant lockedAt, Instant deliveredAt) {
+                   int slotTaken, int round, long version, Instant lockedAt, Instant deliveredAt,
+                   Instant confirmDeadlineAt, Instant autoSettleDeadlineAt) {
         this.id = id;
         this.campusId = campusId;
         this.publisherId = publisherId;
@@ -55,6 +58,8 @@ public class Errand {
         this.version = version;
         this.lockedAt = lockedAt;
         this.deliveredAt = deliveredAt;
+        this.confirmDeadlineAt = confirmDeadlineAt;
+        this.autoSettleDeadlineAt = autoSettleDeadlineAt;
     }
 
     /** 新建草稿：此时还没托管资金，所以不能是 PUBLISHED */
@@ -67,7 +72,7 @@ public class Errand {
             throw new IllegalArgumentException("当前任务模型只支持一个名额");
         }
         return new Errand(id, campusId, publisherId, type, title, reward, slotTotal,
-                null, ErrandStatus.DRAFT, 0, 0, 0L, null, null);
+                null, ErrandStatus.DRAFT, 0, 0, 0L, null, null, null, null);
     }
 
     /** 从存储重建聚合，不做业务校验（数据已经是既成事实） */
@@ -76,7 +81,7 @@ public class Errand {
                                    ErrandStatus status, int slotTaken, int round, long version,
                                    Instant lockedAt) {
         return new Errand(id, campusId, publisherId, type, title, reward, slotTotal, grabberId,
-                status, slotTaken, round, version, lockedAt, null);
+                status, slotTaken, round, version, lockedAt, null, null, null);
     }
 
     /** 从存储重建（带送达时间），自动结算扫描需要 deliveredAt */
@@ -84,8 +89,19 @@ public class Errand {
                                    String title, Money reward, int slotTotal, Long grabberId,
                                    ErrandStatus status, int slotTaken, int round, long version,
                                    Instant lockedAt, Instant deliveredAt) {
+        return rehydrate(id, campusId, publisherId, type, title, reward, slotTotal, grabberId,
+                status, slotTaken, round, version, lockedAt, deliveredAt, null, null);
+    }
+
+    /** 持久化截止时间由数据库写入，消息早到和应用时钟偏差都由数据库裁决。 */
+    public static Errand rehydrate(long id, long campusId, long publisherId, ErrandType type,
+                                   String title, Money reward, int slotTotal, Long grabberId,
+                                   ErrandStatus status, int slotTaken, int round, long version,
+                                   Instant lockedAt, Instant deliveredAt,
+                                   Instant confirmDeadlineAt, Instant autoSettleDeadlineAt) {
         return new Errand(id, campusId, publisherId, type, title, reward, slotTotal, grabberId,
-                status, slotTaken, round, version, lockedAt, deliveredAt);
+                status, slotTaken, round, version, lockedAt, deliveredAt,
+                confirmDeadlineAt, autoSettleDeadlineAt);
     }
 
     /**
@@ -261,18 +277,20 @@ public class Errand {
         }
     }
 
-    /** 判断是否已过自动结算窗口，供兜底扫描使用 */
+    /** 领域层展示性判断；并发裁决仍以数据库时钟与 CAS 为准。 */
     public boolean autoSettleDue(Instant now, long autoSettleSeconds) {
         return status == ErrandStatus.DELIVERED
-                && deliveredAt != null
-                && deliveredAt.plusSeconds(autoSettleSeconds).isBefore(now);
+                && (autoSettleDeadlineAt != null
+                    ? !autoSettleDeadlineAt.isAfter(now)
+                    : deliveredAt != null && !deliveredAt.plusSeconds(autoSettleSeconds).isAfter(now));
     }
 
-    /** 判断本轮是否已确认超时，供兜底扫描使用 */
+    /** 领域层展示性判断；并发裁决仍以数据库时钟与 CAS 为准。 */
     public boolean confirmTimeout(Instant now, long timeoutSeconds) {
         return status == ErrandStatus.LOCKED
-                && lockedAt != null
-                && lockedAt.plusSeconds(timeoutSeconds).isBefore(now);
+                && (confirmDeadlineAt != null
+                    ? !confirmDeadlineAt.isAfter(now)
+                    : lockedAt != null && !lockedAt.plusSeconds(timeoutSeconds).isAfter(now));
     }
 
     public boolean slotAvailable() {
@@ -293,6 +311,8 @@ public class Errand {
     public long version() { return version; }
     public Instant lockedAt() { return lockedAt; }
     public Instant deliveredAt() { return deliveredAt; }
+    public Instant confirmDeadlineAt() { return confirmDeadlineAt; }
+    public Instant autoSettleDeadlineAt() { return autoSettleDeadlineAt; }
     public List<ErrandStatusChanged> changes() { return List.copyOf(changes); }
 
     /** 领域事件：状态流转记录，落 errand_status_log 做事件溯源 */

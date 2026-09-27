@@ -11,12 +11,22 @@ import java.util.Optional;
  */
 public interface CandidateQueuePort {
 
-    record Candidate(long runnerId, double score) {}
+    record Candidate(long runnerId, double score, String claimId) {
+        public Candidate(long runnerId, double score) {
+            this(runnerId, score, null);
+        }
+    }
 
     void offer(long errandId, long runnerId, double score);
 
-    /** 弹出当前最优候选人（score 最小），P2 超时流转会用到 */
+    /** 租约领取当前最优候选人；进程崩溃后租约到期会重新入队。 */
     Optional<Candidate> pollBest(long errandId);
+
+    /** DB 流转提交或候选失效后确认移除，仅当前租约持有人可确认。 */
+    void acknowledge(long errandId, Candidate candidate);
+
+    /** DB 流转失败时释放租约并保留原始分数。 */
+    void release(long errandId, Candidate candidate);
 
     long size(long errandId);
 

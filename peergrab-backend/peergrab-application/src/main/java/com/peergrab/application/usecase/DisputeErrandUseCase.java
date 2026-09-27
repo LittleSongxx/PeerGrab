@@ -46,10 +46,10 @@ public class DisputeErrandUseCase {
             throw new BizException(ErrorCode.STALE_VERSION, "发起争议失败，状态已变更 errandId=" + errandId);
         }
         errandRepository.appendStatusLog(errandId, from, ErrandStatus.DISPUTED, errand.round(), operatorId);
-        notifier.errandStatusChanged(errand.id(), errand.publisherId(), errand.grabberId(),
-                ErrandStatus.DISPUTED.name(), errand.round());
-
         // 状态变了，详情缓存必须失效。挂在事务提交后执行（见 CacheEvictSupport 的注释）
         cacheEvict.evictAfterCommit(errandId);
+        AfterCommitRealtime.send(() -> notifier.errandStatusChanged(
+                errand.id(), errand.publisherId(), errand.grabberId(),
+                ErrandStatus.DISPUTED.name(), errand.round()));
     }
 }

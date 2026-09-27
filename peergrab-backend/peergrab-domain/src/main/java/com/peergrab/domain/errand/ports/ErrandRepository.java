@@ -42,7 +42,10 @@ public interface ErrandRepository {
     /** 候选队列空，回退重新开放：LOCKED -> PUBLISHED，名额还回去 */
     int casRevertToPublished(long errandId, long expectedVersion, int expectedRound);
 
-    /** 兜底扫描：捞出确认超时仍停留在 LOCKED 的任务（走 idx_timeout_scan） */
+    /** 以数据库时间和持久截止时间判断本轮是否到期，取候选前先检查。 */
+    boolean confirmTimeoutDue(long errandId, int expectedRound);
+
+    /** 兜底扫描：按持久截止时间与宽限秒数查找 LOCKED 任务。 */
     List<Errand> findConfirmTimeout(long timeoutSeconds, int limit);
 
     /** 带时间和 id 游标，避免最早的一批持续失败时饿死后续任务。 */
@@ -60,6 +63,9 @@ public interface ErrandRepository {
      */
     int casSettle(long errandId, long expectedVersion);
 
+    /** 自动结算的独立 CAS：只有数据库认定截止时间已过才可完成。 */
+    int casAutoSettle(long errandId, long expectedVersion);
+
     /** 仲裁退款：DISPUTED -> REFUNDED */
     int casRefundFromDispute(long errandId, long expectedVersion);
 
@@ -72,7 +78,7 @@ public interface ErrandRepository {
     /** 仲裁支持跑腿：DISPUTED -> SETTLED */
     int casSettleFromDispute(long errandId, long expectedVersion);
 
-    /** 兜底扫描：捞出送达后超过窗口仍未确认的任务，用于自动结算 */
+    /** 兜底扫描：按持久截止时间查找可自动结算任务。 */
     List<Errand> findAutoSettleDue(long autoSettleSeconds, int limit);
 
     /** 带时间和 id 游标，避免最早的一批持续失败时饿死后续任务。 */

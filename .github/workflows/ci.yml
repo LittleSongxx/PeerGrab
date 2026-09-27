@@ -7,6 +7,13 @@ on:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    env:
+      PEERGRAB_MYSQL_PASSWORD: ci-isolated-mysql-password
+      PEERGRAB_TEST_DB_PASSWORD: ci-isolated-mysql-password
+      PEERGRAB_TEST_DB_HOST: 127.0.0.1
+      PEERGRAB_TEST_DB_PORT: '3307'
+      PEERGRAB_TEST_REDIS_HOST: 127.0.0.1
+      PEERGRAB_TEST_REDIS_PORT: '6380'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -15,9 +22,30 @@ jobs:
           java-version: '21'
           cache: maven
           cache-dependency-path: 'peergrab-backend/**/pom.xml'
-      - name: Unit tests
-        run: mvn -B -ntp test
+      - name: Start isolated integration middleware
+        run: docker compose -p peergrab-ci -f docker-compose.yaml up -d --wait mysql redis
+        working-directory: peergrab-backend/docker
+      - name: Unit and integration tests
+        run: mvn -B -ntp -Dpeergrab.it=true test
         working-directory: peergrab-backend
+      - name: Require integration cases to execute
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          reports = list(Path('peergrab-backend').glob('*/target/surefire-reports/TEST-*IT*.xml'))
+          assert reports, 'No integration test reports were generated'
+          tests = skipped = 0
+          for report in reports:
+              suite = ET.parse(report).getroot()
+              tests += int(suite.attrib.get('tests', 0))
+              skipped += int(suite.attrib.get('skipped', 0))
+          assert tests > 0 and skipped == 0, f'Integration cases: {tests} tests, {skipped} skipped'
+          PY
+      - name: Remove isolated integration middleware
+        if: always()
+        run: docker compose -p peergrab-ci -f docker-compose.yaml down -v --remove-orphans
+        working-directory: peergrab-backend/docker
 
   frontend:
     runs-on: ubuntu-latest
@@ -34,6 +62,26 @@ jobs:
       - name: Build
         run: npm run build
         working-directory: peergrab-frontend
+
+  mq-contract:
+    runs-on: ubuntu-latest
+    env:
+      PEERGRAB_MQ_CONTRACT_DISPOSABLE: 'YES'
+      PEERGRAB_AUTH_DEMO_PASSWORD_1001: ci-only-1001
+      PEERGRAB_AUTH_DEMO_PASSWORD_2001: ci-only-2001
+      PEERGRAB_AUTH_DEMO_PASSWORD_2002: ci-only-2002
+      PEERGRAB_AUTH_DEMO_PASSWORD_9001: ci-only-9001
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start isolated RocketMQ broker
+        run: docker compose -p peergrab-ci-mq -f docker-compose.yaml -f docker-compose.full.yaml up -d --wait rmqbroker
+        working-directory: peergrab-backend/docker
+      - name: Verify fund event topic and ordinary delivery
+        run: bash peergrab-backend/docker/verify-fund-topic-contract.sh peergrab-ci-mq
+      - name: Remove isolated RocketMQ resources
+        if: always()
+        run: docker compose -p peergrab-ci-mq -f docker-compose.yaml -f docker-compose.full.yaml down -v --remove-orphans
+        working-directory: peergrab-backend/docker
 
   compose-config:
     runs-on: ubuntu-latest
@@ -53,6 +101,7 @@ jobs:
         env:
           PEERGRAB_MYSQL_ROOT_PASSWORD: ci-only-root
           PEERGRAB_MYSQL_APP_PASSWORD: ci-only-app
+          PEERGRAB_AUTH_JWT_SECRET: ci-only-jwt-secret-with-at-least-thirty-two-bytes
       - name: Validate isolated benchmark Compose model
         run: |
           docker compose -p peergrab-bench-ci --env-file bench.env.example \
@@ -94,3 +143,6 @@ jobs:
           bash -n peergrab-backend/bench/scripts/cleanup.sh
           sh -n peergrab-backend/bench/scripts/init-mq-probe.sh
           sh -n peergrab-backend/docker/bench-guard-init.sh
+          bash -n peergrab-backend/docker/init-mq.sh
+          sh -n peergrab-backend/docker/init-mq-container.sh
+          bash -n peergrab-backend/docker/verify-fund-topic-contract.sh

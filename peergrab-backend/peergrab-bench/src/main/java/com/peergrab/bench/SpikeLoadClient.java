@@ -39,8 +39,14 @@ public class SpikeLoadClient {
         if (concurrency < 1 || slotTotal < 1 || slotTotal > concurrency) {
             throw new IllegalArgumentException("Require 1 <= slotTotal <= concurrency");
         }
-        BenchJwtTokens tokens = new BenchJwtTokens(System.getenv("PEERGRAB_AUTH_JWT_SECRET"));
-        String publisherToken = tokens.issue(PUBLISHER_ID);
+        String dbHost = System.getenv().getOrDefault("PEERGRAB_TEST_DB_HOST", "127.0.0.1");
+        String dbPort = System.getenv().getOrDefault("PEERGRAB_TEST_DB_PORT", "3307");
+        String dbPassword = System.getenv("PEERGRAB_TEST_DB_PASSWORD");
+        if (dbPassword == null || dbPassword.isBlank()) {
+            throw new IllegalStateException("Set PEERGRAB_TEST_DB_PASSWORD for benchmark auth sessions");
+        }
+        String jdbcUrl = "jdbc:mysql://" + dbHost + ":" + dbPort
+                + "/peer_grab?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai";
 
         HttpClient client = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(5))
@@ -49,7 +55,12 @@ public class SpikeLoadClient {
 
         // 登记本轮，产生的任务都挂到这个 run_id 上：
         // 数据得以保留用于改动前后对比，也能被 cleanup.sh 精确清理
-        BenchRunRecorder recorder = new BenchRunRecorder();
+        try (var db = java.sql.DriverManager.getConnection(jdbcUrl,
+                System.getenv().getOrDefault("PEERGRAB_TEST_DB_USER", "root"), dbPassword);
+             BenchRunRecorder recorder = new BenchRunRecorder(jdbcUrl,
+                     System.getenv().getOrDefault("PEERGRAB_TEST_DB_USER", "root"), dbPassword)) {
+        BenchJwtTokens tokens = new BenchJwtTokens(System.getenv("PEERGRAB_AUTH_JWT_SECRET"), db);
+        String publisherToken = tokens.issue(PUBLISHER_ID);
         String runId = recorder.startRun("BENCH", "S1", concurrency,
                 "应用与中间件、发压端同机，存在资源争抢；数字仅作基线");
         List<Long> trackedErrands = new ArrayList<>();
@@ -59,6 +70,11 @@ public class SpikeLoadClient {
         // 但那不是应用的真实性能。
         System.out.println("[warmup] 串行发布并抢取 30 个任务，预热发布与抢单路径...");
         warmup(client, baseUrl, trackedErrands, publisherToken, tokens);
+        // Session fixture creation is setup work; exclude it from the timed spike.
+        String[] runnerTokens = new String[concurrency];
+        for (int i = 0; i < concurrency; i++) {
+            runnerTokens[i] = tokens.issue(2001L + i);
+        }
 
         long errandId = publish(client, baseUrl, slotTotal, publisherToken);
         trackedErrands.add(errandId);
@@ -79,11 +95,11 @@ public class SpikeLoadClient {
 
         try (ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor()) {
             for (int i = 0; i < concurrency; i++) {
-                long runnerId = 2001L + i;
+                String runnerToken = runnerTokens[i];
                 pool.submit(() -> {
                     HttpRequest req = HttpRequest.newBuilder()
                             .uri(URI.create(baseUrl + "/api/errands/" + errandId + "/grab"))
-                            .header("Authorization", "Bearer " + tokens.issue(runnerId))
+                            .header("Authorization", "Bearer " + runnerToken)
                             .header("X-Request-Id", UUID.randomUUID().toString())
                             .header("Content-Type", "application/json")
                             .timeout(Duration.ofSeconds(30))
@@ -164,13 +180,13 @@ public class SpikeLoadClient {
                     elapsed, throughput, p99, Math.max(0, success.get() - slotTotal));
             recorder.trackErrands(runId, trackedErrands);
             recorder.finishRun(runId, pass ? "PASS" : "FAIL", summary);
-            recorder.close();
 
             if (!pass) {
                 System.err.printf("[FAIL] 成功数 %d != 名额数 %d，发生超卖或少卖%n", success.get(), slotTotal);
                 System.exit(1);
             }
             System.out.println("[PASS] 应用层零超卖，请继续用 verify_run.sql 做数据库侧交叉校验");
+        }
         }
     }
 

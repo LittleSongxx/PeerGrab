@@ -1,7 +1,5 @@
 package com.peergrab.application.usecase;
 
-import com.peergrab.domain.credit.model.CreditEvent;
-import com.peergrab.domain.credit.model.CreditEventType;
 import com.peergrab.domain.credit.ports.CreditRepository;
 import com.peergrab.domain.errand.model.Errand;
 import com.peergrab.domain.errand.model.ErrandStatus;
@@ -47,8 +45,6 @@ public class TimeoutTransferUseCase {
     private final ErrandQueryPort errandQueryPort;
     private final int minCreditScore;
     private final int maxOngoing;
-    private final com.peergrab.shared.SnowflakeIdGenerator creditIdGenerator;
-    private final long confirmTimeoutSeconds;
     /**
      * 最大流转轮次。
      *
@@ -68,10 +64,8 @@ public class TimeoutTransferUseCase {
                                   CacheEvictSupport cacheEvict,
                                   CreditRepository creditRepository,
                                   ErrandQueryPort errandQueryPort,
-                                  com.peergrab.shared.SnowflakeIdGenerator creditIdGenerator,
                                   @Value("${peergrab.credit.min-score:40}") int minCreditScore,
                                   @Value("${peergrab.credit.max-ongoing:5}") int maxOngoing,
-                                  @Value("${peergrab.timeout.confirm-seconds:300}") long confirmTimeoutSeconds,
                                   @Value("${peergrab.timeout.max-transfer-rounds:5}") int maxTransferRounds) {
         this.errandRepository = errandRepository;
         this.candidateQueue = candidateQueue;
@@ -82,10 +76,8 @@ public class TimeoutTransferUseCase {
         this.cacheEvict = cacheEvict;
         this.creditRepository = creditRepository;
         this.errandQueryPort = errandQueryPort;
-        this.creditIdGenerator = creditIdGenerator;
         this.minCreditScore = minCreditScore;
         this.maxOngoing = maxOngoing;
-        this.confirmTimeoutSeconds = confirmTimeoutSeconds;
         this.maxTransferRounds = maxTransferRounds;
     }
 
@@ -115,6 +107,12 @@ public class TimeoutTransferUseCase {
             return Outcome.SKIPPED;
         }
 
+        // 消息只负责唤醒。先用数据库时钟检查，避免早到消息提前领取候选；
+        // 后续 transfer/revert 的条件 UPDATE 还会在同一事务中复核。
+        if (!errandRepository.confirmTimeoutDue(errandId, expectedRound)) {
+            return Outcome.SKIPPED;
+        }
+
         // 超过最大流转轮次：不再逐个试候选人，直接回退让所有人重新抢
         if (errand.round() >= maxTransferRounds) {
             log.info("流转轮次已达上限 errandId={} round={} max={}，回退重新开放",
@@ -134,35 +132,63 @@ public class TimeoutTransferUseCase {
                         && creditRepository.scoreOf(nextRunner) >= minCreditScore
                         && errandQueryPort.countOngoingByRunner(nextRunner) < maxOngoing;
             } catch (RuntimeException e) {
-                // 数据库暂不可用时不能把刚弹出的候选人永久丢掉。
-                candidateQueue.offer(errandId, nextRunner, candidate.score());
+                // 释放当前租约；即使 Redis 也失败，租约到期仍会重新入队。
+                releaseCandidate(errandId, candidate);
                 throw e;
             }
             if (!eligible) {
                 log.info("候选人已不符合流转资格 errandId={} runnerId={}", errandId, nextRunner);
+                candidateQueue.acknowledge(errandId, candidate);
                 continue;
             }
             TimeoutTransferStep.StepResult result;
             try {
-                result = step.transfer(errand, nextRunner, confirmTimeoutSeconds);
+                result = step.transfer(errand, nextRunner);
             } catch (RuntimeException e) {
-                candidateQueue.offer(errandId, nextRunner, candidate.score());
+                releaseCandidate(errandId, candidate);
                 throw e;
             }
             if (!result.applied()) {
+                if (result.quotaFull()) {
+                    // 预检查后又抢中别的任务；事务内额度裁决为准，继续找下一位。
+                    log.info("候选人额度已满 errandId={} runnerId={}", errandId, nextRunner);
+                    candidateQueue.acknowledge(errandId, candidate);
+                    continue;
+                }
                 // CAS 失败：任务刚被确认或被别的消费者处理了。
-                // 候选人已弹出，按原 score 放回，保留原有排队顺序。
-                candidateQueue.offer(errandId, nextRunner, candidate.score());
+                // 释放租约，按原 score 保留排队顺序。
+                releaseCandidate(errandId, candidate);
                 return Outcome.SKIPPED;
             }
+            // DB 已提交；Redis 确认失败时租约最终会恢复，再次流转仍受状态 CAS 保护。
+            try {
+                candidateQueue.acknowledge(errandId, candidate);
+            } catch (RuntimeException e) {
+                log.warn("任务已流转但候选租约确认失败，待到期恢复 errandId={} runnerId={}",
+                        errandId, nextRunner, e);
+            }
+            cacheEvict.evictAfterCommit(errandId);
             dispatch(result.pendingSend());
             log.info("任务已流转 errandId={} round={} -> nextRunner={}",
                     errandId, expectedRound + 1, nextRunner);
             return Outcome.TRANSFERRED;
         }
 
+        // 别的 worker 正持有候选租约时不可回退；扫描任务会在租约到期后重试。
+        if (candidateQueue.size(errandId) > 0) {
+            return Outcome.SKIPPED;
+        }
         log.info("候选队列为空，任务回退重新开放 errandId={}", errandId);
         return revertAndReturnSlot(errand);
+    }
+
+    private void releaseCandidate(long errandId, CandidateQueuePort.Candidate candidate) {
+        try {
+            candidateQueue.release(errandId, candidate);
+        } catch (RuntimeException e) {
+            log.warn("候选租约释放失败，待到期恢复 errandId={} runnerId={}",
+                    errandId, candidate.runnerId(), e);
+        }
     }
 
     /** 回退到 PUBLISHED 后丢弃上一轮 Redis 快照，下次抢单由数据库 CAS 裁决。 */
@@ -171,7 +197,6 @@ public class TimeoutTransferUseCase {
         if (!result.applied()) {
             return Outcome.SKIPPED;
         }
-        Long grabber = errand.grabberId();
         // Redis grabbed 集合可能还保存首轮持有人，不能按当前 grabber 做 SREM/INCR。
         // 失效失败也不影响 DB 真值：抢单时若 Redis 显示已满但 DB 开放会走 CAS 兜底。
         try {
@@ -184,21 +209,6 @@ public class TimeoutTransferUseCase {
         } catch (RuntimeException e) {
             log.warn("回退后候选队列清理失败 errandId={}", errand.id(), e);
         }
-        if (grabber != null) {
-            // 抢中后超时未确认：信用扣分。biz_no 带 round 保证同一轮不重复扣分。
-            // 这里不在业务事务内（revert 事务已提交），applyEvent 自身原子；
-            // 记录失败不影响回退结果，信用分容忍度高于资金
-            try {
-                creditRepository.applyEvent(new CreditEvent(
-                        creditIdGenerator.nextId(),
-                        CreditEvent.revertBizNo(errand.id(), errand.round()),
-                        grabber, CreditEventType.GRAB_TIMEOUT_REVERT,
-                        CreditEventType.GRAB_TIMEOUT_REVERT.delta(), "ERRAND", errand.id(),
-                        java.time.Instant.now()));
-            } catch (RuntimeException e) {
-                log.warn("任务已回退，信用扣分失败 errandId={} runnerId={}", errand.id(), grabber, e);
-            }
-        }
         // 回退到 PUBLISHED、名额归还，详情缓存必须失效
         try {
             cacheEvict.evictAfterCommit(errand.id());
@@ -210,7 +220,7 @@ public class TimeoutTransferUseCase {
 
     /** 抢单成功后登记首轮超时消息，供 GrabErrandUseCase 在事务提交后调用 */
     public void scheduleFirstTimeout(long errandId, int round, long version) {
-        dispatch(step.enqueueTimeout(errandId, round, version, confirmTimeoutSeconds));
+        dispatch(step.enqueueTimeout(errandId, round, version));
     }
 
     /**
@@ -222,6 +232,11 @@ public class TimeoutTransferUseCase {
         if (send == null) {
             return;
         }
+        if (!delayMessagePort.available()) {
+            // The DB scanner owns due work until MQ is enabled again; keep the
+            // local_message row PENDING so the retry worker can later publish it.
+            return;
+        }
         try {
             delayMessagePort.send(send.topic(), send.msgKey(), send.payload(), send.deliverAt());
             localMessageRepository.markSent(send.msgKey());
@@ -230,7 +245,4 @@ public class TimeoutTransferUseCase {
         }
     }
 
-    public long confirmTimeoutSeconds() {
-        return confirmTimeoutSeconds;
-    }
 }

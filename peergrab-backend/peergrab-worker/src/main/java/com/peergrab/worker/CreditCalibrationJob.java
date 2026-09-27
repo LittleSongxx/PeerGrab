@@ -11,7 +11,7 @@ import org.springframework.stereotype.Component;
 /**
  * 信用分快照每日校准。
  *
- * 增量计分保证业务事务内无中间态；每日校准负责把 30 天窗口外的历史贡献移除。
+ * 业务写入和每日校准使用同一事件回放规则；校准移除 30 天窗口外事件影响。
  */
 @Component
 public class CreditCalibrationJob {

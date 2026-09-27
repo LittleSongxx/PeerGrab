@@ -20,6 +20,7 @@
     <module>peergrab-bootstrap</module>
     <module>peergrab-worker</module>
     <module>peergrab-bench</module>
+    <module>peergrab-sharding-lab</module>
   </modules>
 
   <properties>

@@ -24,7 +24,11 @@ export default function Notifications() {
     }
   }, []);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    void load();
+    const poll = window.setInterval(() => void load(), 30000);
+    return () => window.clearInterval(poll);
+  }, [load]);
 
   const markRead = async (id: string) => {
     setBusy(id);

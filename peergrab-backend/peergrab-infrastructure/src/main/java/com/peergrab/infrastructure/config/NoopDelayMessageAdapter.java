@@ -1,8 +1,6 @@
 package com.peergrab.infrastructure.config;
 
 import com.peergrab.domain.errand.ports.DelayMessagePort;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
@@ -23,11 +21,13 @@ import java.time.Instant;
 @ConditionalOnProperty(name = "peergrab.mq.enabled", havingValue = "false", matchIfMissing = true)
 public class NoopDelayMessageAdapter implements DelayMessagePort {
 
-    private static final Logger log = LoggerFactory.getLogger(NoopDelayMessageAdapter.class);
+    @Override
+    public boolean available() {
+        return false;
+    }
 
     @Override
     public void send(String topic, String msgKey, String payload, Instant deliverAt) {
-        log.debug("[noop-mq] 未启用 MQ，消息仅登记在 local_message，由兜底扫描处理 msgKey={} deliverAt={}",
-                msgKey, deliverAt);
+        throw new IllegalStateException("MQ 未启用，定时消息须保留 PENDING: " + msgKey);
     }
 }

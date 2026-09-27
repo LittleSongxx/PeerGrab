@@ -2,6 +2,7 @@ package com.peergrab.application.usecase;
 
 import com.peergrab.domain.errand.model.ErrandStatus;
 import com.peergrab.domain.errand.ports.ErrandRepository;
+import com.peergrab.domain.errand.ports.RunnerQuotaPort;
 import com.peergrab.domain.grab.model.GrabRecord;
 import com.peergrab.domain.grab.ports.GrabRecordRepository;
 import org.springframework.dao.DuplicateKeyException;
@@ -20,23 +21,34 @@ public class GrabTransactionalStep {
 
     private final ErrandRepository errandRepository;
     private final GrabRecordRepository grabRecordRepository;
+    private final RunnerQuotaPort runnerQuotaPort;
+    private final int maxOngoing;
 
     public GrabTransactionalStep(ErrandRepository errandRepository,
-                                 GrabRecordRepository grabRecordRepository) {
+                                 GrabRecordRepository grabRecordRepository,
+                                 RunnerQuotaPort runnerQuotaPort,
+                                 @org.springframework.beans.factory.annotation.Value("${peergrab.credit.max-ongoing:5}") int maxOngoing) {
         this.errandRepository = errandRepository;
         this.grabRecordRepository = grabRecordRepository;
+        this.runnerQuotaPort = runnerQuotaPort;
+        this.maxOngoing = maxOngoing;
     }
 
+    public enum LockResult { GRABBED, CONFLICT, QUOTA_FULL }
+
     /**
-     * @return true 抢中，false 并发冲突（CAS 失败或撞唯一索引）
+     * 额度检查与任务 CAS 在同一事务内；抢中即占用额度。
      */
     @Transactional(rollbackFor = Exception.class)
-    public boolean lockAndRecord(long campusId, long errandId, long runnerId, long expectedVersion,
+    public LockResult lockAndRecord(long campusId, long errandId, long runnerId, long expectedVersion,
                                  int seq, int round, long recordId, ErrandStatus fromStatus, String requestId) {
+        if (!runnerQuotaPort.lockAndHasCapacity(runnerId, maxOngoing)) {
+            return LockResult.QUOTA_FULL;
+        }
         int affected = errandRepository.casLockForRunner(errandId, runnerId, expectedVersion);
         if (affected == 0) {
             // 状态已被别人改掉，说明这个名额被别人抢走了
-            return false;
+            return LockResult.CONFLICT;
         }
         try {
             grabRecordRepository.insert(GrabRecord.grabbed(recordId, campusId, errandId, runnerId,
@@ -47,6 +59,6 @@ public class GrabTransactionalStep {
                     "抢单记录唯一索引冲突 errandId=" + errandId + " runnerId=" + runnerId + " seq=" + seq, e);
         }
         errandRepository.appendStatusLog(errandId, fromStatus, ErrandStatus.LOCKED, round, runnerId);
-        return true;
+        return LockResult.GRABBED;
     }
 }

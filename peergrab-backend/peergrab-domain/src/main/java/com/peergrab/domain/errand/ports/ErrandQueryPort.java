@@ -45,7 +45,7 @@ public interface ErrandQueryPort {
     /** 全量投影重建用主键游标扫描，避免 ORDER BY RAND() 与一次装载全表。 */
     List<Long> scanIdsAfter(long afterId, int limit);
 
-    /** 跑腿在途任务数（已接单未送达）：抢单资格校验用 */
+    /** 跑腿占用额度数（已抢中或接单、尚未送达）：前置资格检查用，事务内以 RunnerQuotaPort 为准。 */
     int countOngoingByRunner(long runnerId);
 
     record StatusChange(Instant time, String from, String to, int round, long operatorId) {}

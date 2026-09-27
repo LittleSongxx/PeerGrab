@@ -5,143 +5,227 @@ import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.Jws;
 import io.jsonwebtoken.JwtException;
 import io.jsonwebtoken.Jwts;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import io.jsonwebtoken.security.Keys;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Transactional;
 
 import javax.crypto.SecretKey;
-import io.jsonwebtoken.security.Keys;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
+import java.util.Base64;
 import java.util.Date;
+import java.util.HexFormat;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
 /**
- * JWT 实现（peergrab.auth.mode=jwt 时装配），与 Session 构成对照组。
- *
- * ── 与 Session 的核心差异（教程对比点）──
- *   1. 无状态：token 自带 userId 与有效期，服务端不存会话映射。
- *      服务重启后 token 依然有效（Session 则依赖 Redis 里的映射）。
- *   2. 吊销难：JWT 签发后无法"作废"，只能靠黑名单补救——
- *      本实现用 Redis 存 auth:jwt:revoked:{jti}，TTL 设为 token 剩余有效期。
- *      这等于承认"纯无状态"在需要吊销的场景里是伪命题。
- *   3. 续期：Session 每次访问自动延长 TTL；JWT 通过一次性 refresh token 换新。
- *
- * ── 秘钥管理 ──
- * 秘钥从配置读，必须由环境变量/密钥服务注入，绝不进代码库。
+ * JWT 鉴权真值存于 MySQL；Redis 故障不会阻断鉴权或令牌轮换。
+ * refresh token 是 256 位随机凭证，数据库只保存 SHA-256 哈希。
  */
 @Component
 @ConditionalOnProperty(name = "peergrab.auth.mode", havingValue = "jwt")
 public class JwtAuthAdapter implements RefreshTokenPort {
 
-    private static final Logger log = LoggerFactory.getLogger(JwtAuthAdapter.class);
-    private static final String REVOKED_PREFIX = "auth:jwt:revoked:";
-    private static final String REFRESH_PREFIX = "auth:jwt:refresh:";
+    private static final SecureRandom RANDOM = new SecureRandom();
 
     private final SecretKey key;
-    private final StringRedisTemplate redis;
-    private final long ttlMinutes;
+    private final JdbcTemplate jdbc;
+    private final long accessTtlMinutes;
     private final long refreshTtlMinutes;
 
-    public JwtAuthAdapter(StringRedisTemplate redis,
+    public JwtAuthAdapter(JdbcTemplate jdbc,
                           @Value("${peergrab.auth.jwt-secret:}") String secret,
-                          @Value("${peergrab.auth.session-ttl-minutes:120}") long ttlMinutes,
+                          @Value("${peergrab.auth.session-ttl-minutes:120}") long accessTtlMinutes,
                           @Value("${peergrab.auth.refresh-ttl-minutes:10080}") long refreshTtlMinutes) {
-        this.redis = redis;
-        this.ttlMinutes = ttlMinutes;
-        this.refreshTtlMinutes = refreshTtlMinutes;
         if (secret.getBytes(StandardCharsets.UTF_8).length < 32) {
             throw new IllegalArgumentException("JWT 模式须配置至少 32 字节的 peergrab.auth.jwt-secret");
         }
+        if (accessTtlMinutes <= 0 || refreshTtlMinutes < accessTtlMinutes) {
+            throw new IllegalArgumentException("JWT 有效期须为正，refresh 有效期须不小于 access 有效期");
+        }
         this.key = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
+        this.jdbc = jdbc;
+        this.accessTtlMinutes = accessTtlMinutes;
+        this.refreshTtlMinutes = refreshTtlMinutes;
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public String login(long userId) {
-        return issueAccessToken(userId);
+        String sessionId = createSession(userId, accessTtlMinutes);
+        return issueAccessToken(userId, sessionId);
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public TokenPair loginWithRefresh(long userId) {
-        return new TokenPair(issueAccessToken(userId), issueRefreshToken(userId));
+        String sessionId = createSession(userId, refreshTtlMinutes);
+        return new TokenPair(issueAccessToken(userId, sessionId), insertRefreshToken(sessionId));
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public Optional<TokenPair> refresh(String refreshToken) {
-        if (refreshToken == null || refreshToken.isBlank()) {
-            return Optional.empty();
-        }
-        String key = REFRESH_PREFIX + refreshToken;
-        // 原子取出并删除，避免同一个 refresh token 并发兑换多次。
-        String userIdText = redis.opsForValue().getAndDelete(key);
-        if (userIdText == null) {
-            return Optional.empty();
-        }
-        long userId = Long.parseLong(userIdText);
-        return Optional.of(new TokenPair(issueAccessToken(userId), issueRefreshToken(userId)));
+        if (refreshToken == null || refreshToken.isBlank()) return Optional.empty();
+        String hash = tokenHash(refreshToken);
+        String sessionId = findSessionId(hash).orElse(null);
+        if (sessionId == null) return Optional.empty();
+
+        // 所有轮换和登出先锁 session，再修改 refresh 行；同一凭证只能兑换一次。
+        Session session = lockSession(sessionId).orElse(null);
+        if (session == null || !session.active()) return Optional.empty();
+        int consumed = jdbc.update("""
+                DELETE FROM auth_refresh_token
+                 WHERE token_hash = ? AND session_id = ? AND expires_at > NOW(3)
+                """, hash, sessionId);
+        if (consumed == 0) return Optional.empty();
+
+        jdbc.update("""
+                UPDATE auth_token_session
+                   SET expires_at = DATE_ADD(NOW(3), INTERVAL ? SECOND)
+                 WHERE session_id = ?
+                """, seconds(refreshTtlMinutes), sessionId);
+        String replacement = insertRefreshToken(sessionId);
+        return Optional.of(new TokenPair(issueAccessToken(session.userId(), sessionId), replacement));
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public boolean revokeRefresh(String refreshToken) {
-        return refreshToken != null && !refreshToken.isBlank()
-                && Boolean.TRUE.equals(redis.delete(REFRESH_PREFIX + refreshToken));
-    }
-
-    private String issueAccessToken(long userId) {
-        Date now = new Date();
-        return Jwts.builder()
-                .subject(String.valueOf(userId))
-                .id(UUID.randomUUID().toString())          // jti：吊销黑名单的键
-                .issuedAt(now)
-                .expiration(new Date(now.getTime() + ttlMinutes * 60_000))
-                .signWith(key)
-                .compact();
-    }
-
-    private String issueRefreshToken(long userId) {
-        String token = UUID.randomUUID().toString().replace("-", "");
-        redis.opsForValue().set(REFRESH_PREFIX + token, String.valueOf(userId),
-                Duration.ofMinutes(refreshTtlMinutes));
-        return token;
+        if (refreshToken == null || refreshToken.isBlank()) return false;
+        String hash = tokenHash(refreshToken);
+        String sessionId = findSessionId(hash).orElse(null);
+        if (sessionId == null) return false;
+        Session session = lockSession(sessionId).orElse(null);
+        if (session == null || !session.active()) return false;
+        int deleted = jdbc.update("""
+                DELETE FROM auth_refresh_token
+                 WHERE token_hash = ? AND session_id = ? AND expires_at > NOW(3)
+                """, hash, sessionId);
+        if (deleted == 0) return false;
+        revokeSession(sessionId);
+        return true;
     }
 
     @Override
     public Optional<Long> resolve(String token) {
-        if (token == null || token.isBlank()) {
-            return Optional.empty();
-        }
+        if (token == null || token.isBlank()) return Optional.empty();
         try {
-            Jws<Claims> jws = Jwts.parser().verifyWith(key).build().parseSignedClaims(token);
-            Claims claims = jws.getPayload();
-            // 黑名单检查：被吊销的 jti 即使签名与有效期都合法也拒绝
-            String jti = claims.getId();
-            if (jti != null && Boolean.TRUE.equals(redis.hasKey(REVOKED_PREFIX + jti))) {
-                return Optional.empty();
-            }
-            return Optional.of(Long.parseLong(claims.getSubject()));
+            Claims claims = parse(token).getPayload();
+            String sessionId = claims.get("sid", String.class);
+            long userId = Long.parseLong(claims.getSubject());
+            if (sessionId == null) return Optional.empty();
+            Integer valid = jdbc.queryForObject("""
+                    SELECT COUNT(*) FROM auth_token_session s
+                     WHERE s.session_id = ? AND s.user_id = ?
+                       AND s.revoked_at IS NULL AND s.expires_at > NOW(3)
+                    """, Integer.class, sessionId, userId);
+            return valid != null && valid == 1 ? Optional.of(userId) : Optional.empty();
         } catch (JwtException | IllegalArgumentException e) {
-            // 签名伪造 / 过期 / 格式错误：一律视为无效
             return Optional.empty();
         }
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void logout(String token) {
+        if (token == null || token.isBlank()) return;
         try {
-            Jws<Claims> jws = Jwts.parser().verifyWith(key).build().parseSignedClaims(token);
-            Claims claims = jws.getPayload();
-            String jti = claims.getId();
-            long remainMs = claims.getExpiration().getTime() - System.currentTimeMillis();
-            if (jti != null && remainMs > 0) {
-                // 黑名单 TTL = token 剩余有效期：token 自然过期后黑名单自动清理
-                redis.opsForValue().set(REVOKED_PREFIX + jti, "1", Duration.ofMillis(remainMs));
-            }
-        } catch (JwtException | IllegalArgumentException e) {
-            log.debug("登出的 token 已无效，忽略");
+            Claims claims = parse(token).getPayload();
+            String sessionId = claims.get("sid", String.class);
+            long userId = Long.parseLong(claims.getSubject());
+            if (sessionId == null) return;
+            jdbc.update("""
+                    UPDATE auth_token_session SET revoked_at = COALESCE(revoked_at, NOW(3))
+                     WHERE session_id = ? AND user_id = ?
+                    """, sessionId, userId);
+            jdbc.update("DELETE FROM auth_refresh_token WHERE session_id = ?", sessionId);
+        } catch (JwtException | IllegalArgumentException ignored) {
+            // 已过期、格式错误或签名无效的 token 无需撤销。
         }
     }
+
+    private String createSession(long userId, long ttlMinutes) {
+        String sessionId = UUID.randomUUID().toString();
+        jdbc.update("""
+                INSERT INTO auth_token_session (session_id, user_id, expires_at)
+                VALUES (?, ?, DATE_ADD(NOW(3), INTERVAL ? SECOND))
+                """, sessionId, userId, seconds(ttlMinutes));
+        return sessionId;
+    }
+
+    private String insertRefreshToken(String sessionId) {
+        byte[] random = new byte[32];
+        RANDOM.nextBytes(random);
+        String token = Base64.getUrlEncoder().withoutPadding().encodeToString(random);
+        jdbc.update("""
+                INSERT INTO auth_refresh_token (token_hash, session_id, expires_at)
+                VALUES (?, ?, DATE_ADD(NOW(3), INTERVAL ? SECOND))
+                """, tokenHash(token), sessionId, seconds(refreshTtlMinutes));
+        return token;
+    }
+
+    private String issueAccessToken(long userId, String sessionId) {
+        Date now = new Date();
+        return Jwts.builder()
+                .subject(String.valueOf(userId))
+                // 同一秒内轮换 access token 仍需唯一，jti 不参与服务端撤销判定。
+                .id(UUID.randomUUID().toString())
+                .claim("sid", sessionId)
+                .issuedAt(now)
+                .expiration(new Date(Math.addExact(now.getTime(),
+                        Math.multiplyExact(accessTtlMinutes, 60_000))))
+                .signWith(key)
+                .compact();
+    }
+
+    private Jws<Claims> parse(String token) {
+        return Jwts.parser().verifyWith(key).build().parseSignedClaims(token);
+    }
+
+    private Optional<String> findSessionId(String hash) {
+        List<String> sessions = jdbc.queryForList("""
+                SELECT session_id FROM auth_refresh_token
+                 WHERE token_hash = ? AND expires_at > NOW(3)
+                """, String.class, hash);
+        return sessions.stream().findFirst();
+    }
+
+    private Optional<Session> lockSession(String sessionId) {
+        List<Session> rows = jdbc.query("""
+                SELECT user_id, revoked_at, expires_at > NOW(3) AS unexpired
+                  FROM auth_token_session WHERE session_id = ? FOR UPDATE
+                """, (rs, rowNum) -> new Session(rs.getLong("user_id"),
+                rs.getTimestamp("revoked_at") == null && rs.getBoolean("unexpired")), sessionId);
+        return rows.stream().findFirst();
+    }
+
+    private void revokeSession(String sessionId) {
+        jdbc.update("""
+                UPDATE auth_token_session SET revoked_at = COALESCE(revoked_at, NOW(3))
+                 WHERE session_id = ?
+                """, sessionId);
+        jdbc.update("DELETE FROM auth_refresh_token WHERE session_id = ?", sessionId);
+    }
+
+    private static String tokenHash(String token) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(token.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("运行环境缺少 SHA-256", e);
+        }
+    }
+
+    private static long seconds(long minutes) {
+        return Math.multiplyExact(minutes, 60);
+    }
+
+    private record Session(long userId, boolean active) {}
 }

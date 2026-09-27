@@ -46,10 +46,10 @@ public class PickUpErrandUseCase {
         }
         errandRepository.appendStatusLog(errandId, ErrandStatus.ACCEPTED, ErrandStatus.PICKED_UP,
                 errand.round(), runnerId);
-        notifier.errandStatusChanged(errand.id(), errand.publisherId(), errand.grabberId(),
-                ErrandStatus.PICKED_UP.name(), errand.round());
-
         // 状态变了，详情缓存必须失效。挂在事务提交后执行（见 CacheEvictSupport 的注释）
         cacheEvict.evictAfterCommit(errandId);
+        AfterCommitRealtime.send(() -> notifier.errandStatusChanged(
+                errand.id(), errand.publisherId(), errand.grabberId(),
+                ErrandStatus.PICKED_UP.name(), errand.round()));
     }
 }

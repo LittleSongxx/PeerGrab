@@ -23,13 +23,16 @@ public interface ErrandCachePort {
      */
     Optional<CachedErrand> get(long errandId);
 
+    /** Redis 暂时不可用时，详情查询跳过 Bloom、分布式锁及回填，直接回源。 */
+    default boolean isDegraded() { return false; }
+
     /** 写缓存：回填全部分片，物理 TTL 带随机抖动 */
     void put(long errandId, String payloadJson);
 
     /** 缓存空值：防穿透用，TTL 短（默认 60s） */
     void putEmpty(long errandId);
 
-    /** 失效：删除该任务的全部分片 */
+    /** 失效活动缓存；失败必须抛出，让提交后调用方计数、消息消费者重试。 */
     void evict(long errandId);
 
     /**

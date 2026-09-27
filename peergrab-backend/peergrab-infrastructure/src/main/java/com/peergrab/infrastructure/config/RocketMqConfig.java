@@ -3,8 +3,6 @@ package com.peergrab.infrastructure.config;
 import org.apache.rocketmq.client.apis.ClientConfiguration;
 import org.apache.rocketmq.client.apis.ClientException;
 import org.apache.rocketmq.client.apis.ClientServiceProvider;
-import com.peergrab.domain.wallet.ports.FundEventPort;
-import com.peergrab.domain.wallet.ports.WalletRepository;
 import org.apache.rocketmq.client.apis.producer.Producer;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -59,25 +57,4 @@ public class RocketMqConfig {
                 .build();
     }
 
-    /**
-     * 资金事件适配器（事务消息）。
-     *
-     * 事务消息必须用带 TransactionChecker 的专用 Producer：
-     * 5.x API 里 checker 只能在构建时注册（ProducerBuilder.setTransactionChecker），
-     * 复用不带 checker 的 timeoutProducer 会在 beginTransaction 时直接抛
-     * "Transaction checker should not be null"（线上联调实测踩过）。
-     */
-    @Bean
-    public FundEventPort fundEventPort(ClientServiceProvider provider,
-                                       ClientConfiguration configuration,
-                                       WalletRepository walletRepository) throws ClientException {
-        RocketMqFundEventAdapter adapter =
-                new RocketMqFundEventAdapter(null, provider, walletRepository);
-        Producer txProducer = provider.newProducerBuilder()
-                .setClientConfiguration(configuration)
-                .setTransactionChecker(adapter.checker())
-                .build();
-        adapter.attachProducer(txProducer);
-        return adapter;
-    }
 }

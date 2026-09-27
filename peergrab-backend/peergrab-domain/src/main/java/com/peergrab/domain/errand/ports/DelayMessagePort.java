@@ -12,10 +12,13 @@ import java.time.Instant;
  */
 public interface DelayMessagePort {
 
+    /** A disabled transport must leave local outbox rows pending for later replay. */
+    default boolean available() { return true; }
+
     /**
      * 投递一条定时消息。
      *
-     * @param msgKey    幂等键，如 timeout:{errandId}:{round}，Broker 侧也用它去重
+     * @param msgKey    业务幂等与检索键，如 timeout:{errandId}:{round}；Broker 不保证按 key 去重
      * @param payload   消息体（JSON）
      * @param deliverAt 期望投递时间
      */

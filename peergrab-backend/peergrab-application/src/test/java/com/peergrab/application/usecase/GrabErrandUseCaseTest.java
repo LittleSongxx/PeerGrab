@@ -133,7 +133,8 @@ class GrabErrandUseCaseTest {
         when(records.findRunnerByRequestId(1L, errand.id(), "fallback-request")).thenReturn(Optional.empty());
         when(slot.tryAcquire(errand.id(), 2001L, "fallback-request")).thenReturn(SlotOutcome.SLOT_MISSING);
         when(step.lockAndRecord(eq(1L), eq(errand.id()), eq(2001L), anyLong(),
-                anyInt(), anyInt(), anyLong(), any(), eq("fallback-request"))).thenReturn(true);
+                anyInt(), anyInt(), anyLong(), any(), eq("fallback-request")))
+                .thenReturn(GrabTransactionalStep.LockResult.GRABBED);
         doThrow(new IllegalStateException("message store unavailable"))
                 .when(timeout).scheduleFirstTimeout(eq(errand.id()), anyInt(), anyLong());
 
@@ -156,13 +157,35 @@ class GrabErrandUseCaseTest {
         when(slot.tryAcquire(errand.id(), 2001L, "stale-slot")).thenReturn(SlotOutcome.SLOT_FULL);
         when(slot.reservationPending(errand.id())).thenReturn(false);
         when(step.lockAndRecord(eq(1L), eq(errand.id()), eq(2001L), anyLong(),
-                anyInt(), anyInt(), anyLong(), any(), eq("stale-slot"))).thenReturn(true);
+                anyInt(), anyInt(), anyLong(), any(), eq("stale-slot")))
+                .thenReturn(GrabTransactionalStep.LockResult.GRABBED);
 
         var result = useCase(slot, records, errands, step).grab(
                 new GrabErrandUseCase.Command(errand.id(), 2001L, "stale-slot"));
 
         assertTrue(result.grabbed());
         verify(slot).invalidate(errand.id());
+    }
+
+    @Test
+    @DisplayName("事务内额度已满时撤销 Redis 预占位并返回明确错误")
+    void quota_full_rolls_back_redis_reservation() {
+        var slot = mock(GrabSlotPort.class);
+        var records = mock(GrabRecordRepository.class);
+        var errands = mock(ErrandRepository.class);
+        var step = mock(GrabTransactionalStep.class);
+        var errand = publishedErrand();
+        when(errands.findById(errand.id())).thenReturn(Optional.of(errand));
+        when(slot.tryAcquire(errand.id(), 2001L, "quota-request")).thenReturn(SlotOutcome.ACQUIRED);
+        when(step.lockAndRecord(eq(1L), eq(errand.id()), eq(2001L), anyLong(),
+                anyInt(), anyInt(), anyLong(), any(), eq("quota-request")))
+                .thenReturn(GrabTransactionalStep.LockResult.QUOTA_FULL);
+
+        var result = useCase(slot, records, errands, step).grab(
+                new GrabErrandUseCase.Command(errand.id(), 2001L, "quota-request"));
+
+        assertEquals(ErrorCode.TOO_MANY_ONGOING, result.code());
+        verify(slot).rollback(errand.id(), 2001L, "quota-request");
     }
 
     private static Errand publishedErrand() {
@@ -233,6 +256,8 @@ class GrabErrandUseCaseTest {
     private static final class NoopCandidateQueue implements CandidateQueuePort {
         @Override public void offer(long errandId, long runnerId, double score) {}
         @Override public Optional<Candidate> pollBest(long errandId) { return Optional.empty(); }
+        @Override public void acknowledge(long errandId, Candidate candidate) {}
+        @Override public void release(long errandId, Candidate candidate) {}
         @Override public long size(long errandId) { return 0; }
         @Override public void clear(long errandId) {}
     }
@@ -263,6 +288,8 @@ class GrabErrandUseCaseTest {
         @Override public int casPickUp(long errandId, long runnerId, long expectedVersion) { return 0; }
         @Override public int casDeliver(long errandId, long runnerId, long expectedVersion) { return 0; }
         @Override public int casSettle(long errandId, long expectedVersion) { return 0; }
+        @Override public int casAutoSettle(long errandId, long expectedVersion) { return 0; }
+        @Override public boolean confirmTimeoutDue(long errandId, int expectedRound) { return false; }
         @Override public int casRefundFromDispute(long errandId, long expectedVersion) { return 0; }
         @Override public int casCancel(long errandId, long expectedVersion) { return 0; }
         @Override public int casDispute(long errandId, long expectedVersion) { return 0; }

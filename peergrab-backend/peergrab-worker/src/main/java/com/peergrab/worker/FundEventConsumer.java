@@ -2,7 +2,7 @@ package com.peergrab.worker;
 
 import com.peergrab.domain.notify.ports.NotificationRepository;
 import com.peergrab.shared.SnowflakeIdGenerator;
-import jakarta.annotation.PostConstruct;
+import com.peergrab.shared.MessagePayloadCodec;
 import jakarta.annotation.PreDestroy;
 import org.apache.rocketmq.client.apis.ClientConfiguration;
 import org.apache.rocketmq.client.apis.ClientServiceProvider;
@@ -14,6 +14,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.nio.charset.StandardCharsets;
@@ -22,8 +23,8 @@ import java.util.Collections;
 /**
  * 资金事件消费者：结算/退款/仲裁完成后落站内消息。
  *
- * 消息来自事务消息——事务消息保证"资金动作提交成功则消息必达"，
- * 这里只负责消费落库。消费端幂等靠 notification 表
+ * 消息来自同库 outbox，Worker 成功投递后标记 SENT；重复投递仍可能发生。
+ * 消费端幂等靠 notification 表
  * uk_msg_user(msg_key, user_id) 唯一索引：MQ 是 at-least-once，
  * 重复消费时 insertIfAbsent 返回 false，照常 ACK。
  */
@@ -46,7 +47,7 @@ public class FundEventConsumer {
                              ClientConfiguration configuration,
                              NotificationRepository notificationRepository,
                              SnowflakeIdGenerator idGenerator,
-                             @Value("${peergrab.mq.topic.fund-event:errand-fund-event}") String topic,
+                             @Value("${peergrab.mq.topic.fund-event:errand-fund-event-v2}") String topic,
                              @Value("${peergrab.mq.group.fund-event:peergrab-fund-event-consumer}") String group) {
         this.provider = provider;
         this.configuration = configuration;
@@ -56,7 +57,16 @@ public class FundEventConsumer {
         this.group = group;
     }
 
-    @PostConstruct
+    @Scheduled(fixedDelayString = "${peergrab.mq.consumer-reconnect-ms:10000}", scheduler = "mqConsumerScheduler")
+    public synchronized void ensureStarted() {
+        if (consumer != null) return;
+        try {
+            start();
+        } catch (Exception e) {
+            log.warn("资金事件消费者启动失败，稍后重试 topic={}", topic, e);
+        }
+    }
+
     public void start() throws Exception {
         consumer = provider.newPushConsumerBuilder()
                 .setClientConfiguration(configuration)
@@ -65,14 +75,24 @@ public class FundEventConsumer {
                         topic, new FilterExpression("*", FilterExpressionType.TAG)))
                 .setMessageListener(msg -> {
                     String body = StandardCharsets.UTF_8.decode(msg.getBody()).toString();
-                    String msgKey = msg.getKeys().stream().findFirst()
-                            .orElse(msg.getMessageId().toString());
                     String tag = msg.getTag().orElse("UNKNOWN");
+                    MessagePayloadCodec.FundEvent event;
                     try {
-                        long errandId = extractLong(body, "errandId");
-                        long publisherId = extractLong(body, "publisherId");
-                        long runnerId = extractLong(body, "runnerId");
-                        long amount = extractLong(body, "amountCents");
+                        event = MessagePayloadCodec.readFundEvent(body);
+                        if (!event.type().equals(tag)) {
+                            throw new IllegalArgumentException("MQ tag and payload type differ");
+                        }
+                    } catch (IllegalArgumentException e) {
+                        // No database scanner can recreate an already-SENT fund event; use MQ retry/DLQ.
+                        log.error("资金事件协议损坏，交由 MQ 死信处理 body={}", body, e);
+                        return ConsumeResult.FAILURE;
+                    }
+                    String msgKey = event.bizNo();
+                    try {
+                        long errandId = event.errandId();
+                        long publisherId = event.publisherId();
+                        long runnerId = event.runnerId();
+                        long amount = event.amountCents();
 
                         // 发单人视角与跑腿视角的文案不同——同一事件对双方语义不一样，
                         // 不能共用一句话（P4 浏览器验证时发现"你获得"出现在发单人侧）
@@ -103,23 +123,10 @@ public class FundEventConsumer {
     }
 
     @PreDestroy
-    public void stop() throws Exception {
+    public synchronized void stop() throws Exception {
         if (consumer != null) {
             consumer.close();
         }
     }
 
-    private static long extractLong(String json, String field) {
-        String needle = "\"" + field + "\":";
-        int start = json.indexOf(needle);
-        if (start < 0) {
-            throw new IllegalArgumentException("消息体缺少字段 " + field + ": " + json);
-        }
-        int i = start + needle.length();
-        int end = i;
-        while (end < json.length() && (Character.isDigit(json.charAt(end)) || json.charAt(end) == '-')) {
-            end++;
-        }
-        return Long.parseLong(json.substring(i, end));
-    }
 }

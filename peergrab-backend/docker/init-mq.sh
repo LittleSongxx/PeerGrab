@@ -22,8 +22,8 @@ CLUSTER="${CLUSTER:-DefaultCluster}"
 TOPIC="${TOPIC:-errand-confirm-timeout}"
 # P3：送达后 24h 自动结算（DELAY 类型，与超时流转同类）
 TOPIC_AUTO_SETTLE="${TOPIC_AUTO_SETTLE:-errand-auto-settle}"
-# P3：资金事件通知（普通类型，走事务消息——事务消息不支持延迟，所以必须是普通 topic）
-TOPIC_FUND_EVENT="${TOPIC_FUND_EVENT:-errand-fund-event}"
+# 资金事件改为同库 outbox + 普通消息。使用新 Topic，保留旧 TRANSACTION Topic 的历史与位点。
+TOPIC_FUND_EVENT="${TOPIC_FUND_EVENT:-errand-fund-event-v2}"
 # P5：延迟双删（DELAY 类型）
 TOPIC_CACHE_EVICT="${TOPIC_CACHE_EVICT:-errand-cache-evict}"
 GROUP="${GROUP:-peergrab-timeout-consumer}"
@@ -38,11 +38,8 @@ admin "updateTopic -n $NAMESRV -c $CLUSTER -t $TOPIC -a +message.type=DELAY" | t
 echo "创建 DELAY topic: $TOPIC_AUTO_SETTLE"
 admin "updateTopic -n $NAMESRV -c $CLUSTER -t $TOPIC_AUTO_SETTLE -a +message.type=DELAY" | tail -1
 
-echo "创建 TRANSACTION topic（事务消息用）: $TOPIC_FUND_EVENT"
-# 关键：事务消息要求 topic 是 TRANSACTION 类型。建成 NORMAL 会在发送时报
-# "Current message type not match with topic accept message types"（实测踩过）。
-# 类型一旦建错无法原地修改，必须 deleteTopic 后重建。
-admin "updateTopic -n $NAMESRV -c $CLUSTER -t $TOPIC_FUND_EVENT -a +message.type=TRANSACTION" | tail -1
+echo "创建 NORMAL topic（资金 outbox 普通消息）: $TOPIC_FUND_EVENT"
+admin "updateTopic -n $NAMESRV -c $CLUSTER -t $TOPIC_FUND_EVENT -a +message.type=NORMAL" | tail -1
 
 echo "创建 DELAY topic（延迟双删）: $TOPIC_CACHE_EVICT"
 admin "updateTopic -n $NAMESRV -c $CLUSTER -t $TOPIC_CACHE_EVICT -a +message.type=DELAY" | tail -1

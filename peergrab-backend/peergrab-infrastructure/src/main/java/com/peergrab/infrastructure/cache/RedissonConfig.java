@@ -6,6 +6,7 @@ import org.redisson.config.Config;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Lazy;
 
 /**
  * Redisson 装配。
@@ -18,11 +19,13 @@ import org.springframework.context.annotation.Configuration;
  *
  * P1 时刻意没引 Redisson（抢单不需要分布式锁，靠 Lua + DB CAS），
  * 到 P5 才因为布隆与重建锁引入——依赖是被真实需求拉进来的，不是一开始就堆上。
+ * Redisson.create 会建立初始连接；bean 和注入点都需懒加载，使 Redis 故障不阻断启动。
  */
 @Configuration
 public class RedissonConfig {
 
     @Bean(destroyMethod = "shutdown")
+    @Lazy
     public RedissonClient redissonClient(
             @Value("${spring.data.redis.host:127.0.0.1}") String host,
             @Value("${spring.data.redis.port:6380}") int port,
@@ -32,7 +35,10 @@ public class RedissonConfig {
                 .setAddress("redis://" + host + ":" + port)
                 .setConnectionPoolSize(poolSize)
                 .setConnectionMinimumIdleSize(Math.max(2, poolSize / 4))
-                .setTimeout(2000);
+                .setConnectTimeout(500)
+                .setRetryAttempts(1)
+                .setRetryInterval(250)
+                .setTimeout(1000);
         return Redisson.create(config);
     }
 }

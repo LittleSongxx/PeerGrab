@@ -7,6 +7,7 @@ import com.peergrab.domain.errand.model.Errand;
 import com.peergrab.domain.errand.model.ErrandStatus;
 import com.peergrab.domain.errand.ports.ErrandRepository;
 import com.peergrab.domain.wallet.model.*;
+import com.peergrab.domain.wallet.ports.FundEventPort;
 import com.peergrab.domain.wallet.ports.WalletRepository;
 import com.peergrab.shared.Money;
 import com.peergrab.shared.SnowflakeIdGenerator;
@@ -37,17 +38,20 @@ public class ArbitrateSettleStep {
     private final WalletRepository walletRepository;
     private final SnowflakeIdGenerator idGenerator;
     private final CreditRepository creditRepository;
+    private final FundEventPort fundEventPort;
     private final double commissionRate;
 
     public ArbitrateSettleStep(ErrandRepository errandRepository,
                               WalletRepository walletRepository,
                               SnowflakeIdGenerator idGenerator,
                               CreditRepository creditRepository,
+                              FundEventPort fundEventPort,
                               @Value("${peergrab.settle.commission-rate:0.05}") double commissionRate) {
         this.errandRepository = errandRepository;
         this.walletRepository = walletRepository;
         this.idGenerator = idGenerator;
         this.creditRepository = creditRepository;
+        this.fundEventPort = fundEventPort;
         this.commissionRate = commissionRate;
     }
 
@@ -69,8 +73,8 @@ public class ArbitrateSettleStep {
                 errand.round(), operatorId);
 
         long total = escrow.amount().cents();
-        long commissionCents = (long) Math.floor(total * commissionRate);
-        Money runnerAmount = Money.ofCents(total - commissionCents);
+        long commissionCents = total - runnerNetCents(total);
+        Money runnerAmount = Money.ofCents(runnerNetCents(total));
         Money commissionAmount = Money.ofCents(commissionCents);
 
         WalletAccount escrowAccount = walletRepository
@@ -94,6 +98,14 @@ public class ArbitrateSettleStep {
                 idGenerator.nextId(), CreditEvent.settleBizNo(errandId), errand.grabberId(),
                 CreditEventType.SETTLE, CreditEventType.SETTLE.delta(), "ERRAND", errandId,
                 java.time.Instant.now()));
+        fundEventPort.append(new FundEventPort.FundEvent(
+                bizNo, "ARBITRATED", errandId, errand.publisherId(), errand.grabberId(),
+                runnerAmount.cents(), commissionCents));
         return true;
+    }
+
+    /** 事件通知与实际过账共用同一个净额算法。 */
+    public long runnerNetCents(long totalCents) {
+        return totalCents - (long) Math.floor(totalCents * commissionRate);
     }
 }

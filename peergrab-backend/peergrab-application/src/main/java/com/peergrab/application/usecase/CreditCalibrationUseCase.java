@@ -6,8 +6,8 @@ import org.springframework.stereotype.Service;
 /**
  * 信用分快照校准。
  *
- * P5 的业务事务增量更新 credit_score；这个用例由 worker 每日触发，
- * 按信用事件 30 天窗口重算快照，移除窗口外事件的历史贡献。
+ * 业务事务与每日校准都按相同的事件顺序回放最近 30 天，
+ * 每一步裁剪到 [0,100]；每日执行还会移除过期事件的历史影响。
  */
 @Service
 public class CreditCalibrationUseCase {

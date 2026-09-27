@@ -119,15 +119,18 @@ public class RefundErrandUseCase {
         FundEvent event = new FundEvent(bizNo, "REFUNDED", errandId, errand.publisherId(),
                 errand.grabberId() != null ? errand.grabberId() : 0L, escrow.amount().cents(), 0);
 
-        // 与结算同理：lambda 自调用下 @Transactional 不生效（P3 遗留隐患，P5 修复），
-        // 改用程序化事务保证退款动作的原子性
-        boolean committed = WalletDeadlockRetry.execute(() -> fundEventPort.publishInTransaction(event, () ->
+        // 一个用例事务涵盖状态、退款、信用和 outbox；CAS 冲突回滚整个事务。
+        boolean committed = WalletDeadlockRetry.execute(() ->
                 Boolean.TRUE.equals(transactionTemplate.execute(status -> {
                     boolean applied = doRefundInTx(errand, escrow, bizNo, from, to,
                             expectedVersion, operatorId);
-                    if (!applied) status.setRollbackOnly();
-                    return applied;
-                }))));
+                    if (!applied) {
+                        status.setRollbackOnly();
+                        return false;
+                    }
+                    fundEventPort.append(event);
+                    return true;
+                })));
         if (committed) {
             cacheEvict.evictAfterCommit(errandId);
             notifier.errandStatusChanged(errandId, errand.publisherId(), errand.grabberId(),

@@ -6,19 +6,20 @@ PeerGrab 的 Java 后端负责任务状态、抢单裁决、资金过账及异�
 
 ```text
 peergrab-backend/
-├── peergrab-shared/          金额（分）、错误码、结果、雪花 ID
+├── peergrab-shared/          通用值对象、错误码、ID 与消息协议
 ├── peergrab-domain/          任务状态机、业务规则、端口
 ├── peergrab-application/     发布、抢单、履约、结算、退款、仲裁用例
 ├── peergrab-infrastructure/  MySQL、Redis、RocketMQ 与限流适配器
 ├── peergrab-presentation/    REST、WebSocket、鉴权与 DTO
 ├── peergrab-bootstrap/       API 进程装配与集成测试
 ├── peergrab-worker/          延迟流转、自动结算、补偿、校验和对账
-└── peergrab-bench/           实验客户端
+├── peergrab-bench/           实验客户端
+└── peergrab-sharding-lab/   离线 ShardingSphere 规则实验，不进入 API/Worker 运行包
 ```
 
 发布时资金进入托管；一个任务目前只有一个名额。并发抢单以 Redis Lua 降低冲突、MySQL CAS 和唯一索引作最终裁决。确认、取货、送达后结算；取消走退款，争议由仲裁员处理。`availableActions` 从服务端按身份和状态计算，前端依此显示按钮。雪花 ID 在 JSON 中序列化为字符串，防止 JavaScript 精度损失。
 
-Worker 消费 RocketMQ 延迟及资金事件，并通过数据库扫描和本地消息表补偿。结算、退款和仲裁依赖同库事务、业务号唯一约束与三层资金对账。当前运行环境是**单 MySQL 数据源**；ShardingSphere 规则和算法测试不是线上分片链路。完整取舍见[架构设计](docs/架构设计与技术选型.md)与[当前架构评估](docs/项目架构与技术选型评估.md)。
+Worker 消费 RocketMQ 延迟及资金事件，并通过数据库扫描、本地消息表和资金事件 outbox 补偿；MQ 不可用时资金本地事务仍可提交。结算、退款和仲裁依赖同库事务、业务号唯一约束与资金对账。当前运行环境是**单 MySQL 数据源、单 ECS 部署**；ShardingSphere 规则和算法测试已隔离在 `peergrab-sharding-lab`，不进入线上分片链路。完整取舍见[架构设计](docs/架构设计与技术选型.md)、[校招／实习讲述与升级门槛](docs/校招实习项目取舍与面试讲述方案-20260927.md)、[三条主线证据卡](docs/校招实习面试证据卡-20260927.md)及[生产部署及迁移](docker/ECS_DEPLOY.md)。
 
 ## 启动全栈演示
 
@@ -34,7 +35,7 @@ docker compose -f docker-compose.yaml -f docker-compose.full.yaml --env-file .en
 
 默认 Web 入口为 `http://127.0.0.1:25173`，API 调试端口为 `28080`；浏览器通过 Nginx 同源访问 `/api` 和 `/ws`。演示账号为 `1001 / demo1001`（发单人）、`2001 / demo2001`、`2002 / demo2002`（跑腿者）、`9001 / demo9001`（仲裁员）。这些公开凭据仅供本机 Compose 演示；正常应用配置默认禁用演示登录。
 
-认证默认使用 Redis Session。如将 `.env` 中 `PEERGRAB_AUTH_MODE` 设为 `jwt`，还需设置至少 32 个 UTF-8 字节的 `PEERGRAB_AUTH_JWT_SECRET`。已有旧卷先按[升级说明](docker/UPGRADE.md)迁移；升级时不能仅重建镜像，因为 `init.sql` 不会在已有数据库卷上重跑。停止演示栈使用相同两个 `-f` 参数执行 `docker compose down`，保留数据时不要加 `-v`。
+本机完整演示栈默认使用 Redis Session；[生产栈](docker/ECS_DEPLOY.md)使用 MySQL 真值的 JWT，以便 Redis 故障时仍能校验已签发令牌，并要求至少 32 个 UTF-8 字节的 `PEERGRAB_AUTH_JWT_SECRET`。已有旧卷升级前必须先执行迁移脚本；仅重建镜像不会重新运行 `init.sql`。[旧项目迁移](docker/UPGRADE.md)另有独立步骤。停止演示栈使用相同两个 `-f` 参数执行 `docker compose down`，保留数据时不要加 `-v`。
 
 ## 本机开发
 

@@ -117,19 +117,21 @@ public class SettleErrandUseCase {
         FundEvent event = new FundEvent(bizNo, "SETTLED", errandId, errand.publisherId(),
                 errand.grabberId() != null ? errand.grabberId() : 0L, runnerCents, commissionCents);
 
-        // 注意：lambda 里的 this 是原始对象不是 Spring 代理，方法上的 @Transactional
-        // 在自调用下不生效（P3 遗留隐患，P5 修复）。改用程序化事务，
-        // 保证"资金分账 + 信用事件"要么一起提交、要么一起回滚
-        boolean committed = WalletDeadlockRetry.execute(() -> fundEventPort.publishInTransaction(event, () ->
+        // 一个用例事务涵盖状态、资金、信用和 outbox；CAS 冲突回滚整个事务。
+        boolean committed = WalletDeadlockRetry.execute(() ->
                 Boolean.TRUE.equals(transactionTemplate.execute(status -> {
                     boolean applied = doSettle(errandId, errand, escrow,
                             runnerAmount, commissionAmount, bizNo, operatorId);
-                    if (!applied) status.setRollbackOnly();
-                    return applied;
-                }))));
+                    if (!applied) {
+                        status.setRollbackOnly();
+                        return false;
+                    }
+                    fundEventPort.append(event);
+                    return true;
+                })));
 
         if (committed) {
-            // 状态变为 SETTLED，详情缓存失效。这里事务已提交（publishInTransaction 返回后），
+            // 状态变为 SETTLED，详情缓存失效。这里事务已提交（TransactionTemplate 返回后），
             // 所以 evictAfterCommit 会走"无事务上下文"分支立即删除
             cacheEvict.evictAfterCommit(errandId);
             // 排行榜是展示层：事务提交后更新，Redis 失败由每日校准 job 自愈
@@ -161,7 +163,9 @@ public class SettleErrandUseCase {
     boolean doSettle(long errandId, Errand errand, EscrowOrder escrow,
                      Money runnerAmount, Money commissionAmount, String bizNo, long operatorId) {
         // 所有资金终态先锁任务、再锁托管单，避免结算与仲裁退款互相等待。
-        int errandUpdated = errandRepository.casSettle(errandId, errand.version());
+        int errandUpdated = operatorId == Errand.SYSTEM_OPERATOR
+                ? errandRepository.casAutoSettle(errandId, errand.version())
+                : errandRepository.casSettle(errandId, errand.version());
         if (errandUpdated == 0) {
             log.info("结算幂等：errand 已非 DELIVERED errandId={}", errandId);
             return false;

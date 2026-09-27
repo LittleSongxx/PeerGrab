@@ -74,14 +74,13 @@ peergrab:
 
   cache:
     enabled: true
-    shards: 4                 # 热 Key 分片数：读随机挑一片，失效时全片删
+    shards: 1                 # 当前单 Redis 实例；多片只增写放大，按压测再开启
     ttl-seconds: 600          # 物理 TTL 10 分钟
     jitter-seconds: 120       # ±2 分钟随机抖动，防雪崩（大批 key 同时到期）
     empty-ttl-seconds: 60     # 空值缓存 TTL，防穿透
     double-delete-ms: 500     # 延迟双删间隔
     double-delete-enabled: true
-    eviction-order: AFTER_COMMIT   # 生产恒为 AFTER_COMMIT；BEFORE_COMMIT 仅供对照实验
-    bloom-enabled: true
+    bloom-enabled: false       # negative 仍要查 MySQL；默认关闭避免冷 miss 多次 Redis 访问
     redisson-pool-size: 16    # 与 Lettuce 池分开，避免叠加打满 Redis
   web:
     cors-origins: http://localhost:5173,http://127.0.0.1:5173
@@ -89,3 +88,16 @@ peergrab:
 logging:
   level:
     com.peergrab: INFO
+
+management:
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      group:
+        readiness:
+          include: readinessState,db,redis,snowflakeLease
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus

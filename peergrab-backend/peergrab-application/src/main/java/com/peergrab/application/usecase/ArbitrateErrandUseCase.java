@@ -9,7 +9,6 @@ import com.peergrab.domain.errand.ports.ErrandRepository;
 import com.peergrab.domain.wallet.model.EscrowOrder;
 import com.peergrab.domain.wallet.model.LedgerEntry;
 import com.peergrab.domain.wallet.ports.FundAuditPort;
-import com.peergrab.domain.wallet.ports.FundEventPort;
 import com.peergrab.domain.wallet.ports.WalletRepository;
 import com.peergrab.shared.BizException;
 import com.peergrab.shared.ErrorCode;
@@ -34,7 +33,6 @@ public class ArbitrateErrandUseCase {
     private final RefundErrandUseCase refundUseCase;
     private final ArbitrateSettleStep settleStep;
     private final FundAuditPort auditPort;
-    private final FundEventPort fundEventPort;
     private final CacheEvictSupport cacheEvict;
     private final CreditRepository creditRepository;
     private final RealtimeNotifier notifier;
@@ -45,7 +43,6 @@ public class ArbitrateErrandUseCase {
                                   RefundErrandUseCase refundUseCase,
                                   ArbitrateSettleStep settleStep,
                                   FundAuditPort auditPort,
-                                  FundEventPort fundEventPort,
                                   CacheEvictSupport cacheEvict,
                                   CreditRepository creditRepository,
                                   RealtimeNotifier notifier,
@@ -55,7 +52,6 @@ public class ArbitrateErrandUseCase {
         this.refundUseCase = refundUseCase;
         this.settleStep = settleStep;
         this.auditPort = auditPort;
-        this.fundEventPort = fundEventPort;
         this.cacheEvict = cacheEvict;
         this.creditRepository = creditRepository;
         this.notifier = notifier;
@@ -103,11 +99,8 @@ public class ArbitrateErrandUseCase {
         }
 
         String bizNo = LedgerEntry.settleBizNo(errandId);
-        var event = new FundEventPort.FundEvent(bizNo, "ARBITRATED", errandId, errand.publisherId(),
-                errand.grabberId() == null ? 0L : errand.grabberId(), escrow.amount().cents(), 0);
-
-        boolean committed = WalletDeadlockRetry.execute(() -> fundEventPort.publishInTransaction(event,
-                () -> settleStep.settleFromDispute(errandId, errand, escrow, bizNo, operatorId)));
+        boolean committed = WalletDeadlockRetry.execute(() ->
+                settleStep.settleFromDispute(errandId, errand, escrow, bizNo, operatorId));
 
         if (committed) {
             cacheEvict.evictAfterCommit(errandId);

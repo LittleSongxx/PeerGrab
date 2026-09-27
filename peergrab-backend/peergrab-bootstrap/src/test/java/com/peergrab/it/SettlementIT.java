@@ -2,6 +2,7 @@ package com.peergrab.it;
 
 import com.peergrab.application.usecase.*;
 import com.peergrab.domain.errand.model.ErrandType;
+import com.peergrab.domain.errand.model.Errand;
 import com.peergrab.domain.wallet.model.AccountType;
 import com.peergrab.domain.wallet.ports.WalletRepository;
 import com.peergrab.domain.recon.ports.ReconRepository;
@@ -50,6 +51,7 @@ class SettlementIT {
     @BeforeEach
     void resetAccounts() {
         // 完全重置资金状态（包括流水与托管单），让本测试可独立验证 L2/L3
+        jdbc.update("DELETE FROM fund_event_outbox");
         jdbc.update("DELETE FROM wallet_ledger");
         jdbc.update("DELETE FROM escrow_order");
         jdbc.update("UPDATE wallet_account SET available = 100000, frozen = 0 WHERE owner_id = 1001 AND owner_type = 'USER'");
@@ -143,5 +145,28 @@ class SettlementIT {
         // 对账零差异
         assertEquals(0, reconRepository.debitMinusCredit(), "L1");
         assertTrue(reconRepository.findSnapshotDiffs().isEmpty(), "L2");
+    }
+
+    @Test
+    @Order(4)
+    @DisplayName("自动结算早到由数据库截止时间拦截")
+    void auto_settlement_checks_persisted_deadline() {
+        long errandId = publishUseCase.publish(new PublishErrandUseCase.Command(
+                1L, 1001L, ErrandType.DELIVERY, "auto_due", 1000L, 1)).errandId();
+        grabUseCase.grab(new GrabErrandUseCase.Command(errandId, 2001L, "req-auto-due", 60));
+        confirmUseCase.confirm(new ConfirmErrandUseCase.Command(errandId, 2001L));
+        pickUpUseCase.pickUp(errandId, 2001L);
+        deliverUseCase.deliver(errandId, 2001L);
+
+        assertEquals(SettleErrandUseCase.Result.CONFLICT,
+                settleUseCase.settle(errandId, Errand.SYSTEM_OPERATOR));
+        Integer held = jdbc.queryForObject("SELECT COUNT(*) FROM escrow_order WHERE errand_id = ? AND status = 'HELD'",
+                Integer.class, errandId);
+        assertEquals(1, held);
+
+        jdbc.update("UPDATE errand SET auto_settle_deadline_at = DATE_SUB(NOW(3), INTERVAL 1 SECOND) WHERE id = ?",
+                errandId);
+        assertEquals(SettleErrandUseCase.Result.SETTLED,
+                settleUseCase.settle(errandId, Errand.SYSTEM_OPERATOR));
     }
 }

@@ -5,7 +5,6 @@ import com.peergrab.presentation.auth.CurrentUser;
 import com.peergrab.shared.Result;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.List;
 import java.util.Map;
 
 @RestController
@@ -26,14 +25,25 @@ public class WalletController {
     }
 
     @GetMapping("/ledger")
-    public Result<List<Map<String, Object>>> ledger(@RequestParam(defaultValue = "0") int page,
-                                                    @RequestParam(defaultValue = "20") int size) {
+    public Result<Object> ledger(@RequestParam(defaultValue = "0") int page,
+                                 @RequestParam(defaultValue = "20") int size,
+                                 @RequestParam(required = false) String cursor) {
         long userId = CurrentUser.get();
+        if (cursor != null) {
+            var result = queryUseCase.ledgerByCursor(userId, cursor, size);
+            return Result.ok(Map.of(
+                    "items", result.items().stream().map(WalletController::toLedger).toList(),
+                    "nextCursor", result.nextCursor() == null ? "" : result.nextCursor()));
+        }
         return Result.ok(queryUseCase.ledger(userId, page, size).stream()
-                .map(v -> Map.<String, Object>of(
-                        "time", v.time().toString(), "direction", v.direction(),
-                        "amountCents", v.amountCents(), "refType", v.refType(),
-                        "refId", v.refId(), "bizNo", v.bizNo()))
-                .toList());
+                .map(WalletController::toLedger).toList());
+    }
+
+    private static Map<String, Object> toLedger(com.peergrab.domain.wallet.ports.WalletQueryPort.LedgerView v) {
+        return Map.of(
+                "id", String.valueOf(v.id()), "time", v.time().toString(),
+                "direction", v.direction(), "amountCents", v.amountCents(),
+                "refType", v.refType(), "refId", String.valueOf(v.refId()),
+                "bizNo", v.bizNo());
     }
 }

@@ -4,6 +4,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.socket.WebSocketSession;
 
 import java.util.Set;
+import java.util.function.BiConsumer;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArraySet;
 
@@ -19,21 +20,27 @@ public class WsSessionRegistry {
     private final ConcurrentHashMap<Long, Set<WebSocketSession>> sessions = new ConcurrentHashMap<>();
 
     public void add(long userId, WebSocketSession session) {
-        sessions.computeIfAbsent(userId, k -> new CopyOnWriteArraySet<>()).add(session);
+        sessions.compute(userId, (id, current) -> {
+            Set<WebSocketSession> active = current == null ? new CopyOnWriteArraySet<>() : current;
+            active.add(session);
+            return active;
+        });
     }
 
     public void remove(long userId, WebSocketSession session) {
-        Set<WebSocketSession> set = sessions.get(userId);
-        if (set != null) {
-            set.remove(session);
-            if (set.isEmpty()) {
-                sessions.remove(userId, set);
-            }
-        }
+        sessions.computeIfPresent(userId, (id, active) -> {
+            active.remove(session);
+            return active.isEmpty() ? null : active;
+        });
     }
 
     public Set<WebSocketSession> of(long userId) {
         return sessions.getOrDefault(userId, Set.of());
+    }
+
+    /** Weakly consistent iteration is safe while other threads add or remove connections. */
+    public void forEach(BiConsumer<Long, WebSocketSession> action) {
+        sessions.forEach((userId, active) -> active.forEach(session -> action.accept(userId, session)));
     }
 
     public int onlineUsers() {

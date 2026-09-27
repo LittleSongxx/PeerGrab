@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, yuan } from '../api';
 
 const REF_TYPE_TEXT: Record<string, string> = {
@@ -11,22 +11,60 @@ export default function Wallet() {
   const [ledger, setLedger] = useState<Awaited<ReturnType<typeof api.ledger>>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [nextCursor, setNextCursor] = useState('');
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [moreError, setMoreError] = useState<string | null>(null);
+  const requestVersion = useRef(0);
 
   const load = useCallback(async () => {
+    const version = ++requestVersion.current;
     setLoading(true);
+    setLoadingMore(false);
     setError(null);
+    setMoreError(null);
     try {
-      const [nextBalance, nextLedger] = await Promise.all([api.wallet(), api.ledger()]);
-      setBalance(nextBalance);
-      setLedger(nextLedger);
+      const [nextBalance, page] = await Promise.all([api.wallet(), api.ledgerByCursor()]);
+      if (version === requestVersion.current) {
+        setBalance(nextBalance);
+        setLedger(page.items);
+        setNextCursor(page.nextCursor);
+      }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '钱包加载失败，请稍后重试');
+      if (version === requestVersion.current) {
+        setError(cause instanceof Error ? cause.message : '钱包加载失败，请稍后重试');
+      }
     } finally {
-      setLoading(false);
+      if (version === requestVersion.current) setLoading(false);
     }
   }, []);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    void load();
+    return () => { requestVersion.current += 1; };
+  }, [load]);
+
+  const loadMore = async () => {
+    if (!nextCursor || loading || loadingMore) return;
+    const version = requestVersion.current;
+    const cursor = nextCursor;
+    setLoadingMore(true);
+    setMoreError(null);
+    try {
+      const page = await api.ledgerByCursor(cursor);
+      if (version !== requestVersion.current) return;
+      setLedger((current) => {
+        const seen = new Set(current.map((entry) => entry.id));
+        return [...current, ...page.items.filter((entry) => !seen.has(entry.id))];
+      });
+      setNextCursor(page.nextCursor === cursor ? '' : page.nextCursor);
+    } catch (cause) {
+      if (version === requestVersion.current) {
+        setMoreError(cause instanceof Error ? cause.message : '后续流水加载失败，请重试');
+      }
+    } finally {
+      if (version === requestVersion.current) setLoadingMore(false);
+    }
+  };
 
   return (
     <div className="wallet-page page-stack">
@@ -67,7 +105,7 @@ export default function Wallet() {
             <h2 id="wallet-ledger-title">资金流水</h2>
             <p>每笔资金动作分别记录转出和入账，包括平台托管账户。</p>
           </div>
-          {!loading && !error && <span className="section-count">{ledger.length} 笔记录</span>}
+          {!loading && !error && <span className="section-count">已显示 {ledger.length} 笔记录</span>}
         </div>
 
         {loading && !balance && <div className="loading-state" role="status">正在加载钱包…</div>}
@@ -89,7 +127,7 @@ export default function Wallet() {
                   const incoming = entry.direction === 'CREDIT';
                   const hasErrand = ['ESCROW', 'SETTLE', 'REFUND'].includes(entry.refType);
                   return (
-                    <tr key={entry.bizNo + entry.direction}>
+                    <tr key={entry.id}>
                       <td className="wallet-ledger-time">{new Date(entry.time).toLocaleString('zh-CN')}</td>
                       <td><span className={incoming ? 'wallet-direction is-credit' : 'wallet-direction is-debit'}>{incoming ? '入账' : '转出'}</span></td>
                       <td className={incoming ? 'wallet-amount credit' : 'wallet-amount debit'}>
@@ -102,6 +140,15 @@ export default function Wallet() {
                 })}
               </tbody>
             </table>
+          </div>
+        )}
+        {(nextCursor || moreError) && !loading && (
+          <div className="mine-load-more">
+            {moreError && <p className="banner warn" role="alert">{moreError}</p>}
+            <button className="btn btn-secondary" type="button" disabled={loadingMore}
+                    onClick={() => void loadMore()}>
+              {loadingMore ? '加载中…' : moreError ? '重试加载' : '加载更多流水'}
+            </button>
           </div>
         )}
       </section>

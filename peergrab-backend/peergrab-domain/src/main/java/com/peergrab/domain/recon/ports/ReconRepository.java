@@ -15,6 +15,9 @@ public interface ReconRepository {
     /** L2：快照与流水净额不符的账户 */
     List<AccountDiff> findSnapshotDiffs();
 
+    /** USER accounts with a ledger: the latest posted balance/version must match the snapshot. */
+    List<UserBalanceDiff> findUserBalanceDiffs();
+
     /** L3：托管单与流水不闭环的任务 */
     List<EscrowDiff> findEscrowClosureDiffs();
 
@@ -25,6 +28,9 @@ public interface ReconRepository {
     int countDiffs(LocalDate date);
 
     record AccountDiff(long accountId, long ownerId, long snapshotTotal, long ledgerNet) {}
+
+    record UserBalanceDiff(long accountId, long ownerId, long snapshotBalance,
+                           long ledgerBalance, long accountVersion, long ledgerVersion) {}
 
     record EscrowDiff(long errandId, String escrowStatus, String reason) {}
 }

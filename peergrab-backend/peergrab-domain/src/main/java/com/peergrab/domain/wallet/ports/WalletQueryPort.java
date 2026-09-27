@@ -15,11 +15,14 @@ public interface WalletQueryPort {
     /** 余额 */
     Optional<BalanceView> findBalance(long ownerId);
 
-    /** 流水分页。走 idx_account_time(account_id, created_at) */
+    /** 兼容旧客户端的页码分页；深页请使用 ledgerByCursor。 */
     List<LedgerView> ledger(long ownerId, int page, int size);
+
+    /** 按流水归属用户、时间和 ID 游标分页，走 idx_ledger_user_time。 */
+    List<LedgerView> ledgerByCursor(long ownerId, Instant beforeCreatedAt, Long beforeId, int size);
 
     record BalanceView(long availableCents, long frozenCents) {}
 
-    record LedgerView(Instant time, String direction, long amountCents,
+    record LedgerView(long id, Instant time, String direction, long amountCents,
                       String refType, long refId, String bizNo) {}
 }

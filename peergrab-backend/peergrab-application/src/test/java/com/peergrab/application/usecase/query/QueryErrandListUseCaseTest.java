@@ -90,6 +90,8 @@ class QueryErrandListUseCaseTest {
         @Override public int casPickUp(long errandId, long runnerId, long expectedVersion) { return 0; }
         @Override public int casDeliver(long errandId, long runnerId, long expectedVersion) { return 0; }
         @Override public int casSettle(long errandId, long expectedVersion) { return 0; }
+        @Override public int casAutoSettle(long errandId, long expectedVersion) { return 0; }
+        @Override public boolean confirmTimeoutDue(long errandId, int expectedRound) { return false; }
         @Override public int casRefundFromDispute(long errandId, long expectedVersion) { return 0; }
         @Override public int casCancel(long errandId, long expectedVersion) { return 0; }
         @Override public int casDispute(long errandId, long expectedVersion) { return 0; }

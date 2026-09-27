@@ -1,17 +1,18 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { lazy, Suspense, useEffect, useState, type FormEvent } from 'react';
 import { useHashRoute } from './router';
 import { getUserId, login, logout } from './api';
 import { IDENTITIES, demoPasswordFor } from './identity';
 import UiIcon from './components/UiIcon';
 import TopBar from './components/TopBar';
-import Square from './pages/Square';
-import Detail from './pages/Detail';
-import Publish from './pages/Publish';
-import Mine from './pages/Mine';
-import Wallet from './pages/Wallet';
-import Notifications from './pages/Notifications';
-import Credit from './pages/Credit';
 import { connectWs, disconnectWs } from './ws';
+
+const Square = lazy(() => import('./pages/Square'));
+const Detail = lazy(() => import('./pages/Detail'));
+const Publish = lazy(() => import('./pages/Publish'));
+const Mine = lazy(() => import('./pages/Mine'));
+const Wallet = lazy(() => import('./pages/Wallet'));
+const Notifications = lazy(() => import('./pages/Notifications'));
+const Credit = lazy(() => import('./pages/Credit'));
 
 export { IDENTITIES } from './identity';
 
@@ -162,7 +163,11 @@ export default function App() {
   return (
     <div className="app-shell">
       <TopBar route={route} userId={userId} onLogout={signOut} />
-      <main className="main" id="main-content"><div className="page-container">{page}</div></main>
+      <main className="main" id="main-content"><div className="page-container">
+        <Suspense fallback={<div className="loading-state" role="status">正在加载页面…</div>}>
+          {page}
+        </Suspense>
+      </div></main>
     </div>
   );
 }

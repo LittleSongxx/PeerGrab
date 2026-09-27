@@ -2,6 +2,7 @@ package com.peergrab.worker;
 
 import com.peergrab.application.usecase.TimeoutTransferUseCase;
 import com.peergrab.domain.errand.model.Errand;
+import com.peergrab.domain.errand.model.ErrandStatus;
 import com.peergrab.domain.errand.ports.ErrandRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -12,6 +13,7 @@ import org.springframework.stereotype.Component;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 超时流转的兜底扫描——"主通道 + 兜底"模式的兜底侧。
@@ -30,37 +32,47 @@ public class TimeoutScanJob {
 
     private static final Logger log = LoggerFactory.getLogger(TimeoutScanJob.class);
     private static final int BATCH_LIMIT = 200;
+    private static final int RETRY_LIMIT = 50;
 
     private final ErrandRepository errandRepository;
     private final TimeoutTransferUseCase timeoutTransferUseCase;
+    private final ScanRetryQueue retryQueue;
     private final long graceSeconds;
     private Instant afterAt;
     private long afterId;
 
     public TimeoutScanJob(ErrandRepository errandRepository,
                           TimeoutTransferUseCase timeoutTransferUseCase,
+                          ScanRetryQueue retryQueue,
                           @Value("${peergrab.timeout.scan-grace-seconds:2}") long graceSeconds) {
         this.errandRepository = errandRepository;
         this.timeoutTransferUseCase = timeoutTransferUseCase;
+        this.retryQueue = retryQueue;
         this.graceSeconds = graceSeconds;
     }
 
     @Scheduled(fixedDelayString = "${peergrab.timeout.scan-interval-ms:5000}", scheduler = "fastTaskScheduler")
     public void scan() {
-        long timeout = timeoutTransferUseCase.confirmTimeoutSeconds() + graceSeconds;
-        List<Errand> candidates = errandRepository.findConfirmTimeoutAfter(timeout, afterAt, afterId, BATCH_LIMIT);
+        retryFailed();
+        List<Errand> candidates = errandRepository.findConfirmTimeoutAfter(graceSeconds, afterAt, afterId, BATCH_LIMIT);
         if (candidates.isEmpty() && afterAt != null) {
             afterAt = null;
             afterId = 0;
-            candidates = errandRepository.findConfirmTimeoutAfter(timeout, null, 0, BATCH_LIMIT);
+            candidates = errandRepository.findConfirmTimeoutAfter(graceSeconds, null, 0, BATCH_LIMIT);
         }
         if (candidates.isEmpty()) {
             return;
         }
+        Map<Long, Integer> tracked = retryQueue.trackedRounds(ScanRetryQueue.Type.CONFIRM_TIMEOUT,
+                candidates.stream().map(Errand::id).toList());
         int transferred = 0;
         int reverted = 0;
         int skipped = 0;
         for (Errand errand : candidates) {
+            if (Integer.valueOf(errand.round()).equals(tracked.get(errand.id()))) {
+                advance(errand);
+                continue;
+            }
             try {
                 switch (timeoutTransferUseCase.handleTimeout(errand.id(), errand.round())) {
                     case TRANSFERRED -> transferred++;
@@ -68,14 +80,54 @@ public class TimeoutScanJob {
                     case SKIPPED -> skipped++;
                 }
             } catch (RuntimeException e) {
-                // 单条失败不能中断整批：下一轮扫描还会捞到它
                 log.warn("兜底流转失败 errandId={}", errand.id(), e);
+                try {
+                    // 只有先落库，游标才可安全越过该失败项。
+                    retryQueue.recordFailure(ScanRetryQueue.Type.CONFIRM_TIMEOUT,
+                            errand.id(), errand.round(), e);
+                } catch (RuntimeException persistFailure) {
+                    log.error("兜底流转失败项登记失败，停止推进游标 errandId={}", errand.id(), persistFailure);
+                    break;
+                }
             }
+            advance(errand);
         }
-        Errand last = candidates.get(candidates.size() - 1);
-        afterAt = last.lockedAt();
-        afterId = last.id();
         log.info("兜底扫描完成 捞取={} 流转={} 回退={} 跳过={}",
                 candidates.size(), transferred, reverted, skipped);
+    }
+
+    private void advance(Errand errand) {
+        afterAt = errand.confirmDeadlineAt();
+        afterId = errand.id();
+    }
+
+    private void retryFailed() {
+        List<ScanRetryQueue.RetryItem> due;
+        try {
+            due = retryQueue.claimDue(ScanRetryQueue.Type.CONFIRM_TIMEOUT, RETRY_LIMIT);
+        } catch (RuntimeException e) {
+            log.error("读取超时流转重试队列失败，继续扫描新到期任务", e);
+            return;
+        }
+        for (ScanRetryQueue.RetryItem item : due) {
+            try {
+                Errand current = errandRepository.findById(item.errandId()).orElse(null);
+                if (current == null || current.status() != ErrandStatus.LOCKED
+                        || current.round() != item.round()) {
+                    retryQueue.complete(ScanRetryQueue.Type.CONFIRM_TIMEOUT, item);
+                    continue;
+                }
+                timeoutTransferUseCase.handleTimeout(item.errandId(), item.round());
+                retryQueue.complete(ScanRetryQueue.Type.CONFIRM_TIMEOUT, item);
+            } catch (RuntimeException e) {
+                log.warn("重试超时流转失败 errandId={} round={}", item.errandId(), item.round(), e);
+                try {
+                    retryQueue.reschedule(ScanRetryQueue.Type.CONFIRM_TIMEOUT, item, e);
+                } catch (RuntimeException persistFailure) {
+                    // 保留领取租约；进程退出或租约到期后仍可重试。
+                    log.error("重排超时流转失败项失败 errandId={}", item.errandId(), persistFailure);
+                }
+            }
+        }
     }
 }

@@ -160,6 +160,22 @@ def snapshot(container_id):
             "benchRunRows": int(fields[11])}
 
 
+def row_lock_snapshot(container_id):
+    """Global InnoDB row-lock counters for a single isolated benchmark stage."""
+    names = ("Innodb_row_lock_waits", "Innodb_row_lock_time")
+    rows = mysql(container_id, "SHOW GLOBAL STATUS WHERE Variable_name IN "
+                 "('Innodb_row_lock_waits','Innodb_row_lock_time');")
+    values = {}
+    for row in rows.splitlines():
+        fields = row.split("\t")
+        if len(fields) != 2 or fields[0] not in names or not fields[1].isdecimal():
+            raise Stopped("Unexpected InnoDB row-lock status output")
+        values[fields[0]] = int(fields[1])
+    if set(values) != set(names):
+        raise Stopped("Missing InnoDB row-lock counters")
+    return values
+
+
 def fixture_gate(baseline, current):
     if baseline["s2Rows"] != 10000 or baseline["s2Published"] != 10000:
         raise Stopped("The S2 fixture is not exactly 10,000 published tasks")
@@ -284,6 +300,7 @@ def run_stage(stage, base_url, initial_ids, baseline, output):
     name, main_class, args, timeout_seconds = stage
     stack, _ = checked_stack(base_url, initial_ids)
     before = snapshot(stack["mysql_container_id"])
+    lock_before = row_lock_snapshot(stack["mysql_container_id"])
     fixture_gate(baseline, before)
     minimum = 3100 if name.startswith("s1-") else (args[0] + 3) * 100
     if before["publisherAvailable"] < minimum:
@@ -310,6 +327,11 @@ def run_stage(stage, base_url, initial_ids, baseline, output):
         if process.returncode:
             raise Stopped(f"{name} Maven client failed; see {log_path}")
 
+    lock_after = row_lock_snapshot(stack["mysql_container_id"])
+    lock_delta = {key: lock_after[key] - lock_before[key] for key in lock_before}
+    if any(value < 0 for value in lock_delta.values()):
+        raise Stopped(f"{name} InnoDB row-lock counters reset during stage")
+
     run_id = run_id_from_log(log_path.read_text(encoding="utf-8", errors="replace"))
     (output / f"{name}.run-id.txt").write_text(run_id + "\n", encoding="utf-8")
     stack, _ = checked_stack(base_url, initial_ids)
@@ -323,6 +345,9 @@ def run_stage(stage, base_url, initial_ids, baseline, output):
     stage_counts_gate(before, after, name)
     return {"stage": name, "runId": run_id, "summary": summary,
             "invariants": invariants,
+            "rowLockCountersBefore": lock_before,
+            "rowLockCountersAfter": lock_after,
+            "rowLockDeltaIncludingFixture": lock_delta,
             "snapshotBefore": before, "snapshotAfter": after,
             "clientLog": log_path.name}
 

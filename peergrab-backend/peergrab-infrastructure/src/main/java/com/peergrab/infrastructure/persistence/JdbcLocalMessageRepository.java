@@ -8,6 +8,8 @@ import org.springframework.stereotype.Repository;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
+import java.util.ArrayList;
+import java.util.UUID;
 
 @Repository
 public class JdbcLocalMessageRepository implements LocalMessageRepository {
@@ -38,7 +40,10 @@ public class JdbcLocalMessageRepository implements LocalMessageRepository {
 
     @Override
     public void markSent(String msgKey) {
-        jdbc.update("UPDATE local_message SET status = 'SENT' WHERE msg_key = ?", msgKey);
+        jdbc.update("""
+                UPDATE local_message SET status = 'SENT', claim_token = NULL, claim_until = NULL
+                 WHERE msg_key = ? AND status = 'PENDING'
+                """, msgKey);
     }
 
     @Override
@@ -55,6 +60,54 @@ public class JdbcLocalMessageRepository implements LocalMessageRepository {
                         rs.getInt("retry_count")), limit);
     }
 
+    @Override
+    public List<ClaimedMessage> claimPending(int limit) {
+        List<PendingMessage> candidates = jdbc.query("""
+                SELECT id, msg_key, topic, payload, deliver_at, retry_count
+                  FROM local_message
+                 WHERE status = 'PENDING' AND next_retry_at <= NOW(3)
+                   AND (claim_until IS NULL OR claim_until < NOW(3))
+                 ORDER BY next_retry_at, id
+                 LIMIT ?
+                """, (rs, n) -> new PendingMessage(
+                rs.getLong("id"), rs.getString("msg_key"), rs.getString("topic"),
+                rs.getString("payload"), rs.getTimestamp("deliver_at").toInstant(),
+                rs.getInt("retry_count")), limit);
+        List<ClaimedMessage> claimed = new ArrayList<>(candidates.size());
+        for (PendingMessage message : candidates) {
+            String token = UUID.randomUUID().toString();
+            int rows = jdbc.update("""
+                    UPDATE local_message
+                       SET claim_token = ?, claim_until = TIMESTAMPADD(SECOND, 120, NOW(3))
+                     WHERE id = ? AND status = 'PENDING' AND next_retry_at <= NOW(3)
+                       AND (claim_until IS NULL OR claim_until < NOW(3))
+                    """, token, message.id());
+            if (rows == 1) claimed.add(new ClaimedMessage(message, token));
+        }
+        return claimed;
+    }
+
+    @Override
+    public boolean markClaimedSent(String msgKey, String claimToken) {
+        return jdbc.update("""
+                UPDATE local_message SET status = 'SENT', claim_token = NULL, claim_until = NULL
+                 WHERE msg_key = ? AND status = 'PENDING' AND claim_token = ?
+                """, msgKey, claimToken) == 1;
+    }
+
+    @Override
+    public boolean markClaimedRetry(String msgKey, String claimToken, int maxRetry) {
+        return jdbc.update("""
+                UPDATE local_message
+                   SET retry_count = retry_count + 1,
+                       status = CASE WHEN retry_count + 1 >= ? THEN 'DEAD' ELSE 'PENDING' END,
+                       next_retry_at = TIMESTAMPADD(SECOND,
+                           LEAST(POWER(2, LEAST(retry_count + 1, 9)), 300), NOW(3)),
+                       claim_token = NULL, claim_until = NULL
+                 WHERE msg_key = ? AND status = 'PENDING' AND claim_token = ?
+                """, maxRetry, msgKey, claimToken) == 1;
+    }
+
     /**
      * 重试失败处理：指数退避（2^retry 秒，上限 5 分钟），超过上限转 DEAD 人工介入。
      * 不无限重试是为了避免一条坏消息把 worker 拖死。
@@ -65,9 +118,9 @@ public class JdbcLocalMessageRepository implements LocalMessageRepository {
                 UPDATE local_message
                    SET retry_count = retry_count + 1,
                        status = CASE WHEN retry_count + 1 >= ? THEN 'DEAD' ELSE 'PENDING' END,
-                       next_retry_at = DATE_ADD(NOW(3),
-                           INTERVAL LEAST(POW(2, LEAST(retry_count + 1, 9)), 300) SECOND)
-                 WHERE msg_key = ?
+                       next_retry_at = TIMESTAMPADD(SECOND,
+                           LEAST(POWER(2, LEAST(retry_count + 1, 9)), 300), NOW(3))
+                 WHERE msg_key = ? AND status = 'PENDING' AND claim_token IS NULL
                 """, maxRetry, msgKey);
     }
 }

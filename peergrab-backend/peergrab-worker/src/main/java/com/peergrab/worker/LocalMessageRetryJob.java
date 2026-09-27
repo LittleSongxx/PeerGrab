@@ -36,19 +36,25 @@ public class LocalMessageRetryJob {
 
     @Scheduled(fixedDelayString = "${peergrab.message.retry-interval-ms:10000}", scheduler = "fastTaskScheduler")
     public void retry() {
-        List<LocalMessageRepository.PendingMessage> pending = localMessageRepository.findPending(BATCH_LIMIT);
+        if (!delayMessagePort.available()) {
+            return;
+        }
+        List<LocalMessageRepository.ClaimedMessage> pending = localMessageRepository.claimPending(BATCH_LIMIT);
         if (pending.isEmpty()) {
             return;
         }
         int sent = 0;
-        for (var msg : pending) {
+        for (var claim : pending) {
+            var msg = claim.message();
             try {
                 delayMessagePort.send(msg.topic(), msg.msgKey(), msg.payload(), msg.deliverAt());
-                localMessageRepository.markSent(msg.msgKey());
+                if (!localMessageRepository.markClaimedSent(msg.msgKey(), claim.claimToken())) {
+                    log.warn("发送成功但领取已失效，消息可能重复投递 msgKey={}", msg.msgKey());
+                }
                 sent++;
             } catch (RuntimeException e) {
                 // 指数退避后重试；next_retry_at 让坏消息不会占满每轮的前 100 条。
-                localMessageRepository.markRetry(msg.msgKey(), MAX_RETRY);
+                localMessageRepository.markClaimedRetry(msg.msgKey(), claim.claimToken(), MAX_RETRY);
                 log.warn("消息重发失败 msgKey={} retry={}", msg.msgKey(), msg.retryCount(), e);
             }
         }

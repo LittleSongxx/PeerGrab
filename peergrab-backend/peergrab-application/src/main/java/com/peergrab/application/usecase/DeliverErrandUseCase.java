@@ -10,7 +10,6 @@ import com.peergrab.shared.ErrorCode;
 import com.peergrab.shared.SnowflakeIdGenerator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -34,20 +33,17 @@ public class DeliverErrandUseCase {
     private final SnowflakeIdGenerator idGenerator;
     private final CacheEvictSupport cacheEvict;
     private final RealtimeNotifier notifier;
-    private final long autoSettleSeconds;
 
     public DeliverErrandUseCase(ErrandRepository errandRepository,
                                 LocalMessageRepository localMessageRepository,
                                 SnowflakeIdGenerator idGenerator,
                                 CacheEvictSupport cacheEvict,
-                                RealtimeNotifier notifier,
-                                @Value("${peergrab.settle.auto-settle-seconds:86400}") long autoSettleSeconds) {
+                                RealtimeNotifier notifier) {
         this.errandRepository = errandRepository;
         this.localMessageRepository = localMessageRepository;
         this.idGenerator = idGenerator;
         this.cacheEvict = cacheEvict;
         this.notifier = notifier;
-        this.autoSettleSeconds = autoSettleSeconds;
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -66,17 +62,20 @@ public class DeliverErrandUseCase {
 
         // 状态变了，详情缓存失效（事务提交后执行）
         cacheEvict.evictAfterCommit(errandId);
-        notifier.errandStatusChanged(errand.id(), errand.publisherId(), errand.grabberId(),
-                ErrandStatus.DELIVERED.name(), errand.round());
 
         // 登记 24h 自动结算的延迟消息（本地消息表保证"事务成功则消息必发"）
         String msgKey = DelayTaskPolicy.autoSettleKey(errandId);
-                String payload = DelayTaskPolicy.autoSettlePayload(errandId);
-        Instant deliverAt = Instant.now().plusSeconds(autoSettleSeconds);
+        String payload = DelayTaskPolicy.autoSettlePayload(errandId);
+        Instant deliverAt = errandRepository.findById(errandId)
+                .map(Errand::autoSettleDeadlineAt)
+                .orElseThrow(() -> new IllegalStateException("送达后未写入自动结算截止时间 errandId=" + errandId));
         boolean fresh = localMessageRepository.enqueue(
                 idGenerator.nextId(), msgKey, DelayTaskPolicy.TOPIC_AUTO_SETTLE, payload, deliverAt);
         if (fresh) {
             log.info("已登记自动结算延迟消息 errandId={} deliverAt={}", errandId, deliverAt);
         }
+        AfterCommitRealtime.send(() -> notifier.errandStatusChanged(
+                errand.id(), errand.publisherId(), errand.grabberId(),
+                ErrandStatus.DELIVERED.name(), errand.round()));
     }
 }

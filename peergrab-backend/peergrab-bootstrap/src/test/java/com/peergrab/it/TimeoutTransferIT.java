@@ -79,6 +79,22 @@ class TimeoutTransferIT {
         return errandId;
     }
 
+    private void expireConfirm(long errandId) {
+        jdbc.update("UPDATE errand SET confirm_deadline_at = DATE_SUB(NOW(3), INTERVAL 1 SECOND) WHERE id = ?", errandId);
+    }
+
+    @Test
+    @DisplayName("提前到达的超时消息不会领取候选或回退任务")
+    void early_timeout_message_cannot_transfer() {
+        long errandId = publishAndGrab(2001L);
+        grabUseCase.grab(new GrabErrandUseCase.Command(
+                errandId, 2002L, UUID.randomUUID().toString(), 60));
+        int round = errandRepository.findById(errandId).orElseThrow().round();
+        assertEquals(TimeoutTransferUseCase.Outcome.SKIPPED, timeoutUseCase.handleTimeout(errandId, round));
+        assertEquals(1L, candidateQueue.size(errandId));
+        assertEquals(2001L, errandRepository.findById(errandId).orElseThrow().grabberId());
+    }
+
     @Test
     @DisplayName("超时未确认：流转给候选队列下一位，round+1，名额不变")
     void timeout_transfers_to_next_candidate() {
@@ -90,6 +106,7 @@ class TimeoutTransferIT {
         assertEquals(1L, candidateQueue.size(errandId));
 
         var before = errandRepository.findById(errandId).orElseThrow();
+        expireConfirm(errandId);
         var outcome = timeoutUseCase.handleTimeout(errandId, before.round());
 
         assertEquals(TimeoutTransferUseCase.Outcome.TRANSFERRED, outcome);
@@ -99,6 +116,10 @@ class TimeoutTransferIT {
         assertEquals(before.round() + 1, after.round(), "round 必须自增");
         assertEquals(1, after.slotTaken(), "名额不变，只是占用者换人");
         assertEquals(0L, candidateQueue.size(errandId), "候选人已被弹出");
+        assertEquals(1, jdbc.queryForObject("""
+                SELECT COUNT(*) FROM notification
+                 WHERE errand_id = ? AND user_id = 2002 AND type = 'TRANSFERRED'
+                """, Integer.class, errandId), "递补通知应与状态同事务落库");
     }
 
     @Test
@@ -109,6 +130,7 @@ class TimeoutTransferIT {
         assertEquals(0L, grabSlotPort.remainingSlot(errandId), "抢中后名额已扣为 0");
 
         var before = errandRepository.findById(errandId).orElseThrow();
+        expireConfirm(errandId);
         var outcome = timeoutUseCase.handleTimeout(errandId, before.round());
 
         assertEquals(TimeoutTransferUseCase.Outcome.REVERTED, outcome);
@@ -118,6 +140,11 @@ class TimeoutTransferIT {
         assertEquals(0, after.slotTaken(), "名额必须归还");
         assertEquals(-1L, grabSlotPort.remainingSlot(errandId),
                 "回退后应丢弃旧 Redis 名额，下一次交给数据库 CAS 裁决");
+        assertEquals(1, jdbc.queryForObject("""
+                SELECT COUNT(*) FROM credit_event
+                 WHERE biz_no = ? AND user_id = 2011
+                """, Integer.class, com.peergrab.domain.credit.model.CreditEvent.revertBizNo(errandId, before.round())),
+                "超时扣分事件必须随回退一起提交");
 
         // 回退后新的跑腿确实能抢到
         var regrab = grabUseCase.grab(new GrabErrandUseCase.Command(
@@ -154,6 +181,7 @@ class TimeoutTransferIT {
         assertEquals(com.peergrab.shared.ErrorCode.SLOT_FULL, secondLoser.code());
 
         int round = errandRepository.findById(errandId).orElseThrow().round();
+        expireConfirm(errandId);
 
         int transferred = 0;
         for (int i = 0; i < 5; i++) {
@@ -176,6 +204,7 @@ class TimeoutTransferIT {
         grabUseCase.grab(new GrabErrandUseCase.Command(errandId, 2043L, UUID.randomUUID().toString(), 60));
 
         int round0 = errandRepository.findById(errandId).orElseThrow().round();
+        expireConfirm(errandId);
         assertEquals(TimeoutTransferUseCase.Outcome.TRANSFERRED,
                 timeoutUseCase.handleTimeout(errandId, round0));
 
@@ -200,6 +229,7 @@ class TimeoutTransferIT {
             grabUseCase.grab(new GrabErrandUseCase.Command(
                     errandId, 2201L + i, UUID.randomUUID().toString(), 60));
             int round = errandRepository.findById(errandId).orElseThrow().round();
+            expireConfirm(errandId);
 
             CountDownLatch fire = new CountDownLatch(1);
             CountDownLatch done = new CountDownLatch(2);
@@ -270,6 +300,7 @@ class TimeoutTransferIT {
         TimeoutTransferUseCase.Outcome last = null;
         for (int i = 0; i < 10; i++) {
             int round = errandRepository.findById(errandId).orElseThrow().round();
+            expireConfirm(errandId);
             last = timeoutUseCase.handleTimeout(errandId, round);
             if (last == TimeoutTransferUseCase.Outcome.REVERTED) {
                 break;

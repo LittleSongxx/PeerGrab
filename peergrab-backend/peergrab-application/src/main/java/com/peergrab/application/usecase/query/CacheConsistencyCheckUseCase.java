@@ -1,5 +1,8 @@
 package com.peergrab.application.usecase.query;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.peergrab.domain.errand.model.Errand;
 import com.peergrab.domain.errand.ports.ErrandCachePort;
 import com.peergrab.domain.errand.ports.ErrandQueryPort;
@@ -32,6 +35,7 @@ import java.util.List;
 public class CacheConsistencyCheckUseCase {
 
     private static final Logger log = LoggerFactory.getLogger(CacheConsistencyCheckUseCase.class);
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     private final ErrandQueryPort queryPort;
     private final ErrandRepository errandRepository;
@@ -64,13 +68,18 @@ public class CacheConsistencyCheckUseCase {
         for (Long id : ids) {
             // 缓存里没有就不比对：未命中不是不一致（下次读会回源）
             var cached = cache.get(id);
+            if (cache.isDegraded()) {
+                log.warn("Redis 故障，本轮跳过缓存一致性校验 errandId={}", id);
+                break;
+            }
             if (cached.isEmpty() || cached.get().isEmpty()) {
                 continue;
             }
             Errand db = errandRepository.findById(id).orElse(null);
             if (db == null) {
                 // DB 里没了缓存还在：任务本项目不会物理删除，出现即异常
-                syncDiffRepository.record(now, id, "existence", "MISSING", "PRESENT", false);
+                boolean fixed = tryEvict(id);
+                syncDiffRepository.record(now, id, "existence", "MISSING", "PRESENT", fixed);
                 diffs++;
                 continue;
             }
@@ -78,55 +87,51 @@ public class CacheConsistencyCheckUseCase {
             diffs += compareAndFix(now, id, db, cacheJson);
         }
         if (diffs > 0) {
-            log.warn("一致性校验检出 {} 处差异（已落 sync_diff 并修正）", diffs);
+            log.warn("一致性校验检出 {} 处差异（已落 sync_diff；修复状态见 fixed 字段）", diffs);
         }
         return diffs;
     }
 
     private int compareAndFix(Instant now, long id, Errand db, String cacheJson) {
         int diffs = 0;
-        String cacheStatus = extract(cacheJson, "status");
-        String cacheVersion = extract(cacheJson, "version");
-        String cacheReward = extract(cacheJson, "rewardCents");
+        JsonNode cached;
+        try {
+            cached = JSON.readTree(cacheJson);
+        } catch (JsonProcessingException e) {
+            log.warn("任务详情缓存 JSON 损坏 errandId={}", id, e);
+            cached = null;
+        }
+        String cacheStatus = field(cached, "status");
+        String cacheVersion = field(cached, "version");
+        String cacheReward = field(cached, "rewardCents");
 
-        if (!db.status().name().equals(cacheStatus)) {
-            syncDiffRepository.record(now, id, "status", db.status().name(), cacheStatus, true);
-            diffs++;
-        }
-        if (!String.valueOf(db.version()).equals(cacheVersion)) {
-            syncDiffRepository.record(now, id, "version", String.valueOf(db.version()), cacheVersion, true);
-            diffs++;
-        }
-        if (!String.valueOf(db.reward().cents()).equals(cacheReward)) {
-            syncDiffRepository.record(now, id, "reward_amount", String.valueOf(db.reward().cents()), cacheReward, true);
-            diffs++;
-        }
-        if (diffs > 0) {
-            // 修正手段就是删缓存：下次读回源拿到新值。不做"直接改缓存"，
-            // 因为改缓存本身也可能写入错误值，删除是最安全的收敛动作
-            cache.evict(id);
-        }
+        boolean statusDiff = !db.status().name().equals(cacheStatus);
+        boolean versionDiff = !String.valueOf(db.version()).equals(cacheVersion);
+        boolean rewardDiff = !String.valueOf(db.reward().cents()).equals(cacheReward);
+        diffs = (statusDiff ? 1 : 0) + (versionDiff ? 1 : 0) + (rewardDiff ? 1 : 0);
+        if (diffs == 0) return 0;
+
+        // 先删除，再记修复结果。失败时保留 fixed=false 供后续排查及重试。
+        boolean fixed = tryEvict(id);
+        if (statusDiff) syncDiffRepository.record(now, id, "status", db.status().name(), cacheStatus, fixed);
+        if (versionDiff) syncDiffRepository.record(now, id, "version", String.valueOf(db.version()), cacheVersion, fixed);
+        if (rewardDiff) syncDiffRepository.record(now, id, "reward_amount", String.valueOf(db.reward().cents()), cacheReward, fixed);
         return diffs;
     }
 
-    /** 从详情 JSON 提取字段值（字符串字段带引号，数字字段不带） */
-    private String extract(String json, String field) {
-        String quoted = "\"" + field + "\":\"";
-        int i = json.indexOf(quoted);
-        if (i >= 0) {
-            int start = i + quoted.length();
-            return json.substring(start, json.indexOf('"', start));
+    private boolean tryEvict(long id) {
+        try {
+            cache.evict(id);
+            return true;
+        } catch (RuntimeException e) {
+            log.error("一致性校验删除缓存失败 errandId={}", id, e);
+            return false;
         }
-        String plain = "\"" + field + "\":";
-        i = json.indexOf(plain);
-        if (i < 0) {
-            return null;
-        }
-        int start = i + plain.length();
-        int end = start;
-        while (end < json.length() && (Character.isDigit(json.charAt(end)) || json.charAt(end) == '-')) {
-            end++;
-        }
-        return json.substring(start, end);
+    }
+
+    private String field(JsonNode node, String name) {
+        if (node == null || !node.isObject()) return null;
+        JsonNode value = node.get(name);
+        return value == null || value.isNull() ? null : value.asText();
     }
 }

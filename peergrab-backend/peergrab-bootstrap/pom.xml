@@ -12,6 +12,8 @@
   <dependencies>
     <dependency><groupId>com.peergrab</groupId><artifactId>peergrab-presentation</artifactId></dependency>
     <dependency><groupId>com.peergrab</groupId><artifactId>peergrab-infrastructure</artifactId></dependency>
+    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-actuator</artifactId></dependency>
+    <dependency><groupId>io.micrometer</groupId><artifactId>micrometer-registry-prometheus</artifactId></dependency>
     <dependency><groupId>com.peergrab</groupId><artifactId>peergrab-bench</artifactId><version>${project.version}</version><scope>test</scope></dependency>
     <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-test</artifactId><scope>test</scope></dependency>
   </dependencies>

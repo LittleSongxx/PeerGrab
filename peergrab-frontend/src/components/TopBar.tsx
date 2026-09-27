@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, yuan } from '../api';
-import { subscribeWs, isWsAvailable } from '../ws';
+import { subscribeWs } from '../ws';
 import { IDENTITIES } from '../identity';
 import UiIcon, { type UiIconName } from './UiIcon';
 
@@ -29,25 +29,28 @@ export default function TopBar({ route, userId, onLogout }: Props) {
     const refreshBalance = () => { api.wallet().then((wallet) => setBalance(wallet.availableCents)).catch(() => {}); };
     refreshBalance();
 
+    const refreshUnread = () => api.unread().then((result) => setUnread(result.count)).catch(() => {});
     const unsubscribe = subscribeWs((event) => {
       if (event.type === 'notification.new') {
-        setUnread((current) => current + 1);
+        refreshUnread();
         refreshBalance();
       }
     });
-    const refreshUnread = () => api.unread().then((result) => setUnread(result.count)).catch(() => {});
     window.addEventListener('peergrab:notification-read', refreshUnread);
     window.addEventListener('peergrab:wallet-changed', refreshBalance);
+    // Reconcile even while WS is connected: another app replica may have consumed
+    // the event, and WebSocket delivery is deliberately best-effort.
     const polling = window.setInterval(() => {
-      if (!isWsAvailable()) refreshUnread();
-    }, 5000);
+      refreshUnread();
+      refreshBalance();
+    }, 30000);
     return () => {
       unsubscribe();
       window.removeEventListener('peergrab:notification-read', refreshUnread);
       window.removeEventListener('peergrab:wallet-changed', refreshBalance);
       window.clearInterval(polling);
     };
-  }, [userId, route]);
+  }, [userId]);
 
   useEffect(() => { setMenuOpen(false); }, [route]);
   useEffect(() => {

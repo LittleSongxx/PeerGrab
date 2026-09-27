@@ -20,6 +20,7 @@ import com.peergrab.shared.Money;
 import com.peergrab.shared.SnowflakeIdGenerator;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.TransactionStatus;
@@ -56,8 +57,6 @@ class FundWorkflowUseCaseTest {
                 cache, credits, ranking, tx, notifier, 0.05);
         refund = new RefundErrandUseCase(errands, wallets, audits, events, ids,
                 cache, tx, notifier, credits, 9001);
-        when(events.publishInTransaction(any(), any())).thenAnswer(invocation ->
-                ((FundEventPort.LocalWork) invocation.getArgument(1)).execute());
     }
 
     @Test
@@ -93,6 +92,7 @@ class FundWorkflowUseCaseTest {
         assertEquals(1, txManager.rollbacks);
         verify(wallets, never()).casEscrowStatus(anyLong(), anyLong(), any(), any());
         verify(wallets, never()).casDebit(anyLong(), any());
+        verifyNoInteractions(events);
     }
 
     @Test
@@ -107,6 +107,7 @@ class FundWorkflowUseCaseTest {
         assertEquals(0, txManager.commits);
         assertEquals(1, txManager.rollbacks);
         verify(errands, never()).appendStatusLog(anyLong(), any(), any(), anyInt(), anyLong());
+        verifyNoInteractions(events);
     }
 
     @Test
@@ -126,18 +127,23 @@ class FundWorkflowUseCaseTest {
     }
 
     @Test
-    void failedHalfMessageLeavesTaskAndEscrowUntouched() {
+    void failedOutboxInsertRollsBackRefundTransaction() {
         when(errands.findById(45)).thenReturn(Optional.of(errand(45, ErrandStatus.PUBLISHED)));
         when(wallets.findEscrowByErrandId(1, 45)).thenReturn(Optional.of(escrow(45)));
-        doThrow(new IllegalStateException("half message send failed"))
-                .when(events).publishInTransaction(any(), any());
+        when(errands.casCancel(45, 3)).thenReturn(1);
+        when(wallets.casEscrowStatus(eq(1L), eq(45L), any(), any())).thenReturn(1);
+        stubAccounts();
+        when(wallets.casDebit(10, Money.ofCents(1000))).thenReturn(1);
+        when(wallets.casCredit(20, Money.ofCents(1000))).thenReturn(1);
+        doThrow(new IllegalStateException("outbox insert failed"))
+                .when(events).append(any());
 
         assertThrows(IllegalStateException.class, () -> refund.cancelAndRefund(45, 1001));
 
-        verify(errands, never()).casCancel(anyLong(), anyLong());
-        verify(errands, never()).appendStatusLog(anyLong(), any(), any(), anyInt(), anyLong());
-        verify(wallets, never()).casEscrowStatus(anyLong(), anyLong(), any(), any());
-        assertEquals(0, txManager.commits + txManager.rollbacks);
+        verify(errands).casCancel(45, 3);
+        verify(events).append(any());
+        assertEquals(0, txManager.commits);
+        assertEquals(1, txManager.rollbacks);
     }
 
     @Test
@@ -170,6 +176,7 @@ class FundWorkflowUseCaseTest {
         assertEquals(0, txManager.rollbacks);
         verify(errands).appendStatusLog(47, ErrandStatus.PUBLISHED, ErrandStatus.CANCELLED, 0, 1001);
         verify(wallets, times(2)).insertLedger(any());
+        verify(events).append(any());
     }
 
     @Test
@@ -204,12 +211,13 @@ class FundWorkflowUseCaseTest {
 
         assertEquals(0, txManager.commits);
         assertEquals(1, txManager.rollbacks);
+        verifyNoInteractions(events);
     }
 
     @Test
     void arbitrateRequiresConfiguredArbitratorBeforeReadingTask() {
         ArbitrateErrandUseCase arbitrate = new ArbitrateErrandUseCase(errands, wallets,
-                refund, mock(ArbitrateSettleStep.class), audits, events, cache, credits,
+                refund, mock(ArbitrateSettleStep.class), audits, cache, credits,
                 notifier, 9001);
 
         BizException ex = assertThrows(BizException.class,
@@ -217,6 +225,25 @@ class FundWorkflowUseCaseTest {
 
         assertEquals(ErrorCode.UNAUTHORIZED, ex.code());
         verifyNoInteractions(errands);
+    }
+
+    @Test
+    void arbitrationEventReportsActualRunnerNetAndCommission() {
+        var step = new ArbitrateSettleStep(errands, wallets, ids, credits, events, 0.05);
+        when(errands.casSettleFromDispute(54, 3)).thenReturn(1);
+        when(wallets.casEscrowStatus(eq(1L), eq(54L), any(), any())).thenReturn(1);
+        stubAccounts();
+        when(wallets.casDebit(10, Money.ofCents(1000))).thenReturn(1);
+        when(wallets.casCredit(30, Money.ofCents(950))).thenReturn(1);
+        when(wallets.casCredit(40, Money.ofCents(50))).thenReturn(1);
+
+        assertTrue(step.settleFromDispute(54, errand(54, ErrandStatus.DISPUTED),
+                escrow(54), "settle:54", 9001));
+
+        var event = ArgumentCaptor.forClass(FundEventPort.FundEvent.class);
+        verify(events).append(event.capture());
+        assertEquals(950, event.getValue().amountCents());
+        assertEquals(50, event.getValue().commissionCents());
     }
 
     @Test

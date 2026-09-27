@@ -64,11 +64,11 @@ public class ConfirmErrandUseCase {
         }
         errandRepository.appendStatusLog(cmd.errandId(), ErrandStatus.LOCKED, ErrandStatus.ACCEPTED,
                 errand.round(), cmd.runnerId());
-        notifier.errandStatusChanged(errand.id(), errand.publisherId(), errand.grabberId(),
-                ErrandStatus.ACCEPTED.name(), errand.round());
-
         // 状态变了，详情缓存必须失效。挂在事务提交后执行（见 CacheEvictSupport 的注释）
         cacheEvict.evictAfterCommit(cmd.errandId());
+        AfterCommitRealtime.send(() -> notifier.errandStatusChanged(
+                errand.id(), errand.publisherId(), errand.grabberId(),
+                ErrandStatus.ACCEPTED.name(), errand.round()));
         clearCandidatesAfterCommit(cmd.errandId());
     }
 

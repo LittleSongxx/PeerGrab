@@ -1,0 +1,79 @@
+# Application-only stack for each of at least two hosts behind a load balancer.
+# Supply a shared highly available MySQL, Redis and RocketMQ outside this file.
+# Host Nginx can keep proxying its local frontend on the loopback web port.
+name: ${COMPOSE_PROJECT_NAME:-peergrab-edge}
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+      target: app
+    environment:
+      JAVA_TOOL_OPTIONS: ${PEERGRAB_APP_JAVA_OPTIONS:--Xms128m -Xmx768m}
+      SPRING_DATASOURCE_URL: ${PEERGRAB_JDBC_URL:?Set the shared MySQL JDBC URL}
+      SPRING_DATASOURCE_USERNAME: ${PEERGRAB_DB_USER:?Set the MySQL application user}
+      SPRING_DATASOURCE_PASSWORD: ${PEERGRAB_DB_PASSWORD:?Set the MySQL application password}
+      SPRING_DATA_REDIS_HOST: ${PEERGRAB_REDIS_HOST:?Set the shared Redis host}
+      SPRING_DATA_REDIS_PORT: ${PEERGRAB_REDIS_PORT:-6379}
+      PEERGRAB_MQ_ENDPOINTS: ${PEERGRAB_MQ_ENDPOINTS:?Set the shared RocketMQ proxy endpoint}
+      PEERGRAB_MQ_ENABLED: "true"
+      PEERGRAB_WORKER_ID: 1 # preferred ID; the MySQL lease grants a unique actual ID
+      PEERGRAB_WORKER_LEASE_CLOSE_ON_LOSS: "true"
+      PEERGRAB_AUTH_MODE: jwt
+      PEERGRAB_AUTH_JWT_SECRET: ${PEERGRAB_AUTH_JWT_SECRET:?Share the same random JWT secret on every host}
+      PEERGRAB_WEB_CORS_ORIGINS: ${PEERGRAB_PUBLIC_ORIGIN:?Set the public HTTPS origin}
+      PEERGRAB_AUTH_ALLOW_HEADER_IDENTITY: "false"
+      PEERGRAB_AUTH_DEMO_ENABLED: "true"
+      PEERGRAB_AUTH_DEMO_PASSWORD_1001: ${PEERGRAB_AUTH_DEMO_PASSWORD_1001:?Set demo password}
+      PEERGRAB_AUTH_DEMO_PASSWORD_2001: ${PEERGRAB_AUTH_DEMO_PASSWORD_2001:?Set demo password}
+      PEERGRAB_AUTH_DEMO_PASSWORD_2002: ${PEERGRAB_AUTH_DEMO_PASSWORD_2002:?Set demo password}
+      PEERGRAB_AUTH_DEMO_PASSWORD_9001: ${PEERGRAB_AUTH_DEMO_PASSWORD_9001:?Set demo password}
+      MANAGEMENT_ENDPOINT_HEALTH_GROUP_READINESS_INCLUDE: readinessState,db,snowflakeLease
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/actuator/health/readiness"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 90s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+      target: worker
+    environment:
+      JAVA_TOOL_OPTIONS: ${PEERGRAB_WORKER_JAVA_OPTIONS:--Xms128m -Xmx512m}
+      SPRING_DATASOURCE_URL: ${PEERGRAB_JDBC_URL:?Set the shared MySQL JDBC URL}
+      SPRING_DATASOURCE_USERNAME: ${PEERGRAB_DB_USER:?Set the MySQL application user}
+      SPRING_DATASOURCE_PASSWORD: ${PEERGRAB_DB_PASSWORD:?Set the MySQL application password}
+      SPRING_DATA_REDIS_HOST: ${PEERGRAB_REDIS_HOST:?Set the shared Redis host}
+      SPRING_DATA_REDIS_PORT: ${PEERGRAB_REDIS_PORT:-6379}
+      PEERGRAB_MQ_ENDPOINTS: ${PEERGRAB_MQ_ENDPOINTS:?Set the shared RocketMQ proxy endpoint}
+      PEERGRAB_MQ_ENABLED: "true"
+      PEERGRAB_WORKER_ID: 2
+      PEERGRAB_WORKER_LEASE_CLOSE_ON_LOSS: "true"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8082/actuator/health/readiness"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ../../peergrab-frontend
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:${PEERGRAB_WEB_PORT:-25173}:80"
+    depends_on:
+      app:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped

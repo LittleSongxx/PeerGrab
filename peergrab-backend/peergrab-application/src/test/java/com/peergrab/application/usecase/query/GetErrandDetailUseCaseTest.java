@@ -78,4 +78,46 @@ class GetErrandDetailUseCaseTest {
         assertEquals(first.get(2, TimeUnit.SECONDS), second.get(2, TimeUnit.SECONDS));
         verify(repository, times(1)).findById(42);
     }
+
+    @Test
+    void failed_cache_read_goes_straight_to_database_without_more_redis_calls() {
+        ErrandRepository repository = mock(ErrandRepository.class);
+        ErrandCachePort cache = mock(ErrandCachePort.class);
+        AtomicBoolean degraded = new AtomicBoolean();
+        when(cache.get(42)).thenAnswer(inv -> {
+            degraded.set(true);
+            return Optional.empty();
+        });
+        when(cache.isDegraded()).thenAnswer(inv -> degraded.get());
+        when(repository.findById(42)).thenReturn(Optional.of(errand(42)));
+
+        assertTrue(new GetErrandDetailUseCase(repository, cache).detailJson(42).isPresent());
+
+        verify(cache, times(1)).get(42);
+        verify(cache, never()).mightExist(42);
+        verify(cache, never()).tryAcquireRebuild(42);
+        verify(cache, never()).put(eq(42L), anyString());
+        verify(repository).findById(42);
+    }
+
+    @Test
+    void failed_rebuild_lock_skips_cold_miss_polling() {
+        ErrandRepository repository = mock(ErrandRepository.class);
+        ErrandCachePort cache = mock(ErrandCachePort.class);
+        AtomicBoolean degraded = new AtomicBoolean();
+        when(cache.get(42)).thenReturn(Optional.empty());
+        when(cache.mightExist(42)).thenReturn(true);
+        when(cache.isDegraded()).thenAnswer(inv -> degraded.get());
+        when(cache.tryAcquireRebuild(42)).thenAnswer(inv -> {
+            degraded.set(true);
+            return false;
+        });
+        when(repository.findById(42)).thenReturn(Optional.of(errand(42)));
+
+        assertTrue(new GetErrandDetailUseCase(repository, cache).detailJson(42).isPresent());
+
+        verify(cache, times(1)).get(42);
+        verify(cache, never()).put(eq(42L), anyString());
+        verify(repository).findById(42);
+    }
 }

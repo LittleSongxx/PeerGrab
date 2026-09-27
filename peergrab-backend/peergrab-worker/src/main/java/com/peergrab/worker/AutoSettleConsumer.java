@@ -2,7 +2,7 @@ package com.peergrab.worker;
 
 import com.peergrab.application.usecase.SettleErrandUseCase;
 import com.peergrab.domain.errand.model.Errand;
-import jakarta.annotation.PostConstruct;
+import com.peergrab.shared.MessagePayloadCodec;
 import jakarta.annotation.PreDestroy;
 import org.apache.rocketmq.client.apis.ClientConfiguration;
 import org.apache.rocketmq.client.apis.ClientServiceProvider;
@@ -14,6 +14,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.nio.charset.StandardCharsets;
@@ -52,7 +53,16 @@ public class AutoSettleConsumer {
         this.group = group;
     }
 
-    @PostConstruct
+    @Scheduled(fixedDelayString = "${peergrab.mq.consumer-reconnect-ms:10000}", scheduler = "mqConsumerScheduler")
+    public synchronized void ensureStarted() {
+        if (consumer != null) return;
+        try {
+            start();
+        } catch (Exception e) {
+            log.warn("自动结算消费者启动失败，稍后重试 topic={}", topic, e);
+        }
+    }
+
     public void start() throws Exception {
         consumer = provider.newPushConsumerBuilder()
                 .setClientConfiguration(configuration)
@@ -61,16 +71,17 @@ public class AutoSettleConsumer {
                         topic, new FilterExpression("*", FilterExpressionType.TAG)))
                 .setMessageListener(msg -> {
                     String body = StandardCharsets.UTF_8.decode(msg.getBody()).toString();
+                    long errandId;
                     try {
-                        long errandId = extractLong(body, "errandId");
+                        errandId = MessagePayloadCodec.readAutoSettle(body).errandId();
+                    } catch (IllegalArgumentException e) {
+                        log.error("自动结算毒消息，丢弃 body={}", body, e);
+                        return ConsumeResult.SUCCESS;
+                    }
+                    try {
                         var result = settleUseCase.settle(errandId, Errand.SYSTEM_OPERATOR);
                         log.info("自动结算消息处理 errandId={} result={}", errandId, result);
                         // ALREADY_SETTLED / CONFLICT 也是幂等生效的正常结果，都要 ACK
-                        return ConsumeResult.SUCCESS;
-                    } catch (IllegalArgumentException e) { // NumberFormatException 是其子类
-                        // 毒消息（格式损坏）：重试永远不会成功，ACK 丢弃。
-                        // 兜底扫描会按 DB 事实继续处理——"消息可丢、扫描不丢"
-                        log.error("自动结算毒消息，丢弃 body={}", body, e);
                         return ConsumeResult.SUCCESS;
                     } catch (RuntimeException e) {
                         log.error("自动结算消息处理失败，交由 MQ 重试 body={}", body, e);
@@ -82,33 +93,10 @@ public class AutoSettleConsumer {
     }
 
     @PreDestroy
-    public void stop() throws Exception {
+    public synchronized void stop() throws Exception {
         if (consumer != null) {
             consumer.close();
         }
     }
 
-    private static long extractLong(String json, String field) {
-        String needle = "\"" + field + "\":";
-        int start = json.indexOf(needle);
-        if (start < 0) {
-            throw new IllegalArgumentException("消息体缺少字段 " + field + ": " + json);
-        }
-        int i = start + needle.length();
-        while (i < json.length() && Character.isWhitespace(json.charAt(i))) {
-            i++;
-        }
-        if (i < json.length() && json.charAt(i) == '"') {
-            i++;
-        }
-        int end = i;
-        while (end < json.length() && (Character.isDigit(json.charAt(end)) || json.charAt(end) == '-')) {
-            end++;
-        }
-        String value = json.substring(i, end);
-        if (value.isEmpty()) {
-            throw new IllegalArgumentException("字段 " + field + " 值为空: " + json);
-        }
-        return Long.parseLong(value);
-    }
 }

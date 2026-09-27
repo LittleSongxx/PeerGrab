@@ -114,11 +114,10 @@ public class JdbcErrandQueryAdapter implements ErrandQueryPort {
 
     @Override
     public int countOngoingByRunner(long runnerId) {
-        // 在途 = 已确认接单但还没送达的任务（ACCEPTED/PICKED_UP）。
-        // LOCKED 不算：还没确认，可能超时流转走
+        // 抢中即占用额度，送达后释放；与 JdbcRunnerQuotaAdapter 的事务内裁决保持一致。
         Integer n = jdbc.queryForObject("""
                 SELECT COUNT(*) FROM errand
-                 WHERE grabber_id = ? AND status IN ('ACCEPTED', 'PICKED_UP')
+                 WHERE grabber_id = ? AND status IN ('LOCKED', 'ACCEPTED', 'PICKED_UP')
                 """, Integer.class, runnerId);
         return n == null ? 0 : n;
     }

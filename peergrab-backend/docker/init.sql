@@ -16,18 +16,27 @@ CREATE TABLE IF NOT EXISTS errand (
   round         INT          NOT NULL DEFAULT 0 COMMENT '流转轮次',
   version       BIGINT       NOT NULL DEFAULT 0 COMMENT '乐观锁版本号',
   locked_at     DATETIME(3)  NULL     COMMENT '本轮抢中时间，P2 超时扫描用',
+  confirm_deadline_at DATETIME(3) NULL COMMENT '本轮确认截止时间，以数据库时钟写入',
   delivered_at  DATETIME(3)  NULL     COMMENT '送达时间，自动结算扫描用',
+  auto_settle_deadline_at DATETIME(3) NULL COMMENT '自动结算截止时间，以数据库时钟写入',
   created_at    DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   updated_at    DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
   PRIMARY KEY (id),
   KEY idx_campus_status (campus_id, status, created_at),
-  KEY idx_timeout_scan (status, locked_at),
-  KEY idx_autosettle_scan (status, delivered_at),
+  KEY idx_confirm_deadline (status, confirm_deadline_at, id),
+  KEY idx_auto_settle_deadline (status, auto_settle_deadline_at, id),
   KEY idx_grabber_status (grabber_id, status),
   KEY idx_publisher (publisher_id, created_at),
   -- 数据库级不变式：已占名额永远不能超过总名额（INV-1 的最后保险）
   CONSTRAINT ck_slot CHECK (slot_taken >= 0 AND slot_taken <= slot_total)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='跑腿任务';
+
+-- 同一跑腿的抢中/候选递补先锁此行，再统计当前在途任务并更新 errand。
+-- 锁行永久保留，额度由 errand 状态实时计算，无需异步释放计数。
+CREATE TABLE IF NOT EXISTS runner_quota_lock (
+  runner_id BIGINT NOT NULL,
+  PRIMARY KEY (runner_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='跑腿在途额度事务锁';
 
 -- 发布请求与任务同事务落库：客户端按同一 request_id 重试，不再重复扣款或建任务。
 CREATE TABLE IF NOT EXISTS publish_request (
@@ -39,6 +48,27 @@ CREATE TABLE IF NOT EXISTS publish_request (
   PRIMARY KEY (publisher_id, request_id),
   UNIQUE KEY uk_publish_errand (errand_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='发布请求幂等登记';
+
+-- JWT 模式的服务端会话真值；撤销整个 session_id 即可立即使 access/refresh 失效。
+CREATE TABLE IF NOT EXISTS auth_token_session (
+  session_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  user_id BIGINT NOT NULL,
+  expires_at DATETIME(3) NOT NULL,
+  revoked_at DATETIME(3) NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (session_id),
+  KEY idx_auth_session_expiry (expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='JWT 会话有效性真值';
+
+CREATE TABLE IF NOT EXISTS auth_refresh_token (
+  token_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL COMMENT 'SHA-256 十六进制摘要',
+  session_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  expires_at DATETIME(3) NOT NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (token_hash),
+  UNIQUE KEY uk_auth_refresh_session (session_id),
+  KEY idx_auth_refresh_expiry (expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='一次性 refresh token 哈希';
 
 CREATE TABLE IF NOT EXISTS errand_status_log (
   id          BIGINT      NOT NULL AUTO_INCREMENT,
@@ -108,6 +138,7 @@ CREATE TABLE IF NOT EXISTS wallet_ledger (
   UNIQUE KEY uk_biz_direction (biz_no, account_id, direction),
   UNIQUE KEY uk_account_version (account_id, account_version),
   KEY idx_account_time (account_id, created_at),
+  KEY idx_ledger_user_time (user_id, created_at, id),
   KEY idx_ref (ref_type, ref_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='资金流水（事实来源，复式记账）';
 
@@ -153,6 +184,8 @@ CREATE TABLE IF NOT EXISTS local_message (
   status        VARCHAR(16)  NOT NULL COMMENT 'PENDING/SENT/DEAD',
   retry_count   INT          NOT NULL DEFAULT 0,
   next_retry_at DATETIME(3)  NOT NULL,
+  claim_token   CHAR(36)     NULL COMMENT '当前发送者的令牌',
+  claim_until   DATETIME(3) NULL COMMENT '发送租约到期时间',
   created_at    DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   updated_at    DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
   PRIMARY KEY (id),
@@ -160,6 +193,38 @@ CREATE TABLE IF NOT EXISTS local_message (
   UNIQUE KEY uk_msg_key (msg_key),
   KEY idx_scan (status, next_retry_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='本地消息表';
+
+-- 资金事务与事件登记同库提交。MQ 故障时保留 PENDING，worker 恢复后投递。
+CREATE TABLE IF NOT EXISTS fund_event_outbox (
+  biz_no           VARCHAR(64)  NOT NULL COMMENT '账本业务幂等号，同时作为 MQ 消息 key',
+  event_type       VARCHAR(32)  NOT NULL COMMENT 'SETTLED/REFUNDED/ARBITRATED',
+  errand_id        BIGINT       NOT NULL,
+  publisher_id     BIGINT       NOT NULL,
+  runner_id        BIGINT       NOT NULL,
+  amount_cents     BIGINT       NOT NULL,
+  commission_cents BIGINT       NOT NULL,
+  status           VARCHAR(16)  NOT NULL DEFAULT 'PENDING' COMMENT 'PENDING/SENT',
+  retry_count      INT          NOT NULL DEFAULT 0,
+  next_retry_at    DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  claim_token      CHAR(36)     NULL COMMENT '当前发送者的令牌',
+  claim_until      DATETIME(3) NULL COMMENT '发送租约到期时间',
+  created_at       DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at       DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (biz_no),
+  KEY idx_fund_outbox_pending (status, next_retry_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='资金事件持久投递箱';
+
+-- 多 app/worker 副本从 MySQL 原子领取雪花节点，旧时间段禁止复用。
+CREATE TABLE IF NOT EXISTS snowflake_node_lease (
+  node_id       SMALLINT UNSIGNED NOT NULL,
+  holder        CHAR(36)          NOT NULL,
+  expires_at    DATETIME(3)      NOT NULL,
+  safe_after_ms BIGINT           NOT NULL COMMENT '下一持有者发号前必须越过的毫秒上界',
+  updated_at    DATETIME(3)      NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (node_id),
+  KEY idx_snowflake_expiry (expires_at),
+  CONSTRAINT ck_snowflake_node_id CHECK (node_id <= 1023)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='雪花节点租约与时间栅栏';
 
 -- 压测/测试轮次元信息。
 -- 刻意不往业务表加 run_tag 列——压测设施不侵入业务模型。
@@ -215,14 +280,15 @@ CREATE TABLE IF NOT EXISTS notification (
   msg_key     VARCHAR(96) NOT NULL COMMENT '消费幂等键',
   user_id     BIGINT      NOT NULL COMMENT '接收人',
   errand_id   BIGINT      NOT NULL,
-  type        VARCHAR(24) NOT NULL COMMENT 'SETTLED/REFUNDED/ARBITRATED',
+  type        VARCHAR(24) NOT NULL COMMENT 'SETTLED/REFUNDED/ARBITRATED/TRANSFERRED/REVERTED',
   content     VARCHAR(255) NOT NULL,
   read_flag   TINYINT     NOT NULL DEFAULT 0,
   created_at  DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   PRIMARY KEY (id),
   -- 消费端幂等：同一事件对同一用户只生成一条站内消息
   UNIQUE KEY uk_msg_user (msg_key, user_id),
-  KEY idx_user (user_id, created_at)
+  KEY idx_user (user_id, created_at),
+  KEY idx_user_unread (user_id, read_flag)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='站内消息';
 
 -- 对账差异：正常情况必须为空。
@@ -284,3 +350,18 @@ CREATE TABLE IF NOT EXISTS credit_event (
   UNIQUE KEY uk_biz (biz_no),
   KEY idx_user_time (user_id, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='信用事件流水';
+
+-- 扫描游标越过失败任务前先持久登记；每个 job/任务只有一条重试记录。
+CREATE TABLE IF NOT EXISTS worker_scan_retry (
+  job_type      VARCHAR(24)  NOT NULL COMMENT 'CONFIRM_TIMEOUT/AUTO_SETTLE',
+  errand_id     BIGINT       NOT NULL,
+  round         INT          NOT NULL DEFAULT 0 COMMENT '超时流转轮次；自动结算固定为 0',
+  attempts      INT          NOT NULL DEFAULT 1,
+  next_retry_at DATETIME(3)  NOT NULL,
+  lease_token   CHAR(36)     NULL,
+  lease_until   DATETIME(3)  NULL,
+  last_error    VARCHAR(255) NULL,
+  created_at    DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (job_type, errand_id),
+  KEY idx_scan_retry_due (job_type, next_retry_at, lease_until)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Worker 扫描失败持久重试';

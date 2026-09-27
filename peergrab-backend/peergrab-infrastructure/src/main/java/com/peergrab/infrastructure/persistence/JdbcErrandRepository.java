@@ -7,6 +7,7 @@ import com.peergrab.domain.errand.ports.ErrandRepository;
 import com.peergrab.shared.Money;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Repository;
 
 import java.sql.Timestamp;
@@ -25,9 +26,15 @@ import java.util.Optional;
 public class JdbcErrandRepository implements ErrandRepository {
 
     private final JdbcTemplate jdbc;
+    private final long confirmTimeoutSeconds;
+    private final long autoSettleSeconds;
 
-    public JdbcErrandRepository(JdbcTemplate jdbc) {
+    public JdbcErrandRepository(JdbcTemplate jdbc,
+                                @Value("${peergrab.timeout.confirm-seconds:300}") long confirmTimeoutSeconds,
+                                @Value("${peergrab.settle.auto-settle-seconds:86400}") long autoSettleSeconds) {
         this.jdbc = jdbc;
+        this.confirmTimeoutSeconds = confirmTimeoutSeconds;
+        this.autoSettleSeconds = autoSettleSeconds;
     }
 
     private static final RowMapper<Errand> MAPPER = (rs, n) -> Errand.rehydrate(
@@ -44,7 +51,9 @@ public class JdbcErrandRepository implements ErrandRepository {
             rs.getInt("round"),
             rs.getLong("version"),
             rs.getTimestamp("locked_at") == null ? null : rs.getTimestamp("locked_at").toInstant(),
-            rs.getTimestamp("delivered_at") == null ? null : rs.getTimestamp("delivered_at").toInstant());
+            rs.getTimestamp("delivered_at") == null ? null : rs.getTimestamp("delivered_at").toInstant(),
+            rs.getTimestamp("confirm_deadline_at") == null ? null : rs.getTimestamp("confirm_deadline_at").toInstant(),
+            rs.getTimestamp("auto_settle_deadline_at") == null ? null : rs.getTimestamp("auto_settle_deadline_at").toInstant());
 
     @Override
     public void insert(Errand errand) {
@@ -83,12 +92,13 @@ public class JdbcErrandRepository implements ErrandRepository {
                        grabber_id = ?,
                        slot_taken = slot_taken + 1,
                        locked_at = NOW(3),
+                       confirm_deadline_at = DATE_ADD(NOW(3), INTERVAL ? SECOND),
                        version = version + 1
                  WHERE id = ?
                    AND status = 'PUBLISHED'
                    AND version = ?
                    AND slot_taken < slot_total
-                """, runnerId, errandId, expectedVersion);
+                """, runnerId, confirmTimeoutSeconds, errandId, expectedVersion);
     }
 
     @Override
@@ -126,9 +136,11 @@ public class JdbcErrandRepository implements ErrandRepository {
                    SET grabber_id = ?,
                        round = round + 1,
                        locked_at = NOW(3),
+                       confirm_deadline_at = DATE_ADD(NOW(3), INTERVAL ? SECOND),
                        version = version + 1
                  WHERE id = ? AND status = 'LOCKED' AND version = ? AND round = ?
-                """, nextRunnerId, errandId, expectedVersion, expectedRound);
+                   AND confirm_deadline_at <= NOW(3)
+                """, nextRunnerId, confirmTimeoutSeconds, errandId, expectedVersion, expectedRound);
     }
 
     /** 候选队列空，回退重新开放：名额必须还回去，否则任务显示可抢但实际满 */
@@ -141,13 +153,25 @@ public class JdbcErrandRepository implements ErrandRepository {
                        slot_taken = GREATEST(slot_taken - 1, 0),
                        round = round + 1,
                        locked_at = NULL,
+                       confirm_deadline_at = NULL,
                        version = version + 1
                  WHERE id = ? AND status = 'LOCKED' AND version = ? AND round = ?
+                   AND confirm_deadline_at <= NOW(3)
                 """, errandId, expectedVersion, expectedRound);
     }
 
+    @Override
+    public boolean confirmTimeoutDue(long errandId, int expectedRound) {
+        Integer count = jdbc.queryForObject("""
+                SELECT COUNT(*) FROM errand
+                 WHERE id = ? AND status = 'LOCKED' AND round = ?
+                   AND confirm_deadline_at <= NOW(3)
+                """, Integer.class, errandId, expectedRound);
+        return count != null && count == 1;
+    }
+
     /**
-     * 兜底扫描：走 idx_timeout_scan(status, locked_at) 索引，不会全表扫。
+     * 兜底扫描：走 idx_confirm_deadline(status, confirm_deadline_at, id)。
      * 这是"主通道 + 兜底"模式的兜底侧——MQ 消息万一丢了，
      * 任务不能永久卡在 LOCKED 让资金一直冻结。
      */
@@ -156,8 +180,8 @@ public class JdbcErrandRepository implements ErrandRepository {
         return jdbc.query("""
                 SELECT * FROM errand
                  WHERE status = 'LOCKED'
-                   AND locked_at < DATE_SUB(NOW(3), INTERVAL ? SECOND)
-                 ORDER BY locked_at, id
+                   AND confirm_deadline_at <= DATE_SUB(NOW(3), INTERVAL ? SECOND)
+                 ORDER BY confirm_deadline_at, id
                  LIMIT ?
                 """, MAPPER, timeoutSeconds, limit);
     }
@@ -169,9 +193,9 @@ public class JdbcErrandRepository implements ErrandRepository {
         return jdbc.query("""
                 SELECT * FROM errand
                  WHERE status = 'LOCKED'
-                   AND locked_at < DATE_SUB(NOW(3), INTERVAL ? SECOND)
-                   AND (locked_at > ? OR (locked_at = ? AND id > ?))
-                 ORDER BY locked_at, id
+                   AND confirm_deadline_at <= DATE_SUB(NOW(3), INTERVAL ? SECOND)
+                   AND (confirm_deadline_at > ? OR (confirm_deadline_at = ? AND id > ?))
+                 ORDER BY confirm_deadline_at, id
                  LIMIT ?
                 """, MAPPER, timeoutSeconds, after, after, afterId, limit);
     }
@@ -190,9 +214,11 @@ public class JdbcErrandRepository implements ErrandRepository {
     public int casDeliver(long errandId, long runnerId, long expectedVersion) {
         return jdbc.update("""
                 UPDATE errand
-                   SET status = 'DELIVERED', delivered_at = NOW(3), version = version + 1
+                   SET status = 'DELIVERED', delivered_at = NOW(3),
+                       auto_settle_deadline_at = DATE_ADD(NOW(3), INTERVAL ? SECOND),
+                       version = version + 1
                  WHERE id = ? AND status = 'PICKED_UP' AND grabber_id = ? AND version = ?
-                """, errandId, runnerId, expectedVersion);
+                """, autoSettleSeconds, errandId, runnerId, expectedVersion);
     }
 
     /**
@@ -208,6 +234,16 @@ public class JdbcErrandRepository implements ErrandRepository {
                 UPDATE errand
                    SET status = 'SETTLED', version = version + 1
                  WHERE id = ? AND status = 'DELIVERED' AND version = ?
+                """, errandId, expectedVersion);
+    }
+
+    @Override
+    public int casAutoSettle(long errandId, long expectedVersion) {
+        return jdbc.update("""
+                UPDATE errand
+                   SET status = 'SETTLED', version = version + 1
+                 WHERE id = ? AND status = 'DELIVERED' AND version = ?
+                   AND auto_settle_deadline_at <= NOW(3)
                 """, errandId, expectedVersion);
     }
 
@@ -248,14 +284,14 @@ public class JdbcErrandRepository implements ErrandRepository {
                 """, errandId, expectedVersion);
     }
 
-    /** 自动结算扫描：走 idx_autosettle_scan(status, delivered_at) */
+    /** 自动结算扫描：走 idx_auto_settle_deadline(status, auto_settle_deadline_at, id) */
     @Override
     public List<Errand> findAutoSettleDue(long autoSettleSeconds, int limit) {
         return jdbc.query("""
                 SELECT * FROM errand
                  WHERE status = 'DELIVERED'
-                   AND delivered_at < DATE_SUB(NOW(3), INTERVAL ? SECOND)
-                 ORDER BY delivered_at, id
+                   AND auto_settle_deadline_at <= DATE_SUB(NOW(3), INTERVAL ? SECOND)
+                 ORDER BY auto_settle_deadline_at, id
                  LIMIT ?
                 """, MAPPER, autoSettleSeconds, limit);
     }
@@ -267,9 +303,9 @@ public class JdbcErrandRepository implements ErrandRepository {
         return jdbc.query("""
                 SELECT * FROM errand
                  WHERE status = 'DELIVERED'
-                   AND delivered_at < DATE_SUB(NOW(3), INTERVAL ? SECOND)
-                   AND (delivered_at > ? OR (delivered_at = ? AND id > ?))
-                 ORDER BY delivered_at, id
+                   AND auto_settle_deadline_at <= DATE_SUB(NOW(3), INTERVAL ? SECOND)
+                   AND (auto_settle_deadline_at > ? OR (auto_settle_deadline_at = ? AND id > ?))
+                 ORDER BY auto_settle_deadline_at, id
                  LIMIT ?
                 """, MAPPER, autoSettleSeconds, after, after, afterId, limit);
     }

@@ -73,6 +73,7 @@ class SettleConcurrencyIT {
 
     /** 历史测试造数会重置固定 ID 段；当前压测使用隔离栈的 FundsHttpLoadClient。 */
     private void seed(long base, int count) {
+        jdbc.update("DELETE FROM fund_event_outbox WHERE errand_id >= ? AND errand_id < ?", base, base + 1_000_000);
         jdbc.update("DELETE FROM wallet_ledger WHERE ref_id >= ? AND ref_id < ?", base, base + 1_000_000);
         jdbc.update("DELETE FROM escrow_order WHERE errand_id >= ? AND errand_id < ?", base, base + 1_000_000);
         jdbc.update("DELETE FROM errand WHERE id >= ? AND id < ?", base, base + 1_000_000);

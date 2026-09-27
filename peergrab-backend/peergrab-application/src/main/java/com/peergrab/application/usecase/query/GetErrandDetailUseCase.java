@@ -1,5 +1,7 @@
 package com.peergrab.application.usecase.query;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.peergrab.domain.errand.model.Errand;
 import com.peergrab.domain.errand.ports.ErrandCachePort;
 import com.peergrab.domain.errand.ports.ErrandRepository;
@@ -30,6 +32,7 @@ import java.util.concurrent.atomic.AtomicLong;
 public class GetErrandDetailUseCase {
 
     private static final Logger log = LoggerFactory.getLogger(GetErrandDetailUseCase.class);
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     private final ErrandRepository errandRepository;
     private final ErrandCachePort cache;
@@ -49,6 +52,9 @@ public class GetErrandDetailUseCase {
         requestCount.incrementAndGet();
 
         Optional<ErrandCachePort.CachedErrand> cached = cache.get(errandId);
+        if (cache.isDegraded()) {
+            return reload(errandId, false);
+        }
         if (cached.isPresent()) {
             ErrandCachePort.CachedErrand c = cached.get();
             if (c.isEmpty()) {
@@ -68,6 +74,7 @@ public class GetErrandDetailUseCase {
                     cache.releaseRebuild(errandId);
                 }
             }
+            if (cache.isDegraded()) return reload(errandId, false);
             cacheHitCount.incrementAndGet();
             log.debug("逻辑过期但未抢到重建权，返回旧值 errandId={}", errandId);
             return Optional.of(c.payloadJson());
@@ -76,6 +83,7 @@ public class GetErrandDetailUseCase {
         // Bloom 与 MySQL 非同一事务，negative 必须向数据库核实，避免 Redis 丢失、
         // 重建中的部分过滤器或发布后登记失败把真实任务误判为 404。
         boolean bloomNegative = !cache.mightExist(errandId);
+        if (cache.isDegraded()) return reload(errandId, false);
         if (cache.tryAcquireRebuild(errandId)) {
             try {
                 // 锁前读到 miss 后，另一请求可能已完成回填。
@@ -90,11 +98,13 @@ public class GetErrandDetailUseCase {
                 cache.releaseRebuild(errandId);
             }
         }
+        if (cache.isDegraded()) return reload(errandId, false);
         // 冷 miss 没有旧值可返回，短暂等待持锁者回填；超时后自行回源保证可用性。
         for (int attempt = 0; attempt < 5; attempt++) {
             if (Thread.currentThread().isInterrupted()) break;
             LockSupport.parkNanos(10_000_000L);
             Optional<ErrandCachePort.CachedErrand> filled = cache.get(errandId);
+            if (cache.isDegraded()) return reload(errandId, false);
             if (filled.isPresent()) {
                 cacheHitCount.incrementAndGet();
                 return filled.get().isEmpty()
@@ -109,56 +119,34 @@ public class GetErrandDetailUseCase {
         Optional<Errand> found = errandRepository.findById(errandId);
         if (found.isEmpty()) {
             // 不存在的 id 经 MySQL 确认后写短期空值缓存，避免同一个 id 反复打 DB。
-            cache.putEmpty(errandId);
+            if (!cache.isDegraded()) cache.putEmpty(errandId);
             return Optional.empty();
         }
-        if (bloomNegative) {
+        if (bloomNegative && !cache.isDegraded()) {
             log.warn("布隆索引遗漏真实任务，已向 MySQL 核实并尝试补登记 errandId={}", errandId);
             cache.registerExisting(errandId);
         }
         String json = toJson(found.get());
-        cache.put(errandId, json);
+        if (!cache.isDegraded()) cache.put(errandId, json);
         return Optional.of(json);
     }
 
-    /**
-     * 详情 JSON。手写而不用 Jackson：字段固定且要与 ErrandController.toCard 对齐，
-     * 手写能保证缓存里存的就是接口要返回的形状，不会因序列化配置变化而漂移。
-     * id 一律用字符串（雪花 ID 超过 JS 安全整数，见 P4 踩坑第 11 条）。
-     */
+    /** ID is explicitly a string so the browser never rounds Snowflake IDs. */
     private String toJson(Errand e) {
-        return String.format(
-                "{\"id\":\"%d\",\"title\":\"%s\",\"status\":\"%s\",\"type\":\"%s\","
-                        + "\"rewardCents\":%d,\"slotTotal\":%d,\"slotTaken\":%d,"
-                        + "\"publisherId\":\"%d\",\"grabberId\":\"%d\",\"round\":%d,\"version\":%d}",
-                e.id(), escape(e.title()), e.status().name(), e.type().name(),
-                e.reward().cents(), e.slotTotal(), e.slotTaken(),
-                e.publisherId(), e.grabberId() == null ? -1L : e.grabberId(),
-                e.round(), e.version());
+        Detail detail = new Detail(String.valueOf(e.id()), e.title() == null ? "" : e.title(),
+                e.status().name(), e.type().name(), e.reward().cents(), e.slotTotal(),
+                e.slotTaken(), String.valueOf(e.publisherId()),
+                String.valueOf(e.grabberId() == null ? -1L : e.grabberId()), e.round(), e.version());
+        try {
+            return JSON.writeValueAsString(detail);
+        } catch (JsonProcessingException ex) {
+            throw new IllegalStateException("Cannot serialize errand detail id=" + e.id(), ex);
+        }
     }
 
-    private String escape(String s) {
-        if (s == null) return "";
-        StringBuilder escaped = new StringBuilder(s.length());
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            switch (c) {
-                case '\\' -> escaped.append("\\\\");
-                case '"' -> escaped.append("\\\"");
-                case '\n' -> escaped.append("\\n");
-                case '\r' -> escaped.append("\\r");
-                case '\t' -> escaped.append("\\t");
-                default -> {
-                    if (c < 0x20) {
-                        escaped.append(String.format("\\u%04x", (int) c));
-                    } else {
-                        escaped.append(c);
-                    }
-                }
-            }
-        }
-        return escaped.toString();
-    }
+    private record Detail(String id, String title, String status, String type,
+                          long rewardCents, int slotTotal, int slotTaken, String publisherId,
+                          String grabberId, int round, long version) {}
 
     public long dbLoadCount() { return dbLoadCount.get(); }
     public long cacheHitCount() { return cacheHitCount.get(); }

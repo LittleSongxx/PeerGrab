@@ -101,11 +101,14 @@ class CacheConsistencyIT {
         detailUseCase.detailJson(id); // 正常回填一次
         detailUseCase.resetStats();
 
-        // 手工把 4 个分片都写成"逻辑已过期"的旧值（status 伪造为 CANCELLED 便于识别）
+        // 手工把活动代的 4 个分片都写成"逻辑已过期"的旧值
         String stale = "{\"exp\":1,\"empty\":false,\"data\":{\"id\":\"" + id
                 + "\",\"status\":\"CANCELLED\",\"stale\":true}}";
+        String generation = redis.opsForValue().get("errand:detail:" + id + ":active");
+        assertNotNull(generation);
         for (int shard = 0; shard < 4; shard++) {
-            redis.opsForValue().set("errand:detail:" + id + ":" + shard, stale, Duration.ofMinutes(10));
+            redis.opsForValue().set("errand:detail:" + id + ":" + generation + ":" + shard,
+                    stale, Duration.ofMinutes(10));
         }
 
         int concurrency = 50;

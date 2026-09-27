@@ -1,6 +1,7 @@
 package com.peergrab.infrastructure.cache;
 
 import com.peergrab.domain.errand.ports.CacheEvictDelayPort;
+import com.peergrab.shared.MessagePayloadCodec;
 import org.apache.rocketmq.client.apis.ClientException;
 import org.apache.rocketmq.client.apis.ClientServiceProvider;
 import org.apache.rocketmq.client.apis.message.Message;
@@ -40,7 +41,7 @@ public class RocketMqCacheEvictAdapter implements CacheEvictDelayPort {
             Message msg = provider.newMessageBuilder()
                     .setTopic(CacheEvictDelayPort.TOPIC_CACHE_EVICT)
                     .setKeys("evict:" + errandId)
-                    .setBody(("{\"errandId\":" + errandId + "}").getBytes(StandardCharsets.UTF_8))
+                    .setBody(MessagePayloadCodec.cacheEvict(errandId).getBytes(StandardCharsets.UTF_8))
                     .setDeliveryTimestamp(deliverAt.toEpochMilli())
                     .build();
             producer.send(msg);

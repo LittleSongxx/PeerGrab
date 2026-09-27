@@ -37,6 +37,7 @@ public class WsAuthHandshakeInterceptor implements HandshakeInterceptor {
             Optional<Long> userId = authPort.resolve(token);
             if (userId.isPresent()) {
                 attributes.put(WsHandler.ATTR_USER_ID, userId.get());
+                attributes.put(WsHandler.ATTR_TOKEN, token);
                 return true;
             }
         }

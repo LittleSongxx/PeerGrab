@@ -52,7 +52,7 @@ class PublishCacheEvictionTest {
         GrabSlotPort slots = mock(GrabSlotPort.class);
         ErrandCachePort cache = mock(ErrandCachePort.class);
         CacheEvictDelayPort delay = mock(CacheEvictDelayPort.class);
-        CacheEvictSupport cacheEvict = new CacheEvictSupport(cache, delay, 500, false, "AFTER_COMMIT");
+        CacheEvictSupport cacheEvict = new CacheEvictSupport(cache, delay, 500, false);
         PublishErrandUseCase useCase = new PublishErrandUseCase(errands, requests, wallets, slots,
                 new SnowflakeIdGenerator(1), cache, cacheEvict);
 

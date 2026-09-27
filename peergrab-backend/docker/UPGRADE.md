@@ -65,6 +65,7 @@ done
 ~~~
 
 确认 SQL 转储、三个归档、表行数及五份消费进度文件都非空，再开始新栈。记录每个 Topic 的 Broker Offset、Consumer Offset 与 Diff；延迟消息尚未到期时 Diff 为零也不代表 Broker store 可丢弃。
+旧 `errand-fund-event` 是 `TRANSACTION` Topic；新 outbox 发送普通消息到独立的 `errand-fund-event-v2`（`NORMAL`）。切换前必须确认旧资金通知两个消费组及其重试队列已排空，保存进度；不能删除旧 Topic 或将旧位点克隆到 v2。旧事件若未处理完，先继续旧消费者消费，或按业务 `biz_no` 设计幂等补发。
 
 ## 2. 恢复到独立的新卷
 
@@ -116,17 +117,13 @@ new_compose run --rm --no-deps mq-init
 | --- | --- | --- |
 | dash-timeout-consumer | peergrab-timeout-consumer | errand-confirm-timeout |
 | dash-autosettle-consumer | peergrab-autosettle-consumer | errand-auto-settle |
-| dash-fund-event-consumer | peergrab-fund-event-consumer | errand-fund-event |
 | dash-cache-evict-consumer | peergrab-cache-evict-consumer | errand-cache-evict |
-| dash-fund-event-push | peergrab-fund-event-push | errand-fund-event |
 
 ~~~bash
 for mapping in \
   'dash-timeout-consumer peergrab-timeout-consumer errand-confirm-timeout' \
   'dash-autosettle-consumer peergrab-autosettle-consumer errand-auto-settle' \
-  'dash-fund-event-consumer peergrab-fund-event-consumer errand-fund-event' \
-  'dash-cache-evict-consumer peergrab-cache-evict-consumer errand-cache-evict' \
-  'dash-fund-event-push peergrab-fund-event-push errand-fund-event'; do
+  'dash-cache-evict-consumer peergrab-cache-evict-consumer errand-cache-evict'; do
   read -r source destination topic <<< "$mapping"
   if ! docker exec peergrab-local-rmqbroker-1 sh mqadmin topicList -n rmqnamesrv:9876 |
        grep -Fx "%RETRY%$source" >/dev/null; then

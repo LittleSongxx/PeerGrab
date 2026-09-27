@@ -1,7 +1,7 @@
 package com.peergrab.worker;
 
 import com.peergrab.application.usecase.TimeoutTransferUseCase;
-import jakarta.annotation.PostConstruct;
+import com.peergrab.shared.MessagePayloadCodec;
 import jakarta.annotation.PreDestroy;
 import org.apache.rocketmq.client.apis.ClientConfiguration;
 import org.apache.rocketmq.client.apis.ClientServiceProvider;
@@ -13,6 +13,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.nio.charset.StandardCharsets;
@@ -54,7 +55,16 @@ public class TimeoutTransferConsumer {
         this.group = group;
     }
 
-    @PostConstruct
+    @Scheduled(fixedDelayString = "${peergrab.mq.consumer-reconnect-ms:10000}", scheduler = "mqConsumerScheduler")
+    public synchronized void ensureStarted() {
+        if (consumer != null) return;
+        try {
+            start();
+        } catch (Exception e) {
+            log.warn("超时流转消费者启动失败，稍后重试 topic={}", topic, e);
+        }
+    }
+
     public void start() throws Exception {
         consumer = provider.newPushConsumerBuilder()
                 .setClientConfiguration(configuration)
@@ -63,9 +73,17 @@ public class TimeoutTransferConsumer {
                         topic, new FilterExpression("*", FilterExpressionType.TAG)))
                 .setMessageListener(view -> {
                     String body = StandardCharsets.UTF_8.decode(view.getBody()).toString();
+                    MessagePayloadCodec.Timeout payload;
                     try {
-                        long errandId = extractLong(body, "errandId");
-                        int round = (int) extractLong(body, "round");
+                        payload = MessagePayloadCodec.readTimeout(body);
+                    } catch (IllegalArgumentException e) {
+                        // The database timeout scanner remains authoritative for malformed wakeups.
+                        log.error("超时流转毒消息，丢弃 body={}", body, e);
+                        return ConsumeResult.SUCCESS;
+                    }
+                    try {
+                        long errandId = payload.errandId();
+                        int round = payload.round();
                         var outcome = timeoutTransferUseCase.handleTimeout(errandId, round);
                         log.debug("超时消息处理完成 errandId={} round={} outcome={}", errandId, round, outcome);
                         // 无论 TRANSFERRED / REVERTED / SKIPPED 都要 ACK：
@@ -82,32 +100,10 @@ public class TimeoutTransferConsumer {
     }
 
     @PreDestroy
-    public void stop() throws Exception {
+    public synchronized void stop() throws Exception {
         if (consumer != null) {
             consumer.close();
         }
     }
 
-    /**
-     * 极简 JSON 取值。
-     * 消息体是我们自己产生的固定格式（TimeoutPolicy.payload），
-     * 为此引入完整 JSON 库不值得——依赖越少，worker 启动越快、故障面越小。
-     */
-    private static long extractLong(String json, String field) {
-        String needle = "\"" + field + "\":";
-        int start = json.indexOf(needle);
-        if (start < 0) {
-            throw new IllegalArgumentException("消息体缺少字段 " + field + ": " + json);
-        }
-        int i = start + needle.length();
-        int end = i;
-        while (end < json.length() && (Character.isDigit(json.charAt(end)) || json.charAt(end) == '-')) {
-            end++;
-        }
-        String value = json.substring(i, end);
-        if (value.isEmpty()) {
-            throw new IllegalArgumentException("字段 " + field + " 值为空: " + json);
-        }
-        return Long.parseLong(value);
-    }
 }

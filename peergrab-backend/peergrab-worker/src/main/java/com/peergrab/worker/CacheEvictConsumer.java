@@ -2,7 +2,7 @@ package com.peergrab.worker;
 
 import com.peergrab.domain.errand.ports.CacheEvictDelayPort;
 import com.peergrab.domain.errand.ports.ErrandCachePort;
-import jakarta.annotation.PostConstruct;
+import com.peergrab.shared.MessagePayloadCodec;
 import jakarta.annotation.PreDestroy;
 import org.apache.rocketmq.client.apis.ClientConfiguration;
 import org.apache.rocketmq.client.apis.ClientServiceProvider;
@@ -14,6 +14,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.nio.charset.StandardCharsets;
@@ -50,7 +51,16 @@ public class CacheEvictConsumer {
         this.group = group;
     }
 
-    @PostConstruct
+    @Scheduled(fixedDelayString = "${peergrab.mq.consumer-reconnect-ms:10000}", scheduler = "mqConsumerScheduler")
+    public synchronized void ensureStarted() {
+        if (consumer != null) return;
+        try {
+            start();
+        } catch (Exception e) {
+            log.warn("缓存延迟删除消费者启动失败，稍后重试", e);
+        }
+    }
+
     public void start() throws Exception {
         consumer = provider.newPushConsumerBuilder()
                 .setClientConfiguration(configuration)
@@ -60,14 +70,17 @@ public class CacheEvictConsumer {
                         new FilterExpression("*", FilterExpressionType.TAG)))
                 .setMessageListener(msg -> {
                     String body = StandardCharsets.UTF_8.decode(msg.getBody()).toString();
+                    long errandId;
                     try {
-                        long errandId = extractLong(body, "errandId");
+                        errandId = MessagePayloadCodec.readCacheEvict(body).errandId();
+                    } catch (IllegalArgumentException e) { // NumberFormatException 是其子类
+                        // 只有消息格式错误才能丢弃；Redis 删除的任何异常都必须重试。
+                        log.error("延迟双删毒消息，丢弃 body={}", body, e);
+                        return ConsumeResult.SUCCESS;
+                    }
+                    try {
                         cache.evict(errandId);
                         log.debug("延迟双删第二次删除完成 errandId={}", errandId);
-                        return ConsumeResult.SUCCESS;
-                    } catch (IllegalArgumentException e) { // NumberFormatException 是其子类
-                        // 毒消息：重试无意义，ACK 丢弃（双删本身是加固手段，可丢）
-                        log.error("延迟双删毒消息，丢弃 body={}", body, e);
                         return ConsumeResult.SUCCESS;
                     } catch (RuntimeException e) {
                         log.error("延迟双删消费失败 body={}", body, e);
@@ -79,23 +92,10 @@ public class CacheEvictConsumer {
     }
 
     @PreDestroy
-    public void stop() throws Exception {
+    public synchronized void stop() throws Exception {
         if (consumer != null) {
             consumer.close();
         }
     }
 
-    private static long extractLong(String json, String field) {
-        String needle = "\"" + field + "\":";
-        int i = json.indexOf(needle) + needle.length();
-        int end = i;
-        while (end < json.length() && Character.isDigit(json.charAt(end))) {
-            end++;
-        }
-        String value = json.substring(i, end);
-        if (value.isEmpty()) {
-            throw new IllegalArgumentException("字段 " + field + " 值为空: " + json);
-        }
-        return Long.parseLong(value);
-    }
 }

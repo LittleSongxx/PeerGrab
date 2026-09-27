@@ -21,6 +21,11 @@ public class WorkerSchedulers {
         return scheduler("peergrab-maintenance-", poolSize);
     }
 
+    @Bean("mqConsumerScheduler")
+    public ThreadPoolTaskScheduler mqConsumerScheduler() {
+        return scheduler("peergrab-mq-connect-", 2);
+    }
+
     private ThreadPoolTaskScheduler scheduler(String prefix, int poolSize) {
         ThreadPoolTaskScheduler scheduler = new ThreadPoolTaskScheduler();
         scheduler.setPoolSize(Math.max(1, poolSize));

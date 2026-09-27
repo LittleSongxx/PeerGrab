@@ -58,6 +58,16 @@ public class ReconciliationJob {
                     "owner=" + d.ownerId() + " snapshot=" + d.snapshotTotal() + " ledger=" + d.ledgerNet());
             log.error("L2 失败：account={} snapshot={} ledger={}", d.accountId(), d.snapshotTotal(), d.ledgerNet());
         }
+        List<ReconRepository.UserBalanceDiff> userDiffs = reconRepository.findUserBalanceDiffs();
+        for (var d : userDiffs) {
+            reconRepository.recordDiff(date, "USER_SNAPSHOT", String.valueOf(d.accountId()),
+                    d.ledgerBalance(), d.snapshotBalance(),
+                    "owner=" + d.ownerId() + " accountVersion=" + d.accountVersion()
+                            + " ledgerVersion=" + d.ledgerVersion());
+            log.error("用户账户快照差异 account={} owner={} version={}/{} balance={}/{}",
+                    d.accountId(), d.ownerId(), d.accountVersion(), d.ledgerVersion(),
+                    d.snapshotBalance(), d.ledgerBalance());
+        }
 
         // L3
         List<ReconRepository.EscrowDiff> escrowDiffs = reconRepository.findEscrowClosureDiffs();
@@ -67,7 +77,7 @@ public class ReconciliationJob {
             log.error("L3 失败：errandId={} reason={}", d.errandId(), d.reason());
         }
 
-        int total = (delta != 0 ? 1 : 0) + snapshotDiffs.size() + escrowDiffs.size();
+        int total = (delta != 0 ? 1 : 0) + snapshotDiffs.size() + userDiffs.size() + escrowDiffs.size();
         log.info("对账完成 date={} diffs={}", date, total);
         return total;
     }

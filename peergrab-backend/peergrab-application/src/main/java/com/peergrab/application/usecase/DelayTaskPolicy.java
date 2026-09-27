@@ -1,5 +1,7 @@
 package com.peergrab.application.usecase;
 
+import com.peergrab.shared.MessagePayloadCodec;
+
 /**
  * 延迟任务的 topic 与幂等键约定。
  *
@@ -7,10 +9,8 @@ package com.peergrab.application.usecase;
  * TimeoutPolicy 泛化成这里——两类延迟任务的 msg_key 前缀必须区分开，
  * 否则 local_message 的唯一索引会让它们互相顶掉。
  *
- * 为什么延迟任务只能走"本地消息表 + 定时消息"而不能用事务消息：
- * RocketMQ 的事务消息与定时消息互斥，事务消息不支持 setDeliveryTimestamp。
- * 需要"延迟 + 与事务一致"时，本地消息表是唯一选择。
- * 反过来，不需要延迟的资金事件通知用事务消息更简洁（省一张表和一个重发 job）。
+ * 定时消息与业务事务通过同库 local_message 连接：业务提交后 Worker 投递，
+ * MQ 提前/重复唤醒都交由数据库状态和截止时间裁决。
  */
 public final class DelayTaskPolicy {
 
@@ -34,7 +34,7 @@ public final class DelayTaskPolicy {
 
     /** 消息体只带定位与幂等判定所需字段，不塞业务快照（会过期） */
     public static String payload(long errandId, int round, long version) {
-        return String.format("{\"errandId\":%d,\"round\":%d,\"version\":%d}", errandId, round, version);
+        return MessagePayloadCodec.timeout(errandId, round, version);
     }
 
     /**
@@ -43,6 +43,6 @@ public final class DelayTaskPolicy {
      * 不能共用一个 payload 方法（P4 实测：共用导致消费者解析出空串抛异常）
      */
     public static String autoSettlePayload(long errandId) {
-        return String.format("{\"errandId\":%d}", errandId);
+        return MessagePayloadCodec.autoSettle(errandId);
     }
 }

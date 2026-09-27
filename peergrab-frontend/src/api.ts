@@ -212,9 +212,17 @@ export const api = {
     request<{ result: string }>(`/api/errands/${id}/arbitrate`, 'POST', { favor }),
   wallet: () => request<{ availableCents: number; frozenCents: number }>('/api/wallet'),
   ledger: () => request<{
-    time: string; direction: string; amountCents: number;
+    id: string; time: string; direction: string; amountCents: number;
     refType: string; refId: string; bizNo: string;
   }[]>('/api/wallet/ledger'),
+  ledgerByCursor: (cursor = '', size = 20) => {
+    const params = new URLSearchParams({ cursor, size: String(size) });
+    return request<{
+      items: { id: string; time: string; direction: string; amountCents: number;
+               refType: string; refId: string; bizNo: string }[];
+      nextCursor: string;
+    }>(`/api/wallet/ledger?${params.toString()}`);
+  },
   notifications: () => request<{
     id: string; errandId: string; type: string; content: string; time: string; read: boolean;
   }[]>('/api/notifications'),

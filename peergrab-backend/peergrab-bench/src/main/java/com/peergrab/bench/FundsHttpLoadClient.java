@@ -69,10 +69,6 @@ public final class FundsHttpLoadClient {
         if (secret == null || secret.isBlank()) {
             throw new IllegalStateException("Set PEERGRAB_AUTH_JWT_SECRET for the isolated JWT-mode stack");
         }
-        BenchJwtTokens tokens = new BenchJwtTokens(secret);
-        String publisher = tokens.issue(PUBLISHER);
-        String runner = tokens.issue(RUNNER);
-        String arbitrator = tokens.issue(ARBITRATOR);
         HttpClient http = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofMillis(Math.min(5_000, cfg.timeoutMillis())))
                 .followRedirects(HttpClient.Redirect.NEVER)
@@ -89,6 +85,10 @@ public final class FundsHttpLoadClient {
         }
         try (Connection db = DriverManager.getConnection(jdbcUrl, user, password);
              BenchRunRecorder recorder = new BenchRunRecorder(jdbcUrl, user, password)) {
+            BenchJwtTokens tokens = new BenchJwtTokens(secret, db);
+            String publisher = tokens.issue(PUBLISHER);
+            String runner = tokens.issue(RUNNER);
+            String arbitrator = tokens.issue(ARBITRATOR);
             long totalBefore = scalar(db, "SELECT COALESCE(SUM(available + frozen),0) FROM wallet_account");
             long publisherBefore = balance(db, PUBLISHER);
             long runnerBefore = balance(db, RUNNER);

@@ -196,10 +196,16 @@ public class GrabErrandUseCase {
             }
 
             int seq = errand.slotTaken() + 1;
-            boolean ok = transactionalStep.lockAndRecord(
+            GrabTransactionalStep.LockResult lockResult = transactionalStep.lockAndRecord(
                     errand.campusId(), cmd.errandId(), cmd.runnerId(), errand.version(), seq, errand.round(),
                     idGenerator.nextId(), errand.status(), cmd.requestId());
-            if (!ok) {
+            if (lockResult == GrabTransactionalStep.LockResult.QUOTA_FULL) {
+                Result committed = persistedResult(errand.campusId(), cmd);
+                if (committed != null) return committed;
+                rollbackIfReserved(cmd, reservedInRedis);
+                return Result.failed(ErrorCode.TOO_MANY_ONGOING, null);
+            }
+            if (lockResult != GrabTransactionalStep.LockResult.GRABBED) {
                 Result committed = persistedResult(errand.campusId(), cmd);
                 if (committed != null) return committed;
                 rollbackIfReserved(cmd, reservedInRedis);

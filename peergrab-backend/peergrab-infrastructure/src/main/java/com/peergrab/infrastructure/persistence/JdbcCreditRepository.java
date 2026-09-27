@@ -7,11 +7,11 @@ import com.peergrab.domain.credit.ports.CreditRepository;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
@@ -41,14 +41,20 @@ public class JdbcCreditRepository implements CreditRepository {
     }
 
     /**
-     * 事件流水 + 分数快照在同一事务（调用方的业务事务）里完成。
+     * 事件流水 + 分数快照在同一事务里完成；已有业务事务时加入它，
+     * 超时回退等无外层事务的调用也必须原子提交这两次写入。
      *
-     * 快照更新用 INSERT ... ON DUPLICATE KEY UPDATE：首次事件创建记录，
-     * 后续事件增量更新。分数上下限的裁剪在 SQL 里用 LEAST/GREATEST 完成，
-     * 与领域层 CreditScore.apply 的规则一致——两处规则必须同步修改，注释互指。
+     * 同一用户先锁 credit_score 行，业务事件按 created_at/id 顺序回放最近 30 天。
+     * 这样实时更新和每日校准都逐次截断到 [0,100]，达到上限后再扣分也不会
+     * 被未展示的“多余正分”抵消。
      */
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public boolean applyEvent(CreditEvent event) {
+        jdbc.update("INSERT IGNORE INTO credit_score (user_id, score, version) VALUES (?, ?, 0)",
+                event.userId(), CreditEventType.BASE_SCORE);
+        jdbc.queryForObject("SELECT score FROM credit_score WHERE user_id = ? FOR UPDATE",
+                Integer.class, event.userId());
         try {
             jdbc.update("""
                     INSERT INTO credit_event (id, biz_no, user_id, type, delta, ref_type, ref_id)
@@ -60,17 +66,23 @@ public class JdbcCreditRepository implements CreditRepository {
             // biz_no 已存在：重复事件，幂等跳过（不更新分数）
             return false;
         }
-        jdbc.update("""
-                INSERT INTO credit_score (user_id, score, version)
-                VALUES (?, GREATEST(?, LEAST(?, ? + ?)), 1)
-                ON DUPLICATE KEY UPDATE
-                    score = GREATEST(?, LEAST(?, score + ?)),
-                    version = version + 1
-                """,
-                event.userId(), CreditEventType.MIN_SCORE, CreditEventType.MAX_SCORE,
-                CreditEventType.BASE_SCORE, event.delta(),
-                CreditEventType.MIN_SCORE, CreditEventType.MAX_SCORE, event.delta());
+        int score = replayScore(event.userId(), CreditEventType.WINDOW_DAYS, true);
+        jdbc.update("UPDATE credit_score SET score = ?, version = version + 1 WHERE user_id = ?",
+                score, event.userId());
         return true;
+    }
+
+    private int replayScore(long userId, int windowDays, boolean currentRead) {
+        String sql = """
+                SELECT delta FROM credit_event
+                 WHERE user_id = ? AND created_at >= DATE_SUB(NOW(3), INTERVAL ? DAY)
+                 ORDER BY created_at, id
+                """ + (currentRead ? " FOR UPDATE" : "");
+        CreditScore replay = CreditScore.initial(userId);
+        for (Integer delta : jdbc.queryForList(sql, Integer.class, userId, windowDays)) {
+            replay.apply(delta);
+        }
+        return replay.score();
     }
 
     @Override
@@ -102,45 +114,50 @@ public class JdbcCreditRepository implements CreditRepository {
 
     @Override
     public int calibrateScores(int windowDays, int limit) {
-        Timestamp windowStart = Timestamp.from(Instant.now().minus(windowDays, ChronoUnit.DAYS));
-        List<CalibrationRow> rows = jdbc.query("""
-                SELECT u.user_id,
-                       COALESCE(s.score, ?) AS old_score,
-                       GREATEST(?, LEAST(?, ? + COALESCE(SUM(e.delta), 0))) AS new_score
-                  FROM (
-                        SELECT user_id FROM credit_score
-                        UNION
-                        SELECT DISTINCT user_id FROM credit_event WHERE created_at >= ?
-                       ) u
-                  LEFT JOIN credit_score s ON s.user_id = u.user_id
-                  LEFT JOIN credit_event e ON e.user_id = u.user_id AND e.created_at >= ?
-                 GROUP BY u.user_id, s.score
-                 HAVING old_score <> new_score
-                 ORDER BY u.user_id
-                 LIMIT ?
-                """,
-                (rs, n) -> new CalibrationRow(
-                        rs.getLong("user_id"), rs.getInt("old_score"), rs.getInt("new_score")),
-                CreditEventType.BASE_SCORE,
-                CreditEventType.MIN_SCORE, CreditEventType.MAX_SCORE, CreditEventType.BASE_SCORE,
-                windowStart, windowStart, limit);
-
-        if (rows.isEmpty()) {
-            return 0;
+        List<Long> users = jdbc.queryForList("""
+                SELECT user_id FROM credit_score
+                UNION
+                SELECT user_id FROM credit_event
+                 WHERE created_at >= DATE_SUB(NOW(3), INTERVAL ? DAY)
+                ORDER BY user_id
+                """, Long.class, windowDays);
+        int changed = 0;
+        for (Long userId : users) {
+            CalibrationRow row = recalculateOne(userId, windowDays);
+            if (row.oldScore() == row.newScore()) continue;
+            // 查询快照与更新之间若有业务事件，其增量更新必递增 version。
+            // CAS 冲突后按最新事件重算，避免把旧窗口结果覆盖新事件。
+            CalibrationRow current = row;
+            for (int attempt = 0; attempt < 3 && current.oldScore() != current.newScore(); attempt++) {
+                if (writeCalibration(current) == 1) {
+                    changed++;
+                    break;
+                }
+                current = recalculateOne(userId, windowDays);
+            }
+            if (changed >= limit) break;
         }
-        List<Object[]> args = new ArrayList<>(rows.size());
-        for (CalibrationRow row : rows) {
-            args.add(new Object[]{row.userId(), row.newScore()});
-        }
-        jdbc.batchUpdate("""
-                INSERT INTO credit_score (user_id, score, version)
-                VALUES (?, ?, 1)
-                ON DUPLICATE KEY UPDATE
-                    score = VALUES(score),
-                    version = version + 1
-                """, args);
-        return rows.size();
+        return changed;
     }
 
-    private record CalibrationRow(long userId, int oldScore, int newScore) {}
+    private int writeCalibration(CalibrationRow row) {
+        if (row.oldVersion() == 0) {
+            return jdbc.update("""
+                    INSERT IGNORE INTO credit_score (user_id, score, version)
+                    VALUES (?, ?, 1)
+                    """, row.userId(), row.newScore());
+        }
+        return jdbc.update("""
+                UPDATE credit_score SET score = ?, version = version + 1
+                 WHERE user_id = ? AND version = ?
+                """, row.newScore(), row.userId(), row.oldVersion());
+    }
+
+    private CalibrationRow recalculateOne(long userId, int windowDays) {
+        CreditScore old = find(userId).orElse(CreditScore.initial(userId));
+        return new CalibrationRow(userId, old.score(), old.version(),
+                replayScore(userId, windowDays, false));
+    }
+
+    private record CalibrationRow(long userId, int oldScore, long oldVersion, int newScore) {}
 }

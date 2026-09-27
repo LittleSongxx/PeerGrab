@@ -20,7 +20,8 @@ import java.util.concurrent.atomic.AtomicLong;
  *   1. 事务后续回滚了，缓存已被删——DB 没变但缓存空了，白回源一次（不致命）
  *   2. 更糟：删完到提交之间的读请求会从 DB 读到旧值并写回缓存，
  *      于是"缓存里是旧值、DB 里是新值"长期不一致
- * 放在 afterCommit 就没有第 2 个窗口——删除发生在新值已可见之后。
+ * 放在 afterCommit 可消除“未提交就主动删”的窗口；提交前已开始的慢读仍可能晚回填，
+ * 因而它缩小而非彻底消除陈旧窗口。
  *
  * ── 为什么还要延迟双删 ──
  * afterCommit 删除之后仍有极小窗口：一个在提交前就开始读的慢请求，
@@ -39,7 +40,6 @@ public class CacheEvictSupport {
     private final ErrandCachePort cache;
     private final CacheEvictDelayPort delayPort;
     private final long doubleDeleteMillis;
-    private final String evictionOrder;
     private final boolean doubleDeleteEnabled;
 
     private final AtomicLong evictFailureCount = new AtomicLong();
@@ -47,30 +47,15 @@ public class CacheEvictSupport {
     public CacheEvictSupport(ErrandCachePort cache,
                              CacheEvictDelayPort delayPort,
                              @Value("${peergrab.cache.double-delete-ms:500}") long doubleDeleteMillis,
-                             @Value("${peergrab.cache.double-delete-enabled:true}") boolean doubleDeleteEnabled,
-                             @Value("${peergrab.cache.eviction-order:AFTER_COMMIT}") String evictionOrder) {
+                             @Value("${peergrab.cache.double-delete-enabled:true}") boolean doubleDeleteEnabled) {
         this.cache = cache;
         this.delayPort = delayPort;
         this.doubleDeleteMillis = doubleDeleteMillis;
         this.doubleDeleteEnabled = doubleDeleteEnabled;
-        this.evictionOrder = evictionOrder;
     }
 
-    /**
-     * 在当前事务提交后失效缓存。
-     *
-     * eviction-order=BEFORE_COMMIT 是**故意留的错误实现开关**，
-     * 供 CacheConsistencyIT 的对照实验压出"缓存长期为旧值"。
-     * 生产配置永远是 AFTER_COMMIT。
-     */
+    /** Commit first, then invalidate the derived detail view. */
     public void evictAfterCommit(long errandId) {
-        if ("BEFORE_COMMIT".equalsIgnoreCase(evictionOrder)) {
-            // 错误实现：事务还没提交就删，读请求会把旧值写回来
-            doEvict(errandId);
-            scheduleDoubleDelete(errandId);
-            return;
-        }
-
         if (!TransactionSynchronizationManager.isSynchronizationActive()) {
             // 没有事务上下文（比如从消费者直接调用）：立即删
             doEvict(errandId);

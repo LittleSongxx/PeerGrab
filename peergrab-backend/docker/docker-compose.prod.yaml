@@ -109,7 +109,11 @@ services:
       PEERGRAB_MQ_ENDPOINTS: rmqbroker:8081
       PEERGRAB_MQ_ENABLED: "true"
       PEERGRAB_WORKER_ID: 1
-      PEERGRAB_AUTH_MODE: session
+      PEERGRAB_WORKER_LEASE_CLOSE_ON_LOSS: "true"
+      PEERGRAB_AUTH_MODE: jwt
+      PEERGRAB_AUTH_JWT_SECRET: ${PEERGRAB_AUTH_JWT_SECRET:?Set an independent random JWT secret of at least 32 bytes in .env.prod}
+      # Redis powers hints and realtime fan-out; MySQL-backed JWT keeps core APIs ready without it.
+      MANAGEMENT_ENDPOINT_HEALTH_GROUP_READINESS_INCLUDE: readinessState,db,snowflakeLease
       PEERGRAB_WEB_CORS_ORIGINS: https://www.peergrab.cn
       PEERGRAB_AUTH_ALLOW_HEADER_IDENTITY: "false"
       PEERGRAB_AUTH_DEMO_ENABLED: "true"
@@ -120,12 +124,8 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
-      redis:
-        condition: service_healthy
-      mq-init:
-        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/health"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/actuator/health/readiness"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -147,13 +147,16 @@ services:
       PEERGRAB_MQ_ENDPOINTS: rmqbroker:8081
       PEERGRAB_MQ_ENABLED: "true"
       PEERGRAB_WORKER_ID: 2
+      PEERGRAB_WORKER_LEASE_CLOSE_ON_LOSS: "true"
     depends_on:
       mysql:
         condition: service_healthy
-      redis:
-        condition: service_healthy
-      mq-init:
-        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8082/actuator/health/readiness"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
     restart: unless-stopped
 
   frontend:

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Compose 一次性作业：在 broker 注册完成后创建延迟/事务 topic 和消费组。
+# Compose 一次性作业：在 broker 注册完成后创建延迟/普通 topic 和消费组。
 set -eu
 
 MQADMIN=""
@@ -31,7 +31,7 @@ done
 
 admin updateTopic -n "$NAMESRV" -c "$CLUSTER" -t errand-confirm-timeout -a +message.type=DELAY
 admin updateTopic -n "$NAMESRV" -c "$CLUSTER" -t errand-auto-settle -a +message.type=DELAY
-admin updateTopic -n "$NAMESRV" -c "$CLUSTER" -t errand-fund-event -a +message.type=TRANSACTION
+admin updateTopic -n "$NAMESRV" -c "$CLUSTER" -t errand-fund-event-v2 -a +message.type=NORMAL
 admin updateTopic -n "$NAMESRV" -c "$CLUSTER" -t errand-cache-evict -a +message.type=DELAY
 
 for group in peergrab-timeout-consumer peergrab-autosettle-consumer peergrab-fund-event-consumer peergrab-cache-evict-consumer peergrab-fund-event-push; do

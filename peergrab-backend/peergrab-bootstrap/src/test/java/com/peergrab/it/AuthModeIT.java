@@ -14,11 +14,10 @@ import static org.junit.jupiter.api.Assertions.*;
  * 两个 @Nested 类各自带不同的 peergrab.auth.mode，Spring 会建两个独立上下文。
  *
  * ── 对照的核心问题 ──
- *   1. 服务端状态丢失（模拟重启/Redis 清空）后 token 是否还有效？
- *      Session：失效（映射没了）；JWT：仍有效（无状态）
+ *   1. Redis 状态丢失后 token 是否还有效？
+ *      Session：失效（映射没了）；JWT：仍有效（MySQL 保存会话真值）
  *   2. 登出后 token 是否立即失效？
- *      Session：立即（删映射）；JWT：要靠黑名单补救——不加入黑名单的话，
- *      JWT 在有效期内怎么都"看起来合法"，这正是它吊销难的实证。
+ *      Session：删 Redis 映射；JWT：撤销 MySQL 会话。
  */
 @org.junit.jupiter.api.condition.EnabledIfSystemProperty(named = "peergrab.it", matches = "true")
 class AuthModeIT {
@@ -69,8 +68,8 @@ class AuthModeIT {
         }
 
         @Test
-        @DisplayName("JWT：无状态，服务端不存会话映射，状态丢失后仍有效")
-        void jwt_is_stateless() {
+        @DisplayName("JWT：不依赖 Redis 会话映射，Redis 状态丢失后仍有效")
+        void jwt_survives_redis_state_loss() {
             String token = authPort.login(7003);
             assertEquals(7003, authPort.resolve(token).orElseThrow());
 
@@ -80,26 +79,25 @@ class AuthModeIT {
             assertTrue(redis.keys("auth:token:*").stream().noneMatch(k -> k.contains(token)),
                     "JWT 模式不应写入会话映射");
 
-            // 与 Session 的对照：即使"服务端状态丢失"，JWT 依然有效
+            // 与 Session 的对照：Redis 没有会话映射，JWT 依靠 MySQL 撤销真值。
             assertEquals(7003, authPort.resolve(token).orElseThrow(),
-                    "JWT 无状态：不依赖服务端映射，状态丢失后仍有效");
+                    "JWT 不依赖 Redis 会话映射，仍可完成鉴权");
         }
 
         @Test
-        @DisplayName("JWT：吊销难——登出靠黑名单，未吊销前 token 始终合法")
-        void jwt_revocation_needs_blacklist() {
+        @DisplayName("JWT：签名仍合法，但登出后的会话被拒绝")
+        void jwt_logout_revokes_database_session() {
             String token = authPort.login(7004);
 
             // 登出前：有效
             assertEquals(7004, authPort.resolve(token).orElseThrow());
 
-            // 登出 = 把 jti 加入黑名单
+            // 登出撤销整个 sid，不需要另存每个 access token 的 jti。
             authPort.logout(token);
             assertTrue(authPort.resolve(token).isEmpty(),
-                    "加入黑名单后必须失效");
+                    "会话撤销后必须失效");
 
-            // 实证"吊销难"：黑名单是补救手段，不是 JWT 自身能力——
-            // 同一个 token 的签名与有效期依然合法，只是被外部名单拒绝
+            // 同一个 token 的签名和有效期依然合法，失效来自服务端会话状态。
             String[] parts = token.split("\\.");
             assertEquals(3, parts.length, "被吊销的 JWT 结构上依然完整合法");
         }

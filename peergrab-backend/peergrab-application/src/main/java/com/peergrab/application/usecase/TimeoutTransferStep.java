@@ -1,9 +1,14 @@
 package com.peergrab.application.usecase;
 
 import com.peergrab.domain.errand.model.Errand;
+import com.peergrab.domain.credit.model.CreditEvent;
+import com.peergrab.domain.credit.model.CreditEventType;
+import com.peergrab.domain.credit.ports.CreditRepository;
 import com.peergrab.domain.errand.model.ErrandStatus;
 import com.peergrab.domain.errand.ports.ErrandRepository;
 import com.peergrab.domain.errand.ports.LocalMessageRepository;
+import com.peergrab.domain.errand.ports.RunnerQuotaPort;
+import com.peergrab.domain.notify.ports.NotificationRepository;
 import com.peergrab.shared.SnowflakeIdGenerator;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -28,19 +33,39 @@ public class TimeoutTransferStep {
     private final ErrandRepository errandRepository;
     private final LocalMessageRepository localMessageRepository;
     private final SnowflakeIdGenerator idGenerator;
+    private final RunnerQuotaPort runnerQuotaPort;
+    private final CreditRepository creditRepository;
+    private final NotificationRepository notificationRepository;
+    private final int maxOngoing;
 
     public TimeoutTransferStep(ErrandRepository errandRepository,
                                LocalMessageRepository localMessageRepository,
-                               SnowflakeIdGenerator idGenerator) {
+                               SnowflakeIdGenerator idGenerator,
+                               RunnerQuotaPort runnerQuotaPort,
+                               CreditRepository creditRepository,
+                               NotificationRepository notificationRepository,
+                               @org.springframework.beans.factory.annotation.Value("${peergrab.credit.max-ongoing:5}") int maxOngoing) {
         this.errandRepository = errandRepository;
         this.localMessageRepository = localMessageRepository;
         this.idGenerator = idGenerator;
+        this.runnerQuotaPort = runnerQuotaPort;
+        this.creditRepository = creditRepository;
+        this.notificationRepository = notificationRepository;
+        this.maxOngoing = maxOngoing;
     }
 
     /** 事务执行结果：是否成功，以及事务提交后需要投递的消息（可能为空） */
-    public record StepResult(boolean applied, PendingSend pendingSend) {
+    public record StepResult(boolean applied, PendingSend pendingSend, boolean quotaFull) {
+        public StepResult(boolean applied, PendingSend pendingSend) {
+            this(applied, pendingSend, false);
+        }
+
         static StepResult skipped() {
             return new StepResult(false, null);
+        }
+
+        static StepResult capacityRejected() {
+            return new StepResult(false, null, true);
         }
     }
 
@@ -51,7 +76,10 @@ public class TimeoutTransferStep {
      * 三者必须原子——否则会出现"已流转但没有超时保护"的黑洞，任务永久卡住。
      */
     @Transactional(rollbackFor = Exception.class)
-    public StepResult transfer(Errand errand, long nextRunnerId, long timeoutSeconds) {
+    public StepResult transfer(Errand errand, long nextRunnerId) {
+        if (!runnerQuotaPort.lockAndHasCapacity(nextRunnerId, maxOngoing)) {
+            return StepResult.capacityRejected();
+        }
         int affected = errandRepository.casTransferToNext(
                 errand.id(), nextRunnerId, errand.version(), errand.round());
         if (affected == 0) {
@@ -60,9 +88,13 @@ public class TimeoutTransferStep {
         int newRound = errand.round() + 1;
         errandRepository.appendStatusLog(errand.id(), ErrandStatus.LOCKED, ErrandStatus.LOCKED,
                 newRound, nextRunnerId);
+        notificationRepository.insertIfAbsent(idGenerator.nextId(),
+                "timeout-transfer:" + errand.id() + ":" + newRound + ":runner",
+                nextRunnerId, errand.id(), "TRANSFERRED",
+                "任务已递补给你，请在确认时限内接单");
 
         // 新抢中者也有确认窗口，登记下一轮超时消息
-        PendingSend send = enqueueTimeout(errand.id(), newRound, errand.version() + 1, timeoutSeconds);
+        PendingSend send = enqueueTimeout(errand.id(), newRound, errand.version() + 1);
         return new StepResult(true, send);
     }
 
@@ -76,6 +108,17 @@ public class TimeoutTransferStep {
         }
         errandRepository.appendStatusLog(errand.id(), ErrandStatus.LOCKED, ErrandStatus.PUBLISHED,
                 errand.round() + 1, -1L);
+        if (errand.grabberId() != null) {
+            creditRepository.applyEvent(new CreditEvent(
+                    idGenerator.nextId(), CreditEvent.revertBizNo(errand.id(), errand.round()),
+                    errand.grabberId(), CreditEventType.GRAB_TIMEOUT_REVERT,
+                    CreditEventType.GRAB_TIMEOUT_REVERT.delta(), "ERRAND", errand.id(),
+                    Instant.now()));
+        }
+        notificationRepository.insertIfAbsent(idGenerator.nextId(),
+                "timeout-revert:" + errand.id() + ":" + errand.round() + ":publisher",
+                errand.publisherId(), errand.id(), "REVERTED",
+                "上一位跑腿未及时确认，任务已重新开放");
         return new StepResult(true, null);
     }
 
@@ -84,10 +127,12 @@ public class TimeoutTransferStep {
      * 返回 null 表示该 msgKey 已存在（重复请求），无需再发。
      */
     @Transactional(rollbackFor = Exception.class)
-    public PendingSend enqueueTimeout(long errandId, int round, long version, long timeoutSeconds) {
+    public PendingSend enqueueTimeout(long errandId, int round, long version) {
         String msgKey = TimeoutPolicy.msgKey(errandId, round);
         String payload = TimeoutPolicy.payload(errandId, round, version);
-        Instant deliverAt = Instant.now().plusSeconds(timeoutSeconds);
+        Instant deliverAt = errandRepository.findById(errandId)
+                .map(Errand::confirmDeadlineAt)
+                .orElseThrow(() -> new IllegalStateException("抢中后未写入确认截止时间 errandId=" + errandId));
 
         // 幂等第三件：msg_key 唯一索引，同一轮只登记一次
         boolean fresh = localMessageRepository.enqueue(

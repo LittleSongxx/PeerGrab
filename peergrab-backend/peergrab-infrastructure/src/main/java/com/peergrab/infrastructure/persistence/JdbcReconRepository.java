@@ -62,6 +62,28 @@ public class JdbcReconRepository implements ReconRepository {
                         rs.getLong("snapshot_total"), rs.getLong("ledger_net")));
     }
 
+    @Override
+    public List<UserBalanceDiff> findUserBalanceDiffs() {
+        // Seeded user wallets have no opening ledger entry. Comparing the latest
+        // ordered posting with the current snapshot avoids inventing that opening amount.
+        return jdbc.query("""
+                SELECT a.id, a.owner_id, (a.available + a.frozen) AS snapshot_balance,
+                       l.balance_after AS ledger_balance, a.version AS account_version,
+                       l.account_version AS ledger_version
+                  FROM wallet_account a
+                  JOIN wallet_ledger l ON l.account_id = a.id
+                   AND l.account_version = (
+                       SELECT MAX(previous.account_version) FROM wallet_ledger previous
+                        WHERE previous.account_id = a.id)
+                 WHERE a.owner_type = 'USER'
+                   AND ((a.available + a.frozen) <> l.balance_after
+                        OR a.version <> l.account_version)
+                """, (rs, n) -> new UserBalanceDiff(
+                        rs.getLong("id"), rs.getLong("owner_id"),
+                        rs.getLong("snapshot_balance"), rs.getLong("ledger_balance"),
+                        rs.getLong("account_version"), rs.getLong("ledger_version")));
+    }
+
     /**
      * L3：托管闭环。
      * 三种不该存在的情况：
