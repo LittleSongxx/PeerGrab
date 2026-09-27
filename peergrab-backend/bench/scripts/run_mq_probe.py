@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 import uuid
 
 import preflight
@@ -128,9 +129,16 @@ def run(kind, values):
                 "mvn", "-o", "-q", "-pl", "peergrab-bench", "exec:java",
                 f"-Dexec.mainClass={main_class}", f"-Dexec.args={args}", capture=False)
         if kind == "s5":
-            progress = command("docker", "exec", broker["Id"], "sh", "mqadmin", "consumerProgress",
-                               "-n", "rmqnamesrv:9876", "-g", "peergrab-timeout-consumer",
-                               "-t", "errand-confirm-timeout")
+            for attempt in range(3):
+                try:
+                    progress = command("docker", "exec", broker["Id"], "sh", "mqadmin", "consumerProgress",
+                                       "-n", "rmqnamesrv:9876", "-g", "peergrab-timeout-consumer",
+                                       "-t", "errand-confirm-timeout")
+                    break
+                except preflight.Refused:
+                    if attempt == 2:
+                        raise
+                    time.sleep(2)
             print("RocketMQ consumer progress after S5 run (single snapshot):\n" + progress)
     finally:
         if runner_id and re.fullmatch(r"[a-f0-9]{64}", runner_id):

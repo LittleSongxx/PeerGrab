@@ -1,5 +1,6 @@
 package com.peergrab.bench;
 
+import com.peergrab.shared.MessagePayloadCodec;
 import org.apache.rocketmq.client.apis.ClientConfiguration;
 import org.apache.rocketmq.client.apis.ClientServiceProvider;
 import org.apache.rocketmq.client.apis.message.Message;
@@ -186,9 +187,10 @@ public final class S5TimelineProbe {
         db.setAutoCommit(false);
         try (PreparedStatement errand = db.prepareStatement("""
                 INSERT INTO errand (id, campus_id, publisher_id, grabber_id, type, title,
-                                    reward_amount, slot_total, slot_taken, status, round, version, locked_at)
+                                    reward_amount, slot_total, slot_taken, status, round, version,
+                                    locked_at, confirm_deadline_at)
                 VALUES (?, 1, 1001, ?, 'DELIVERY', ?, 100, 1, 1, 'LOCKED', 0, 2,
-                        FROM_UNIXTIME(? / 1000.0))
+                        FROM_UNIXTIME(? / 1000.0), FROM_UNIXTIME(? / 1000.0))
                 """);
              PreparedStatement item = db.prepareStatement("""
                 INSERT INTO bench_run_item (run_id, entity_type, entity_id) VALUES (?, 'ERRAND', ?)
@@ -200,6 +202,7 @@ public final class S5TimelineProbe {
                 errand.setLong(2, 2001 + n % 100);
                 errand.setString(3, "bench_s5_natural_" + runId + "_" + n);
                 errand.setLong(4, lockedAtMs);
+                errand.setLong(5, dueMs);
                 errand.addBatch();
                 item.setString(1, runId);
                 item.setLong(2, id);
@@ -232,7 +235,7 @@ public final class S5TimelineProbe {
                             + " messages; increase leadSeconds and use a fresh stack");
                 }
                 long id = firstId + n;
-                String body = "{\"errandId\":" + id + ",\"round\":0,\"version\":2}";
+                String body = MessagePayloadCodec.timeout(id, 0, 2);
                 Message message = provider.newMessageBuilder().setTopic(TOPIC)
                         .setKeys("timeout:" + id + ":0")
                         .setBody(body.getBytes(StandardCharsets.UTF_8))
