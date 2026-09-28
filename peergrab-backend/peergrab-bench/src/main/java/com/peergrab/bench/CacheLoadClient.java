@@ -1,139 +1,268 @@
 package com.peergrab.bench;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.SplittableRandom;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * S3 缓存读写混合压测客户端。
+ * S3 detail-cache benchmark. a/b are read-only closed-loop comparisons; c is
+ * publish-then-read (9 reads of the newly published task per write); d targets
+ * one hot detail key for 90% of reads. Cold cache requires a fresh bench stack.
+ * A second trial on the same stack is warm, but cannot recreate a cold cache.
  *
- * 四个场景（与压测方案一致）：
- *   a  纯读，缓存关闭（应用以 --peergrab.cache.enabled=false 启动）——基准
- *   b  纯读，缓存开启——对比命中率与回源次数
- *   c  读写混合 9:1（写 = 持续发布新任务）+ 压后一致性校验
- *   d  热 Key：90% 请求打同一个 id——验证分片打散
- *
- * 关键指标不用 MySQL Questions（噪声大），用应用自己的 dbLoads（详情回源次数）：
- * 这是"详情查询真正打到 DB 的次数"，比数据库侧全局计数精确得多。
- *
- * 用法：java -cp ... com.peergrab.bench.CacheLoadClient <mode> [baseUrl]
+ * dbLoads from /api/internal/cache-stats counts detail-cache fallbacks only.
+ * It does not count authentication, publishing, or all MySQL queries.
  */
-public class CacheLoadClient {
-
+public final class CacheLoadClient {
     static final long SEED_BASE = 920_000_000_000L;
     static final int SEED_COUNT = 100;
-    static final int CONCURRENCY = 50;
-    static final int ROUNDS_PER_THREAD = 100;
+    static final int DEFAULT_CONCURRENCY = 50;
+    static final int DEFAULT_ITERATIONS = 100;
+    static final long DEFAULT_SEED = 20260928L;
+    private static final ObjectMapper JSON = new ObjectMapper();
+
+    record Config(String mode, String baseUrl, int concurrency, int iterations,
+                  int trials, int durationSeconds, long seed) {}
+
+    private CacheLoadClient() {}
 
     public static void main(String[] args) throws Exception {
-        String mode = args.length > 0 ? args[0] : "b";
-        String baseUrl = args.length > 1 ? args[1] : "http://127.0.0.1:8080";
-        if (!List.of("a", "b", "c", "d").contains(mode)) {
-            throw new IllegalArgumentException("mode must be a, b, c, or d");
-        }
-        BenchSafety.requireDisposableStack(baseUrl);
-
+        Config config = parse(args);
+        BenchSafety.requireDisposableStack(config.baseUrl());
         HttpClient client = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(5))
                 .version(HttpClient.Version.HTTP_1_1)
                 .build();
+        String token = login(client, config.baseUrl(), 1001);
+        String adminToken = login(client, config.baseUrl(), 9001);
 
-        BenchRunRecorder recorder = new BenchRunRecorder();
-        String runId = recorder.startRun("BENCH", "S3-" + mode, CONCURRENCY,
-                "缓存压测，应用与中间件同机，数字仅作同机基线");
-        System.out.println("[run] runId=" + runId + " mode=" + mode);
+        boolean allPassed = true;
+        try (BenchRunRecorder recorder = new BenchRunRecorder()) {
+            for (int trial = 1; trial <= config.trials(); trial++) {
+                String runId = recorder.startRun("BENCH", "S3-" + config.mode(),
+                        config.concurrency(), "closed-loop; trial=" + trial + "/" + config.trials()
+                                + "; durationSeconds=" + config.durationSeconds()
+                                + "; detail dbLoads is not total MySQL queries");
+                System.out.printf("[run] runId=%s mode=%s trial=%d/%d%n",
+                        runId, config.mode(), trial, config.trials());
+                try {
+                    boolean passed = runTrial(config, trial, runId, client, token, adminToken, recorder);
+                    allPassed &= passed;
+                    if (!passed) break;
+                } catch (Exception e) {
+                    recorder.finishRun(runId, "FAIL", "{}");
+                    throw e;
+                }
+            }
+        }
+        if (!allPassed) System.exit(1);
+    }
 
-        String token = login(client, baseUrl, 1001);
-        String adminToken = login(client, baseUrl, 9001);
-        // 压前重置统计，保证命中率/回源数只反映本轮
-        post(client, baseUrl, "/api/internal/cache-stats/reset", adminToken, null);
+    static Config parse(String[] args) {
+        String mode = args.length > 0 ? args[0] : "b";
+        String baseUrl = args.length > 1 && !args[1].startsWith("--")
+                ? args[1] : "http://127.0.0.1:8080";
+        if (!List.of("a", "b", "c", "d").contains(mode)) {
+            throw new IllegalArgumentException("mode must be a, b, c, or d");
+        }
+        int firstOption = args.length > 1 && !args[1].startsWith("--") ? 2 : 1;
+        int concurrency = DEFAULT_CONCURRENCY;
+        int iterations = DEFAULT_ITERATIONS;
+        int trials = 1;
+        int duration = 0;
+        long seed = DEFAULT_SEED;
+        boolean iterationsSpecified = false;
+        for (int i = firstOption; i < args.length; i++) {
+            String arg = args[i];
+            if (arg.startsWith("--concurrency=")) {
+                concurrency = bounded(arg.substring(14), "concurrency", 1, 100);
+            } else if (arg.startsWith("--iterations=")) {
+                iterations = bounded(arg.substring(13), "iterations", 1, 10_000);
+                iterationsSpecified = true;
+            } else if (arg.startsWith("--trials=")) {
+                trials = bounded(arg.substring(9), "trials", 1, 5);
+            } else if (arg.startsWith("--duration-seconds=")) {
+                duration = bounded(arg.substring(19), "duration-seconds", 1, 120);
+            } else if (arg.startsWith("--seed=")) {
+                try {
+                    seed = Long.parseLong(arg.substring(7));
+                } catch (NumberFormatException e) {
+                    throw new IllegalArgumentException("seed must be a signed decimal long", e);
+                }
+            } else {
+                throw new IllegalArgumentException("unknown S3 option: " + arg);
+            }
+        }
+        if (duration > 0 && !iterationsSpecified) iterations = Integer.MAX_VALUE;
+        if (mode.equals("c")) {
+            if (duration > 0 || trials != 1 || iterations % 10 != 0
+                    || (long) concurrency * iterations / 10 > 500) {
+                throw new IllegalArgumentException(
+                        "mode c requires one fixed-count trial, iterations divisible by 10, and <=500 publishes");
+            }
+        }
+        return new Config(mode, baseUrl, concurrency, iterations, trials, duration, seed);
+    }
 
-        long hotId = SEED_BASE + 1;
+    private static int bounded(String text, String name, int min, int max) {
+        try {
+            int value = Integer.parseInt(text);
+            if (value >= min && value <= max) return value;
+        } catch (NumberFormatException ignored) { }
+        throw new IllegalArgumentException(name + " must be in " + min + ".." + max);
+    }
+
+    private static boolean runTrial(Config config, int trial, String runId,
+                                    HttpClient client, String token, String adminToken,
+                                    BenchRunRecorder recorder) throws Exception {
+        requireOk(post(client, config.baseUrl(), "/api/internal/cache-stats/reset", adminToken, null));
         AtomicInteger ok = new AtomicInteger();
         AtomicInteger fail = new AtomicInteger();
-        AtomicLong writeCount = new AtomicLong();
-        List<Long> latencies = java.util.Collections.synchronizedList(new ArrayList<>());
+        AtomicInteger workerFailures = new AtomicInteger();
+        AtomicLong writes = new AtomicLong();
+        AtomicLong firstPublishedId = new AtomicLong();
+        List<Long> publishedIds = Collections.synchronizedList(new ArrayList<>());
+        List<Long> latencies = Collections.synchronizedList(new ArrayList<>());
+        CountDownLatch ready = new CountDownLatch(config.concurrency());
+        CountDownLatch fire = new CountDownLatch(1);
+        CountDownLatch done = new CountDownLatch(config.concurrency());
 
-        CountDownLatch done = new CountDownLatch(CONCURRENCY);
-        long t0 = System.currentTimeMillis();
-        for (int t = 0; t < CONCURRENCY; t++) {
+        for (int t = 0; t < config.concurrency(); t++) {
             final int tid = t;
-            new Thread(() -> {
+            Thread worker = new Thread(() -> {
+                ready.countDown();
                 try {
-                    runRound(mode, client, baseUrl, token, tid, ok, fail, writeCount, latencies, hotId);
+                    fire.await();
+                    long deadline = config.durationSeconds() > 0
+                            ? System.nanoTime() + TimeUnit.SECONDS.toNanos(config.durationSeconds())
+                            : Long.MAX_VALUE;
+                    runRound(config, client, token, tid, trial, runId, deadline,
+                            ok, fail, writes, firstPublishedId, publishedIds, latencies);
                 } catch (Exception e) {
-                    // Unexpected worker-level failure: unattempted requests are not counted as errors.
+                    workerFailures.incrementAndGet();
                     System.err.println("S3 worker stopped early: " + e);
                 } finally {
                     done.countDown();
                 }
-            }).start();
+            }, "s3-load-" + t);
+            worker.start();
         }
-        done.await();
-        long elapsed = System.currentTimeMillis() - t0;
+        if (!ready.await(30, TimeUnit.SECONDS)) {
+            throw new IllegalStateException("S3 workers did not become ready");
+        }
+        long started = System.nanoTime();
+        fire.countDown();
+        if (!done.await(600, TimeUnit.SECONDS)) {
+            throw new IllegalStateException("S3 workers did not finish within 600 seconds");
+        }
+        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+        // Run metadata is recorded after the timed phase; JDBC writes here must
+        // not distort publish latency or contend on Recorder's one connection.
+        recorder.trackErrands(runId, publishedIds);
 
-        String stats = get(client, baseUrl, "/api/internal/cache-stats", adminToken);
-        int diffs = -1;
-        if ("c".equals(mode)) {
-            String checkResp = post(client, baseUrl, "/api/internal/cache-check", adminToken, null);
-            diffs = extractInt(checkResp, "diffs");
+        String statsBody = get(client, config.baseUrl(), "/api/internal/cache-stats", adminToken);
+        JsonNode stats = requireOk(statsBody).path("data");
+        if (!stats.has("requests") || !stats.has("dbLoads") || !stats.has("cacheHits")) {
+            throw new IllegalStateException("cache-stats lacks required detail counters");
+        }
+        long total = (long) ok.get() + fail.get();
+        long expected = (long) config.concurrency() * config.iterations();
+        long detailReads = total - writes.get();
+        boolean probePassed = true;
+        int sampledDiffs = -1;
+        if (config.mode().equals("c")) {
+            long id = firstPublishedId.get();
+            probePassed = id > 0 && readStatus(client, config.baseUrl(), token, id, "PUBLISHED")
+                    && cancel(client, config.baseUrl(), token, id)
+                    && readStatus(client, config.baseUrl(), token, id, "CANCELLED");
+            sampledDiffs = requireOk(post(client, config.baseUrl(), "/api/internal/cache-check",
+                    adminToken, null)).path("data").path("diffs").asInt(-1);
         }
 
         List<Long> sorted = new ArrayList<>(latencies);
         sorted.sort(Long::compareTo);
-        long total = ok.get() + fail.get();
-        long rps = Math.round(total * 1000.0 / Math.max(elapsed, 1));
-        System.out.println("=================================================");
-        System.out.printf("S3-%s 结果（并发=%d，总请求=%d，耗时=%dms，RPS≈%d）%n",
-                mode, CONCURRENCY, total, elapsed, rps);
-        System.out.printf("成功=%d 失败=%d 写操作=%d%n", ok.get(), fail.get(), writeCount.get());
-        if (!sorted.isEmpty()) {
-            System.out.printf("延迟 P50/P95/P99/Max: %d / %d / %d / %d ms%n",
-                    pct(sorted, 50), pct(sorted, 95), pct(sorted, 99), sorted.get(sorted.size() - 1));
-        }
-        System.out.println("缓存统计: " + stats);
-        if (diffs >= 0) {
-            System.out.println("一致性校验差异数: " + diffs + (diffs == 0 ? "（PASS）" : "（FAIL）"));
-        }
-        System.out.println("=================================================");
+        long p99 = sorted.isEmpty() ? -1 : pct(sorted, 99);
+        long rps = Math.round(total * 1000.0 / Math.max(elapsedMs, 1));
+        String cachePhase = trial == 1 ? "first-on-stack" : "subsequent-on-same-stack";
+        boolean countValid = config.durationSeconds() > 0 ? total > 0 : total == expected;
+        boolean passed = countValid && fail.get() == 0 && workerFailures.get() == 0
+                && stats.path("requests").asLong(-1) == detailReads
+                && (!config.mode().equals("c") || (writes.get() * 10 == total
+                        && probePassed && sampledDiffs == 0));
 
-        boolean pass = total == (long) CONCURRENCY * ROUNDS_PER_THREAD && fail.get() == 0
-                && (!"c".equals(mode) || (writeCount.get() == total / 10 && diffs == 0));
-        recorder.finishRun(runId, pass ? "PASS" : "FAIL", String.format(
-                "{\"mode\":\"S3-%s\",\"concurrency\":%d,\"requests\":%d,\"elapsedMs\":%d,"
+        System.out.printf("S3-%s trial=%d phase=%s seed=%d requests=%d ok=%d fail=%d writes=%d elapsedMs=%d "
+                        + "completedRps=%d P99=%dms detailReads=%d detailDbLoads=%d "
+                        + "detailCacheHits=%d probe=%s sampledCacheDiffs=%d status=%s%n",
+                config.mode(), trial, cachePhase, config.seed(), total, ok.get(), fail.get(), writes.get(), elapsedMs,
+                rps, p99, detailReads, stats.path("dbLoads").asLong(),
+                stats.path("cacheHits").asLong(), probePassed, sampledDiffs, passed ? "PASS" : "FAIL");
+        System.out.println("detailDbLoads counts only detail fallback; total MySQL queries were not measured here.");
+
+        String summary = String.format(java.util.Locale.ROOT,
+                "{\"mode\":\"S3-%s\",\"trial\":%d,\"cachePhase\":\"%s\",\"seed\":%d,\"concurrency\":%d,\"iterations\":%d,"
+                        + "\"durationSeconds\":%d,\"requests\":%d,\"elapsedMs\":%d,"
                         + "\"rps\":%d,\"p99Ms\":%d,\"ok\":%d,\"fail\":%d,\"writes\":%d,"
-                        + "\"diffs\":%d,\"stats\":%s}",
-                mode, CONCURRENCY, total, elapsed, rps,
-                sorted.isEmpty() ? -1 : pct(sorted, 99), ok.get(), fail.get(), writeCount.get(),
-                diffs, stats));
-        recorder.close();
-        if (!pass) {
-            System.exit(1);
-        }
+                        + "\"detailReads\":%d,\"detailDbLoads\":%d,\"detailCacheHits\":%d,"
+                        + "\"consistencyProbePassed\":%s,\"sampledCacheDiffs\":%d,\"stats\":%s}",
+                config.mode(), trial, cachePhase, config.seed(), config.concurrency(), config.iterations(),
+                config.durationSeconds(), total, elapsedMs, rps, p99, ok.get(), fail.get(),
+                writes.get(), detailReads, stats.path("dbLoads").asLong(),
+                stats.path("cacheHits").asLong(), probePassed, sampledDiffs, statsBody);
+        recorder.finishRun(runId, passed ? "PASS" : "FAIL", summary);
+        return passed;
     }
 
     static boolean readDetail(HttpClient client, String baseUrl, String token, long id) throws Exception {
         HttpRequest req = HttpRequest.newBuilder()
                 .uri(URI.create(baseUrl + "/api/errands/" + id))
                 .header("Authorization", "Bearer " + token)
+                .timeout(Duration.ofSeconds(10))
                 .GET().build();
         HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString());
         return resp.statusCode() == 200 && resp.body().contains("\"code\":\"OK\"");
     }
 
-    static boolean publish(HttpClient client, String baseUrl, String token, int seq) throws Exception {
-        String body = String.format(
-                "{\"title\":\"s3_write_%d\",\"rewardCents\":100,\"slotTotal\":1}", seq);
-        String resp = post(client, baseUrl, "/api/errands", token, body);
-        return resp != null && resp.contains("\"code\":\"OK\"");
+    static boolean readStatus(HttpClient client, String baseUrl, String token,
+                              long id, String expectedStatus) throws Exception {
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/api/errands/" + id))
+                .header("Authorization", "Bearer " + token)
+                .timeout(Duration.ofSeconds(10))
+                .GET().build();
+        HttpResponse<String> response = client.send(req, HttpResponse.BodyHandlers.ofString());
+        JsonNode root = JSON.readTree(response.body());
+        return response.statusCode() == 200 && "OK".equals(root.path("code").asText())
+                && expectedStatus.equals(root.path("data").path("status").asText());
+    }
+
+    static long publish(HttpClient client, String baseUrl, String token, String label) throws Exception {
+        String body = "{\"title\":\"s3_write_" + label
+                + "\",\"rewardCents\":100,\"slotTotal\":1}";
+        JsonNode data = requireOk(post(client, baseUrl, "/api/errands", token, body)).path("data");
+        String id = data.path("errandId").asText();
+        if (!id.matches("[1-9][0-9]*")) {
+            throw new IllegalStateException("published task response lacks a positive errandId");
+        }
+        return Long.parseLong(id);
+    }
+
+    static boolean cancel(HttpClient client, String baseUrl, String token, long id) throws Exception {
+        JsonNode data = requireOk(post(client, baseUrl, "/api/errands/" + id + "/cancel",
+                token, "{}")).path("data");
+        return "REFUNDED".equals(data.path("result").asText());
     }
 
     static String login(HttpClient client, String baseUrl, long userId) throws Exception {
@@ -143,11 +272,10 @@ public class CacheLoadClient {
         }
         String resp = post(client, baseUrl, "/api/auth/login", null,
                 "{\"userId\":" + userId + ",\"password\":\"" + escapeJson(password) + "\"}");
-        if (!resp.contains("\"code\":\"OK\"")) {
-            throw new IllegalStateException("Benchmark login rejected for user " + userId);
-        }
-        int i = resp.indexOf("\"token\":\"") + 9;
-        return resp.substring(i, resp.indexOf('"', i));
+        JsonNode data = requireOk(resp).path("data");
+        String token = data.path("token").asText("");
+        if (token.isBlank()) throw new IllegalStateException("Benchmark login lacks token for user " + userId);
+        return token;
     }
 
     private static String escapeJson(String value) {
@@ -157,30 +285,34 @@ public class CacheLoadClient {
     static String post(HttpClient client, String baseUrl, String path, String token, String body) throws Exception {
         HttpRequest.Builder b = HttpRequest.newBuilder()
                 .uri(URI.create(baseUrl + path))
+                .timeout(Duration.ofSeconds(10))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(body == null ? "{}" : body));
-        if (token != null) {
-            b.header("Authorization", "Bearer " + token);
+        if (token != null) b.header("Authorization", "Bearer " + token);
+        HttpResponse<String> response = client.send(b.build(), HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() != 200) {
+            throw new IllegalStateException(path + " returned HTTP " + response.statusCode());
         }
-        return client.send(b.build(), HttpResponse.BodyHandlers.ofString()).body();
+        return response.body();
     }
 
     static String get(HttpClient client, String baseUrl, String path, String token) throws Exception {
-        HttpRequest.Builder b = HttpRequest.newBuilder().uri(URI.create(baseUrl + path)).GET();
-        if (token != null) {
-            b.header("Authorization", "Bearer " + token);
+        HttpRequest.Builder b = HttpRequest.newBuilder().uri(URI.create(baseUrl + path))
+                .timeout(Duration.ofSeconds(10)).GET();
+        if (token != null) b.header("Authorization", "Bearer " + token);
+        HttpResponse<String> response = client.send(b.build(), HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() != 200) {
+            throw new IllegalStateException(path + " returned HTTP " + response.statusCode());
         }
-        return client.send(b.build(), HttpResponse.BodyHandlers.ofString()).body();
+        return response.body();
     }
 
-    static int extractInt(String json, String field) {
-        String needle = "\"" + field + "\":";
-        int i = json.indexOf(needle) + needle.length();
-        int end = i;
-        while (end < json.length() && (Character.isDigit(json.charAt(end)) || json.charAt(end) == '-')) {
-            end++;
+    private static JsonNode requireOk(String body) throws Exception {
+        JsonNode root = JSON.readTree(body);
+        if (!"OK".equals(root.path("code").asText())) {
+            throw new IllegalStateException("S3 API returned " + root.path("code").asText("invalid JSON"));
         }
-        return Integer.parseInt(json.substring(i, end));
+        return root;
     }
 
     static long pct(List<Long> sorted, int p) {
@@ -188,29 +320,43 @@ public class CacheLoadClient {
         return sorted.get(Math.max(0, Math.min(idx, sorted.size() - 1)));
     }
 
-    /** 单线程的压测轮次：按模式决定读写比例与目标 id */
-    static void runRound(String mode, HttpClient client, String baseUrl, String token,
-                         int tid, AtomicInteger ok, AtomicInteger fail,
-                         AtomicLong writeCount, List<Long> latencies, long hotId) {
-        for (int r = 0; r < ROUNDS_PER_THREAD; r++) {
-            long s = System.nanoTime();
+    static void runRound(Config config, HttpClient client, String token, int tid,
+                                 int trial, String runId, long deadline,
+                                 AtomicInteger ok, AtomicInteger fail,
+                                 AtomicLong writeCount, AtomicLong firstPublishedId,
+                                 List<Long> publishedIds,
+                                 List<Long> latencies) {
+        long lastPublishedId = 0;
+        SplittableRandom targets = new SplittableRandom(config.seed() + 1_000_003L * trial + tid);
+        for (int r = 0; r < config.iterations() && System.nanoTime() < deadline; r++) {
+            long started = System.nanoTime();
             try {
-                // c 模式：每个线程每 10 次请求中有 1 次写，实际写入占 10%。
                 boolean success;
-                if ("c".equals(mode) && r % 10 == 9) {
+                if (config.mode().equals("c") && r % 10 == 0) {
                     writeCount.incrementAndGet();
-                    success = publish(client, baseUrl, token, tid * 1000 + r);
+                    long id = publish(client, config.baseUrl(), token,
+                            runId + "_" + trial + "_" + tid + "_" + r);
+                    lastPublishedId = id;
+                    firstPublishedId.compareAndSet(0, id);
+                    publishedIds.add(id);
+                    success = true;
                 } else {
-                    // d 模式：90% 打热 Key，验证热点读取。
-                    long id = "d".equals(mode) && ThreadLocalRandom.current().nextInt(10) < 9
-                            ? hotId : SEED_BASE + 1 + ThreadLocalRandom.current().nextInt(SEED_COUNT);
-                    success = readDetail(client, baseUrl, token, id);
+                    long id;
+                    if (config.mode().equals("c")) {
+                        id = lastPublishedId;
+                    } else if (config.mode().equals("d")
+                            && targets.nextInt(10) < 9) {
+                        id = SEED_BASE + 1;
+                    } else {
+                        id = SEED_BASE + 1 + targets.nextInt(SEED_COUNT);
+                    }
+                    success = id > 0 && readDetail(client, config.baseUrl(), token, id);
                 }
                 if (success) ok.incrementAndGet(); else fail.incrementAndGet();
             } catch (Exception e) {
                 fail.incrementAndGet();
             } finally {
-                latencies.add((System.nanoTime() - s) / 1_000_000);
+                latencies.add(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started));
             }
         }
     }

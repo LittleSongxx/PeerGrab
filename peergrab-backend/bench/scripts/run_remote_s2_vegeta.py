@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Cross-check external S2 arrival rates with Vegeta and the verified HTTPS route.
 
-The default is a one-request identity probe. An attack requires both --execute
-and --confirm-project. Raw Vegeta records and bearer tokens are never saved.
+The default is a read-only route identity probe. An attack requires --execute
+and --confirm-project. Workloads are an exact allowlist, and the current Square
+cursor-first request is the default. Raw Vegeta records and bearer tokens are
+never saved; periodic reporter snapshots are sanitized before persistence.
 """
 
 import argparse
@@ -12,6 +14,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -21,12 +24,22 @@ import time
 import run_remote_s2 as guard
 
 
+WORKLOADS = {
+    "cursor-first": ("square-cursor-first-v1", "/api/errands?campusId=1&cursor=&size=20"),
+    "legacy-first": ("legacy-page-first-v1", guard.LIST_PATH),
+}
+ANSI_CLEAR = b"\x1b[2J\x1b[0;0H"
+MAX_PERIODIC_REPORT_BYTES = 2_000_000
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project", required=True)
     parser.add_argument("--remote-backend", required=True)
     parser.add_argument("--remote-env", required=True)
     parser.add_argument("--direct-base-url", required=True)
+    parser.add_argument("--workload", choices=tuple(WORKLOADS), default="cursor-first",
+                        help="exact allowlisted first-page request; default matches the Square UI")
     parser.add_argument("--rates", type=guard.parse_rates, default=(700, 800, 900))
     parser.add_argument("--warmup", type=lambda s: guard.positive_int(s, "warmup", 1, 120), default=10)
     parser.add_argument("--sample", type=lambda s: guard.positive_int(s, "sample", 1, 180), default=30)
@@ -95,6 +108,77 @@ def inspect_report(report, rate, seconds):
             "tailWaitMs": round(int(report.get("wait", 0)) / 1_000_000, 3)}
 
 
+def inspect_periodic_reports(output, rate, seconds):
+    """Keep only count/latency snapshots; raw URLs and errors stay in memory.
+
+    Vegeta's -every=1s snapshots are cumulative and printed with ANSI cursor
+    controls. Their deltas are results received between reporter ticks, not
+    exact request issue-time buckets or a measurement of scheduled offers.
+    """
+    try:
+        lines = output.replace(ANSI_CLEAR, b"").decode("utf-8").splitlines()
+        reports = [json.loads(line) for line in lines if line.strip()]
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise guard.Refused("Vegeta periodic report was invalid") from exc
+    if not reports or len(reports) > seconds + 2:
+        raise guard.Refused("Vegeta periodic report had an unexpected snapshot count")
+    if seconds >= 10 and len(reports) < seconds - 2:
+        raise guard.Refused("Vegeta periodic report did not cover the full phase")
+    final_issue_span_ns = reports[-1].get("duration")
+    if (seconds >= 10 and (not isinstance(final_issue_span_ns, int)
+                           or final_issue_span_ns < (seconds - 2) * 1_000_000_000)):
+        raise guard.Refused("Vegeta requests did not span the full phase")
+
+    snapshots = []
+    previous_requests = 0
+    previous_ok = 0
+    previous_transport = 0
+    previous_other = 0
+    previous_latency_ns = 0
+    previous_status = {}
+    for index, report in enumerate(reports):
+        aggregate = inspect_report(report, rate, seconds)
+        latency_ns = report["latencies"].get("total")
+        latest = report.get("latest")
+        if (not isinstance(latency_ns, int) or latency_ns < previous_latency_ns
+                or not isinstance(latest, str)
+                or not re.fullmatch(r"\d{4}-\d\d-\d\dT[0-9:.]+(?:Z|[+-]\d\d:\d\d)", latest)):
+            raise guard.Refused("Vegeta periodic report had invalid timing data")
+        status = aggregate["statusCodes"]
+        if (aggregate["resultRecords"] < previous_requests
+                or aggregate["http2xx"] < previous_ok
+                or aggregate["transportErrors"] < previous_transport
+                or aggregate["httpOther"] < previous_other
+                or any(count < previous_status.get(code, 0) for code, count in status.items())
+                or any(code not in status for code in previous_status)):
+            raise guard.Refused("Vegeta periodic counters decreased")
+        delta_requests = aggregate["resultRecords"] - previous_requests
+        delta_latency_ns = latency_ns - previous_latency_ns
+        snapshots.append({
+            "tick": index + 1,
+            "latestIssuedAt": latest,
+            "cumulativeResultRecords": aggregate["resultRecords"],
+            "resultRecordsSincePrevious": delta_requests,
+            "http2xxSincePrevious": aggregate["http2xx"] - previous_ok,
+            "transportErrorsSincePrevious": aggregate["transportErrors"] - previous_transport,
+            "httpOtherSincePrevious": aggregate["httpOther"] - previous_other,
+            "statusCodesSincePrevious": {code: count - previous_status.get(code, 0)
+                                          for code, count in status.items()
+                                          if count - previous_status.get(code, 0)},
+            "meanLatencyMsSincePrevious":
+                round(delta_latency_ns / delta_requests / 1_000_000, 3)
+                if delta_requests else None,
+            "cumulativeP99Ms": aggregate["p99Ms"],
+        })
+        previous_requests = aggregate["resultRecords"]
+        previous_ok = aggregate["http2xx"]
+        previous_transport = aggregate["transportErrors"]
+        previous_other = aggregate["httpOther"]
+        previous_latency_ns = latency_ns
+        previous_status = status
+    return inspect_report(reports[-1], rate, seconds), snapshots
+
+
 def degraded(result):
     return (result["completed"] < result["offered"] * 0.995
             or result["httpOther"] or result["transportErrors"]
@@ -110,12 +194,45 @@ def check_stack_identity(args, identity):
 
 def check_identity(args, identity):
     latest = check_stack_identity(args, identity)
-    asyncio.run(guard.verify_direct_target(args, latest, args.direct_base_url.rstrip("/")))
+    base_url = args.direct_base_url.rstrip("/")
+    asyncio.run(guard.verify_direct_target(args, latest, base_url))
+    if args.workload == "cursor-first":
+        asyncio.run(verify_cursor_target(args, latest, base_url))
+
+
+def verify_cursor_payload(payload, expected_ids):
+    if not isinstance(payload, dict) or payload.get("code") != "OK":
+        raise guard.Refused("Cursor route did not return the benchmark list")
+    page = payload.get("data")
+    if (not isinstance(page, dict) or not isinstance(page.get("items"), list)
+            or not isinstance(page.get("nextCursor"), str) or not page["nextCursor"]):
+        raise guard.Refused("Cursor route did not return the expected first page")
+    guard.verify_direct_list({"code": "OK", "data": page["items"]}, expected_ids)
+
+
+async def verify_cursor_target(args, identity, base_url):
+    """Probe the exact current Square request against the isolated DB."""
+    import aiohttp
+
+    expected_ids = guard.remote_list_ids(args, identity)
+    timeout = aiohttp.ClientTimeout(total=min(args.timeout_ms / 1000, 10))
+    async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
+        token = await guard.login(session, base_url, guard.demo_password(args))
+        try:
+            async with session.get(base_url + WORKLOADS["cursor-first"][1],
+                                   headers={"Authorization": "Bearer " + token},
+                                   allow_redirects=False) as response:
+                if response.status != 200:
+                    raise guard.Refused("Cursor benchmark route did not return HTTP 200")
+                payload = await response.json(content_type=None)
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+            raise guard.Refused("Cursor benchmark route probe failed") from exc
+    verify_cursor_payload(payload, expected_ids)
 
 
 def run_phase(args, identity, token, rate, seconds):
     started_at_utc = datetime.now(timezone.utc).isoformat()
-    url = args.direct_base_url.rstrip("/") + guard.LIST_PATH
+    url = args.direct_base_url.rstrip("/") + WORKLOADS[args.workload][1]
     target = json.dumps({"method": "GET", "url": url,
                          "header": {"Authorization": ["Bearer " + token]}},
                         separators=(",", ":")).encode() + b"\n"
@@ -145,11 +262,26 @@ def run_phase(args, identity, token, rate, seconds):
                               stderr=subprocess.DEVNULL, env=clean_proxy_env())
     report = None
     watcher = None
+    reader = None
+    report_bytes = bytearray()
+    report_too_large = threading.Event()
     try:
-        report = subprocess.Popen([str(args.vegeta), "report", "-type=json"],
+        report = subprocess.Popen([str(args.vegeta), "report", "-type=json", "-every=1s"],
                                   stdin=attack.stdout, stdout=subprocess.PIPE,
                                   stderr=subprocess.DEVNULL, env=clean_proxy_env())
         attack.stdout.close()
+
+        def read_report():
+            # Drain while the attack runs: a 180-s snapshot stream is larger
+            # than a pipe buffer. Never copy raw reporter output to disk.
+            while chunk := report.stdout.read(65536):
+                if len(report_bytes) + len(chunk) <= MAX_PERIODIC_REPORT_BYTES:
+                    report_bytes.extend(chunk)
+                else:
+                    report_too_large.set()
+
+        reader = threading.Thread(target=read_report, daemon=True)
+        reader.start()
         watcher = threading.Thread(target=watch, daemon=True)
         watcher.start()
         attack.stdin.write(target)
@@ -163,10 +295,14 @@ def run_phase(args, identity, token, rate, seconds):
             time.sleep(0.2)
         if attack.returncode:
             raise guard.Refused(f"Vegeta attack process exited with status {attack.returncode}")
-        output, _ = report.communicate(timeout=15)
-        if report.returncode or len(output) > 131072:
-            raise guard.Refused("Vegeta aggregate report failed")
-        result = inspect_report(json.loads(output), rate, seconds)
+        report.wait(timeout=15)
+        reader.join(timeout=5)
+        if reader.is_alive() or report.returncode or report_too_large.is_set():
+            raise guard.Refused("Vegeta periodic report failed")
+        result, snapshots = inspect_periodic_reports(bytes(report_bytes), rate, seconds)
+        result["periodicSnapshots"] = snapshots
+        result["periodicSnapshotCadenceSeconds"] = 1
+        result["periodicSnapshotSemantics"] = "cumulative reporter snapshots; deltas count completed results, not scheduled offers"
         result["startedAtUtc"] = started_at_utc
         result["endedAtUtc"] = datetime.now(timezone.utc).isoformat()
         check_identity(args, identity)
@@ -182,6 +318,8 @@ def run_phase(args, identity, token, rate, seconds):
             if report.poll() is None:
                 report.kill()
             report.wait()
+        if reader is not None:
+            reader.join(timeout=5)
         if watcher is not None:
             watcher.join(timeout=40)
 
@@ -207,7 +345,9 @@ def main(argv=None):
         output.parent.mkdir(parents=True, exist_ok=True)
         digest = hashlib.sha256(args.vegeta.read_bytes()).hexdigest()
         evidence = {"project": args.project, "transport": "verified direct HTTPS HTTP/1.1",
-                    "directBaseUrl": args.direct_base_url, "workload": guard.LIST_PATH,
+                    "directBaseUrl": args.direct_base_url,
+                    "workload": WORKLOADS[args.workload][1],
+                    "workloadVersion": WORKLOADS[args.workload][0],
                     "seedCount": count, "generator": "Vegeta", "vegetaSha256": digest,
                     "maxBodyCapture": 0, "status": "RUNNING", "stages": []}
 
