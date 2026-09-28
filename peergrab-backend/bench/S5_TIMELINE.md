@@ -19,7 +19,7 @@ python3 bench/scripts/run_mq_probe.py s5 1 20 5 30
 
 `run_mq_probe.py` 先在宿主机完整核对 Compose 项目、卷、端口、数据库标记和 Worker 模式，再启动一次性 Maven 容器并核对其只连接该项目的网络；容器内再次校验自身 ID、IP、数据库标记和固定内网目标。RocketMQ 客户端从代理取得容器私网地址，因此 MQ 轮必须在该网络内运行；VPN TUN 改写宿主机路由时，本机映射端口不足以完成 gRPC 路由。脚本结束会删除自己创建的临时 runner，不会清理压测栈。
 
-兜底轮使用宿主机命令 `mvn -pl peergrab-bench exec:java -Dexec.mainClass=com.peergrab.bench.S5TimelineProbe -Dexec.args='fallback 1 20 5 30'`。`count=1` 是连通性试跑，不构成性能结果。正式档位可用 `1000`、`10000`；万条定时消息需要为发送留足 `leadSeconds`，否则工具会将本轮记为失败，不能拿到期后的部分发送数据计算 P99。完整排空后检查并导出 `bench_run.summary`、`bench_run_item` 和状态日志，再销毁压测卷；未处理、提前处理、重复事件或最终状态错误任一非零即失败。`bench_run.status=PASS` 只表示上述正确性检查通过，P99 是否达到实验目标需单独判定。旧 `scripts/seed_s5.sql` 曾把任务直接设置成已过期一小时，只能反映历史兜底清理吞吐；该脚本现已禁用，不能用于新评测。
+兜底轮使用宿主机命令 `mvn -pl peergrab-bench exec:java -Dexec.mainClass=com.peergrab.bench.S5TimelineProbe -Dexec.args='fallback 1 20 5 30'`。`count=1` 是连通性试跑，不构成性能结果。正式档位可用 `1000`、`10000`；万条定时消息需要为发送留足 `leadSeconds`，否则工具会将本轮记为失败，不能拿到期后的部分发送数据计算 P99。完整排空后检查并导出 `bench_run.summary`、`bench_run_item` 和状态日志，再销毁压测卷；未处理、提前处理、重复事件或最终状态错误任一非零即失败。`bench_run.status=PASS` 只表示上述正确性检查通过，P99 是否达到实验目标需单独判定。旧 `scripts/seed_s5.sql` 曾把任务直接设置成已过期一小时，只能反映历史兜底清理吞吐；该占位入口已从当前工作树移除，原始版本留在 Git 历史。
 
 摘要同时保存 `leadSeconds`、`confirmSeconds`、`timeoutAfterDueSeconds` 和 `dueEpochMs`。若运行中的 Worker 容器显式设置了 `PEERGRAB_TIMEOUT_SCAN_INTERVAL_MS`，还保存其数值和 `worker-env` 来源；未显式暴露时写 `null`，不把源码默认值当作已验证的运行配置。比较两轮时先核对这些参数与 Worker 镜像、配置一致。
 

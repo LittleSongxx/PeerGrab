@@ -5,4 +5,4 @@
 | PeerGrab 当前维护版本 | [peergrab-current](peergrab-current/README.md) | 2026-09 的本地验证与阿里云 ECS 实测；当前 `5ace500` 镜像已有 Vegeta／Java 历史轮和独立的 JMeter 复测报告，按工具、发压路径和版本分别记录 |
 | 迁入前原版项目 | [original-project](original-project/README.md) | 2026-08 的 Mac 同机历史实验，保留原始结果 |
 
-原版与 PeerGrab 当前版本的代码、机器、带宽、资源配额和发压模型不同。**不要把两组 QPS、TPS 或 P99 当作同配置 A/B 直接计算提升。** 新报告可参照 [报告模板](TEMPLATE.md)记录实验口径与正确性校验。
+原版与 PeerGrab 当前版本的代码、机器、带宽、资源配额和发压模型不同。**不要把两组 QPS、TPS 或 P99 当作同配置 A/B 直接计算提升。** 新报告可参照[报告模板](TEMPLATE.md)记录实验口径与正确性校验。[评测资产目录](../ASSET_CATALOG.md)区分公开报告、私有归档与可清理的临时文件；[私有归档索引](private-evidence-index.json)记录本地证据包的路径、大小和 SHA-256。

@@ -1,0 +1,102 @@
+{
+  "generatedDate": "2026-09-28",
+  "scope": "Local Git-ignored private benchmark archives; not present in repository clones",
+  "archiveCount": 19,
+  "archives": [
+    {
+      "privatePath": "bench/runs/ecs-20260926-evidence.tar.gz",
+      "sizeBytes": 295598,
+      "sha256": "ca142e367e92a508e7082feef47053369e8c58a6315eda16fee0562d6795b310"
+    },
+    {
+      "privatePath": "bench/runs/ecs-8cpu-20260927-evidence.tar.gz",
+      "sizeBytes": 163817,
+      "sha256": "9615e0fb26fa058c3bc174755df93a2f1a92bdff22961c8ccaf7423a59e859d2"
+    },
+    {
+      "privatePath": "bench/runs/ecs-max-evidence-20260926.tar.gz",
+      "sizeBytes": 599155,
+      "sha256": "9995339a36d9106a917d08875825a4203d3bced44adc1a2d5a3948b0e128b7c9"
+    },
+    {
+      "privatePath": "bench/runs/ecs-max-s2-resources.tar.gz",
+      "sizeBytes": 378474,
+      "sha256": "222de47a595b3db02a6e648e35f979833c8fc5414e6e32edd932dde1d6dfc0ab"
+    },
+    {
+      "privatePath": "bench/runs/ecs-release0927-evidence/bench-main-evidence.tar.gz",
+      "sizeBytes": 32273,
+      "sha256": "1b7261be002c0ca32cd173a2506a3a8114db34e501c8e2fb632ac83f5506ca8e"
+    },
+    {
+      "privatePath": "bench/runs/ecs-release0927-evidence/s3a-evidence.tar.gz",
+      "sizeBytes": 7266,
+      "sha256": "83d5e241ace52a9b8b46348be5bb629974316b33df44eb9923470d8792dde014"
+    },
+    {
+      "privatePath": "bench/runs/ecs-release0927-evidence/s3b-evidence.tar.gz",
+      "sizeBytes": 7521,
+      "sha256": "2e47b44819c100de1cd4b82a7d3a06a39a458399796bca04e6d9a46f9ed7d381"
+    },
+    {
+      "privatePath": "bench/runs/ecs-release0927-evidence/s5mq-evidence.tar.gz",
+      "sizeBytes": 1500,
+      "sha256": "917ab1b70504326f11115183f054c65264bcf3fd6a97acf123aed592197f8af4"
+    },
+    {
+      "privatePath": "bench/runs/ecs-release0927-evidence/s5scan-evidence.tar.gz",
+      "sizeBytes": 1176,
+      "sha256": "199b6b50f2129ee8d67f54435463d4130a2d6280e819dbb7403824174c22bb4b"
+    },
+    {
+      "privatePath": "bench/runs/ecs0926a-runs.tar.gz",
+      "sizeBytes": 215622,
+      "sha256": "02d39ed44b25258d9c1c5b0f13115fcd40c24749fe14f542ac89ee453c18ceac"
+    },
+    {
+      "privatePath": "bench/runs/forensics-20260928/forensics-client-evidence.tar.gz",
+      "sizeBytes": 1831,
+      "sha256": "c4ea7dd6fae4edd7eda1d12a75e6b98db4a86e51116e9a4b090fbf4b96a4b6a6"
+    },
+    {
+      "privatePath": "bench/runs/forensics-20260928/forensics-server-evidence.tar.gz",
+      "sizeBytes": 11283600,
+      "sha256": "a0eef6957a692e32afd661926749d17db4b8c7701eba96d13f8ede6a3fdaeb93"
+    },
+    {
+      "privatePath": "bench/runs/jmeter-ecs-20260928/jmeter-client-evidence.tar.gz",
+      "sizeBytes": 4146728,
+      "sha256": "c8bf3dc53f8e14cf7f9ca31759a41bc0e08f76aa7ec3892679b1ea5e10b941df"
+    },
+    {
+      "privatePath": "bench/runs/jmeter-ecs-20260928/jmeter-server-evidence.tar.gz",
+      "sizeBytes": 19649464,
+      "sha256": "d4661d29a05dcdd2776c96b6fb35e354a11f7d72a8ff45a623fcb018902c6d92"
+    },
+    {
+      "privatePath": "bench/runs/optimization-20260928/ab-evidence.tar.gz",
+      "sizeBytes": 60090,
+      "sha256": "fe8c2e5919a89c0e15627f696272105c923780ad6f49ea682a516c5a7d2f17b1"
+    },
+    {
+      "privatePath": "bench/runs/resume-metrics-20260927/resume-client-evidence.tar.gz",
+      "sizeBytes": 1978,
+      "sha256": "ea5f7308b6c2bf05adbcc0f3c69fbe21a0725c0a894f965560eccab8e8f4199d"
+    },
+    {
+      "privatePath": "bench/runs/resume-metrics-20260927/resume-server-evidence.tar.gz",
+      "sizeBytes": 60484,
+      "sha256": "f0d7236391a22ef6257f04c38dd95df624aa43a3e839665b4ce9e18927dabd44"
+    },
+    {
+      "privatePath": "bench/runs/spectrum-20260928/spectrum-client-evidence.tar.gz",
+      "sizeBytes": 37675,
+      "sha256": "674ed6f56ee8f904b5d88af26e789a6255cd3be8247f99295d5eb662f17c2d98"
+    },
+    {
+      "privatePath": "bench/runs/spectrum-20260928/spectrum-server-evidence.tar.gz",
+      "sizeBytes": 14626338,
+      "sha256": "643733d076388732a9ecdcb618eff69449de6e6f4ff9c996330f26602dd1b9db"
+    }
+  ]
+}

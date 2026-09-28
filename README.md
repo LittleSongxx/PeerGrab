@@ -54,7 +54,7 @@ API 与 Worker 复用应用用例；领域层定义状态规则和端口，基�
 | 后端 | Java 21 · Spring Boot 3.5.8 · Maven |
 | 数据与消息 | MySQL 8 · Redis 7 · RocketMQ 5 |
 
-[当前镜像 JMeter ECS 复测](peergrab-backend/bench/reports/peergrab-current/report-ecs-jmeter-20260928.md)、[工具迁移前 ECS 六类场景实测](peergrab-backend/bench/reports/peergrab-current/report-ecs-spectrum-20260928.md)及[按版本归档的历史评测](peergrab-backend/bench/reports/README.md)分别说明工具、负载和结果。
+[当前镜像 JMeter ECS 复测](peergrab-backend/bench/reports/peergrab-current/report-ecs-jmeter-20260928.md)、[工具迁移前 ECS 六类场景实测](peergrab-backend/bench/reports/peergrab-current/report-ecs-spectrum-20260928.md)及[按版本归档的历史评测](peergrab-backend/bench/reports/README.md)分别说明工具、负载和结果；[评测资产目录](peergrab-backend/bench/ASSET_CATALOG.md)说明现行入口、私有证据哈希和保留规则。
 
 ## 上线与实测
 
