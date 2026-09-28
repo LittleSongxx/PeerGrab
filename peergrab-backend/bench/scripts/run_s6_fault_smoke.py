@@ -522,7 +522,10 @@ def execute(args, mark):
             workload_error = str(e)
             mark("fault_workload_failed", error=workload_error)
         if workload_error is None:
-            remaining = args.fault_seconds - 1 - (time.monotonic() - started)
+            # Leave two full seconds between normal unpause and the emergency
+            # watchdog. Otherwise ordinary scheduler jitter makes a valid
+            # workload race its own hard deadline.
+            remaining = args.fault_seconds - 3 - (time.monotonic() - started)
             if remaining > 0:
                 time.sleep(remaining)
     during = snapshot(mysql_id)

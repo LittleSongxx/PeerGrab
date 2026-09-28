@@ -27,7 +27,7 @@ python3 bench/scripts/run_s6_fault_smoke.py \
   --execute --confirm-project "$PEERGRAB_BENCH_PROJECT"
 ```
 
-默认故障窗口 30 秒，可选 `--fault-seconds 20..30`；恢复观察最多 180 秒，可选 `--recovery-seconds 30..600`。只有一个已核对完整 ID 的 Redis 或 Broker 容器被 `docker pause`；脚本不使用 `docker stop`、`compose down`、`-v`、网络规则、生产路由或公网请求。故障内的业务写请求设置 8 秒超时，详情读探针设置 3 秒超时；独立看门狗会在上限前尝试解冻，超时恢复的轮次标为失败。故障期间的工作负载异常会触发立即解冻；正常流量完成后维持剩余故障窗口。`SIGTERM`/`Ctrl-C` 通过清理路径解冻；`SIGKILL`、宿主机断电或 Docker daemon 故障无法被进程内 `finally` 捕获。
+故障窗口上限默认 30 秒，可选 `--fault-seconds 20..30`；正常路径提前约 3 秒解冻，给独立看门狗留出余量。恢复观察最多 180 秒，可选 `--recovery-seconds 30..600`。只有一个已核对完整 ID 的 Redis 或 Broker 容器被 `docker pause`；脚本不使用 `docker stop`、`compose down`、`-v`、网络规则、生产路由或公网请求。故障内的业务写请求设置 8 秒超时，详情读探针设置 3 秒超时；独立看门狗会在上限前尝试解冻，超时恢复的轮次标为失败。故障期间的工作负载异常会触发立即解冻；正常流量完成后维持剩余故障窗口。`SIGTERM`/`Ctrl-C` 通过清理路径解冻；`SIGKILL`、宿主机断电或 Docker daemon 故障无法被进程内 `finally` 捕获。
 
 ## 记录和通过条件
 
