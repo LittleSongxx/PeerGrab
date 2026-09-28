@@ -37,7 +37,7 @@ docker compose -f docker-compose.yaml -f docker-compose.full.yaml --env-file .en
 
 本机完整演示栈默认使用 Redis Session；[生产栈](docker/ECS_DEPLOY.md)使用 MySQL 真值的 JWT，以便 Redis 故障时仍能校验已签发令牌，并要求至少 32 个 UTF-8 字节的 `PEERGRAB_AUTH_JWT_SECRET`。已有旧卷升级前必须先执行迁移脚本；仅重建镜像不会重新运行 `init.sql`。[旧项目迁移](docker/UPGRADE.md)另有独立步骤。停止演示栈使用相同两个 `-f` 参数执行 `docker compose down`，保留数据时不要加 `-v`。
 
-2026-09-27 已在单 ECS 演示站部署 `2370c45`：旧卷先备份、在隔离 MySQL 中恢复并试跑迁移，再停写执行正式迁移。新资金事件使用 `errand-fund-event-v2` 普通 Topic；一笔上线验收交易的 outbox 为 `SENT`、持久通知已落库、消费组积压为 0。S5 压测夹具的截止时间修正见后续提交 `7da0a92`，不改变线上 API/Worker 镜像。
+2026-09-27 首次在单 ECS 演示站部署 `2370c45`：旧卷先备份、在隔离 MySQL 中恢复并试跑迁移，再停写执行正式迁移。新资金事件使用 `errand-fund-event-v2` 普通 Topic；一笔上线验收交易的 outbox 为 `SENT`、持久通知已落库、消费组积压为 0。S5 压测夹具的截止时间修正见后续提交 `7da0a92`。2026-09-28 生产 API 与 Worker 已切换到 `5ace500`，本轮变更和实测见[性能优化与复测报告](docs/性能优化与复测-20260928.md)。
 
 ## 本机开发
 
@@ -77,7 +77,7 @@ export PEERGRAB_TEST_DB_PASSWORD='<独立测试 MySQL 密码>'
 mvn -Dpeergrab.it=true test
 ```
 
-本轮在可丢弃 MySQL/Redis 上运行的 **214 项后端测试为 0 失败、0 跳过**；前端 `npm run build` 与后端 `mvn -DskipTests package` 通过。真实 RocketMQ 的普通 Topic 类型、发送和消费读回另经独立契约脚本验证。
+2026-09-27 的旧版在可丢弃 MySQL/Redis 上运行 **214 项后端测试，0 失败、0 跳过**；前端 `npm run build` 与后端 `mvn -DskipTests package` 通过。真实 RocketMQ 的普通 Topic 类型、发送和消费读回另经独立契约脚本验证。2026-09-28 优化版在全新隔离 MySQL/Redis 上运行 `mvn -Dpeergrab.it=true test`，按 Maven 各模块汇总 **223 项执行、0 失败、0 错误、0 跳过**；独立栈的 S1/S4/S5 运行验收见下文报告。
 
 在可丢弃的本地演示库上可运行 `python3 bench/scripts/smoke_e2e.py --env-file docker/.env`；脚本验证发布、抢单、结算、退款、仲裁和通知，**会创建任务并改变演示账户余额**。只读资金不变式检查可执行：
 
@@ -89,8 +89,8 @@ docker compose -f docker/docker-compose.yaml --env-file docker/.env exec -T mysq
 
 ## 实验记录与边界
 
-[当前版本简历指标复测](bench/reports/peergrab-current/report-resume-metrics-20260927.md)及[可直接用于简历的指标卡](docs/校招实习简历性能指标-20260927.md)在生产停站后用独立卷与完整 HTTPS 路径测得：600 RPS × 180 秒重复三轮，每轮 108,000／108,000 次 HTTP 200，P99 范围 93–256 ms；2,000 人同单抢 1 名额重复三轮均恰好 1 人成功、0 超卖；共享钱包热点结算 200 任务／32 线程两轮约 60 持久化 TPS。650 RPS 长档出现 23 次传输超时，不能写为稳定零错误容量。[先前的 S1–S5 隔离复测](bench/reports/peergrab-current/report-ecs-release-20260927.md)还记录缓存热态回源下降但吞吐未提高、MQ 与扫描独占组各 1,000 条自然到期任务全部完成。旧镜像的[8 vCPU 公网实测](bench/reports/peergrab-current/report-ecs-8cpu-20260927.md)、[4 vCPU 实测](bench/reports/peergrab-current/report-ecs-max-20260926.md)和[原版 P6/P7 报告](bench/reports/original-project/report-P6-P7-20260822-complete.md)单独保留；不同代码、路径与窗口不能直接计算优化增益。复测从[压测运行手册](bench/README.md)建立独立环境，不能作用于演示库。
+[2026-09-27 优化前简历指标基线](bench/reports/peergrab-current/report-resume-metrics-20260927.md)及[历史简历指标卡](docs/校招实习简历性能指标-20260927.md)在生产停站后用独立卷与完整 HTTPS 路径测得：600 RPS × 180 秒重复三轮，每轮 108,000／108,000 次 HTTP 200，P99 范围 93–256 ms；2,000 人同单抢 1 名额重复三轮均恰好 1 人成功、0 超卖；共享钱包热点结算 200 任务／32 线程两轮约 60 持久化 TPS。650 RPS 长档出现 23 次传输超时，不能写为稳定零错误容量。[先前的 S1–S5 隔离复测](bench/reports/peergrab-current/report-ecs-release-20260927.md)还记录缓存热态回源下降但吞吐未提高、MQ 与扫描独占组各 1,000 条自然到期任务全部完成。旧镜像的[8 vCPU 公网实测](bench/reports/peergrab-current/report-ecs-8cpu-20260927.md)、[4 vCPU 实测](bench/reports/peergrab-current/report-ecs-max-20260926.md)和[原版 P6/P7 报告](bench/reports/original-project/report-P6-P7-20260822-complete.md)单独保留；不同代码、路径与窗口不能直接计算优化增益。复测从[压测运行手册](bench/README.md)建立独立环境，不能作用于演示库。
 
-[高延迟与超时定位报告](docs/高延迟与超时定位报告-20260928.md)区分了公网连接路径、抢单入口排队及结算／到期任务的结构性等待。
+[高延迟与超时定位报告](docs/高延迟与超时定位报告-20260928.md)区分了公网连接路径、抢单入口排队及结算／到期任务的结构性等待。[优化版单轮复测](docs/性能优化与复测-20260928.md)记录扫描 P99 下降、抢单请求次数下降及仍未解决的秒级尾延迟；S2 公网 HTTPS 尚未以新镜像重测，历史简历指标不可归属到 `5ace500`。
 
 当前公开 API 限制 `slotTotal=1`；Redis 或 MQ 故障注入后的完整性能恢复、多库资金方案仍待验证。ES/Canal 已退出运行架构，缓存一致性靠失效、TTL 与校验任务，不使用 binlog 秒级纠偏。[设计演进](docs/设计演进记录.md)、[分片取舍](docs/数据库分片相关思考.md)和[压测实验方案](docs/压测方案与容量评估.md)保存了相关设计和历史证据。

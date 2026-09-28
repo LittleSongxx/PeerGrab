@@ -5,9 +5,9 @@
 
 -- ① L1 借贷平衡：复式记账的根本不变式，全局必须为 0
 SELECT '① L1 借贷平衡' AS 校验项,
-       SUM(CASE WHEN direction = 'DEBIT'  THEN amount ELSE 0 END) AS 借方,
-       SUM(CASE WHEN direction = 'CREDIT' THEN amount ELSE 0 END) AS 贷方,
-       IF(SUM(CASE WHEN direction = 'DEBIT'  THEN amount ELSE -amount END) = 0,
+       COALESCE(SUM(CASE WHEN direction = 'DEBIT'  THEN amount ELSE 0 END), 0) AS 借方,
+       COALESCE(SUM(CASE WHEN direction = 'CREDIT' THEN amount ELSE 0 END), 0) AS 贷方,
+       IF(COALESCE(SUM(CASE WHEN direction = 'DEBIT'  THEN amount ELSE -amount END), 0) = 0,
           'PASS', 'FAIL') AS 结果
 FROM wallet_ledger;
 
