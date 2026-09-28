@@ -4,7 +4,7 @@
 
 原版历史报告与 PeerGrab 当前实测分开存放，见[评测报告索引](reports/README.md)。
 
-**当前 HTTP 发压统一入口是 [JMeter 5.6.3 场景计划](jmeter/README.md)**：S1、S2、S3、S4 由 JMX/CLI 发起，S6 的 Redis 故障读负载也由 JMeter 发起；S5 是 Worker 定时事件实验，继续用专用探针造数和测量。下文原有的 Vegeta、Java、Python 发压命令为历史轮次复现或辅助诊断，不能把其结果重标为 JMeter 成绩。隔离栈预检、资金 SQL 与故障恢复安全门禁继续适用。
+**当前 HTTP 发压统一入口是 [JMeter 5.6.3 场景计划](jmeter/README.md)**：S1、S2、S3、S4 由 JMX/CLI 发起，S6 的 Redis 故障读负载也由 JMeter 发起；S5 是 Worker 定时事件实验，继续用专用探针造数和测量。[当前 ECS JMeter 实测](reports/peergrab-current/report-ecs-jmeter-20260928.md)按新模型单独归档。下文原有的 Vegeta、Java、Python 发压命令为历史轮次复现或辅助诊断，不能把其结果重标为 JMeter 成绩。隔离栈预检、资金 SQL 与故障恢复安全门禁继续适用。
 
 ## 建立隔离栈
 

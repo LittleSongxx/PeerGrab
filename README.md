@@ -54,17 +54,19 @@ API 与 Worker 复用应用用例；领域层定义状态规则和端口，基�
 | 后端 | Java 21 · Spring Boot 3.5.8 · Maven |
 | 数据与消息 | MySQL 8 · Redis 7 · RocketMQ 5 |
 
-[当前镜像 ECS 六类场景实测](peergrab-backend/bench/reports/peergrab-current/report-ecs-spectrum-20260928.md)及[按版本归档的历史评测](peergrab-backend/bench/reports/README.md)分别说明负载、路径和结果。
+[当前镜像 JMeter ECS 复测](peergrab-backend/bench/reports/peergrab-current/report-ecs-jmeter-20260928.md)、[工具迁移前 ECS 六类场景实测](peergrab-backend/bench/reports/peergrab-current/report-ecs-spectrum-20260928.md)及[按版本归档的历史评测](peergrab-backend/bench/reports/README.md)分别说明工具、负载和结果。
 
 ## 上线与实测
 
 2026-09-27 首次上线版本为 `2370c45`（压测夹具随后修正为 `7da0a92`）：旧库经备份、独立恢复和迁移演练后升级；一笔虚拟交易从发布到结算完成，资金事件进入 v2 普通消息 Topic、持久通知落库，资金不变量全部通过。当时隔离 MySQL/Redis 的后端测试 **214 项通过、0 跳过**，前端与后端生产包构建通过。
 
-2026-09-28 已部署优化版 `5ace500`，独立 MySQL/Redis 上的 223 项后端测试全部通过。[当前镜像 ECS 六类场景实测](peergrab-backend/bench/reports/peergrab-current/report-ecs-spectrum-20260928.md)在 8 vCPU、100 Mbps ECS 停站后，以独立数据卷运行：广场游标首屏经异机公网 HTTPS 以 **600 RPS × 180 秒 × 3 轮**发出各 108,000 次请求，P99 为 **46.9／52.3／47.8 ms**，第三轮有 **4 次客户端传输超时**，因此不能声称 600 RPS 零错误稳态容量。2,000 个虚拟客户端同单抢 1 个名额，两轮均仅 1 人成功、0 超卖，但请求 P99 约 **4.7–5.1 秒**；200 单／32 线程共享钱包热点结算两轮约 **36.1–39.5 持久化 TPS**，P99 约 **1.45–1.48 秒**，这是短批次结果。缓存开启后的热态详情回源为 0，整个窗口 MySQL 查询约少 49%，但首次冷态 P99 更高；1,000 单同刻到期的 MQ／扫描兜底状态日志 P99 分别为 **9.51／25.10 秒**。Redis 暂停期间详情读全部成功但 P95 升至约 2.01 秒；Broker 暂停时默认配置的结算已提交却在客户端 8 秒超时，属于待修复的故障体验问题。
+2026-09-28 已部署优化版 `5ace500`，独立 MySQL/Redis 上的 223 项后端测试全部通过。[工具迁移前 ECS 六类场景实测](peergrab-backend/bench/reports/peergrab-current/report-ecs-spectrum-20260928.md)由 Vegeta、Java 客户端和 Python 探针取得，包含公网偶发超时、热点抢单的秒级尾延迟、MQ／扫描到期流转以及 Broker 暂停时“结算已提交、客户端却超时”的故障反例；保留原工具和计时口径。
 
-[当前校招／实习简历指标卡](peergrab-backend/docs/校招实习简历性能指标-20260928.md)给出可追溯的表述和禁用说法。[2026-09-27 简历专项复测](peergrab-backend/bench/reports/peergrab-current/report-resume-metrics-20260927.md)与[旧版指标卡](peergrab-backend/docs/校招实习简历性能指标-20260927.md)保留为历史基线；旧镜像的广场路径、结算客户端及负载窗口与本轮不同，不能直接计算优化增益或沿用旧版零错误数字。这些有限窗口实验不是全站容量或生产 SLA 承诺。
+随后在同一业务镜像上完成[独立的 JMeter ECS 复测](peergrab-backend/bench/reports/peergrab-current/report-ecs-jmeter-20260928.md)：广场游标首屏经异机公网 HTTPS，在 **500 目标 RPS × 180 秒 × 3 轮**中实际启动 **269,608 次，全部通过 HTTP 和业务断言**，最差轮 P99 **255 ms**；600 目标 RPS 长档第二轮出现 **1 次连接超时**，按门禁停止第三轮。2,000 个 JMeter 用户线程同单抢 1 名额恰好 1 人成功、0 超卖，但实际请求开始横跨 2.228 秒、P99 **8.735 秒**；共享钱包热点结算 200 单／32 线程短批次为 **34.72 持久化 TPS**，资金校验通过。不同工具的连接复用与到达模型不同，不能用两份报告直接计算优化收益或全站容量。
 
-后续 HTTP 场景已迁移到 [JMeter 5.6.3 安全压测计划](peergrab-backend/bench/jmeter/README.md)；当前已在本机独立隔离栈完成小档链路验证，以上 ECS 历史数字仍按当时的 Vegeta／Java／Python 工具和负载模型标注。[可观测性现状评估](peergrab-backend/docs/可观测性现状评估-20260928.md)区分了已有 Micrometer 指标与尚未部署的持续看板、告警和链路追踪。
+[JMeter 校招／实习简历指标卡](peergrab-backend/docs/校招实习简历性能指标-JMeter-20260928.md)给出新轮次的可追溯表述。[原工具指标卡](peergrab-backend/docs/校招实习简历性能指标-20260928.md)、[2026-09-27 简历专项复测](peergrab-backend/bench/reports/peergrab-current/report-resume-metrics-20260927.md)与[旧版指标卡](peergrab-backend/docs/校招实习简历性能指标-20260927.md)保留为历史基线；代码、路径、工具和负载窗口不同，不能直接计算优化增益。这些有限窗口实验不是全站容量或生产 SLA 承诺。
+
+当前 HTTP 发压入口是 [JMeter 5.6.3 场景计划](peergrab-backend/bench/jmeter/README.md)；S5 的 Worker 定时事件仍由专用探针测量。[可观测性现状评估](peergrab-backend/docs/可观测性现状评估-20260928.md)区分了已有 Micrometer 指标与尚未部署的持续看板、告警和链路追踪。
 
 ## 快速开始
 
