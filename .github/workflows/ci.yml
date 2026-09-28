@@ -138,6 +138,33 @@ jobs:
             --disable-pip-version-check -r peergrab-backend/bench/requirements.txt
           "$RUNNER_TEMP/peergrab-bench-venv/bin/python" -m unittest discover \
             -s peergrab-backend/bench/scripts -p 'test_*.py'
+      - name: Validate JMeter plans and safety runners
+        run: |
+          "$RUNNER_TEMP/peergrab-bench-venv/bin/python" -m unittest discover \
+            -s peergrab-backend/bench/jmeter/s2 -p 'test_*.py'
+          "$RUNNER_TEMP/peergrab-bench-venv/bin/python" -m unittest discover \
+            -s peergrab-backend/bench/jmeter/business -p 'test_*.py'
+          python3 - <<'PY'
+          from pathlib import Path
+          import shutil
+          import subprocess
+          import tempfile
+          import xml.etree.ElementTree as ET
+
+          root = Path('peergrab-backend/bench/jmeter')
+          plans = sorted(root.rglob('*.jmx'))
+          assert len(plans) == 7
+          for plan in plans:
+              ET.parse(plan)
+
+          business = root / 'business'
+          with tempfile.TemporaryDirectory() as directory:
+              target = Path(directory)
+              shutil.copyfile(business / 'generate_plans.py', target / 'generate_plans.py')
+              subprocess.run(['python3', str(target / 'generate_plans.py')], check=True)
+              for name in ('s1.jmx', 's3_read.jmx', 's3_mixed.jmx', 's4.jmx'):
+                  assert (business / name).read_bytes() == (target / name).read_bytes(), name
+          PY
       - name: Check benchmark shell syntax
         run: |
           bash -n peergrab-backend/bench/scripts/cleanup.sh
