@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.3">
+  <hashTree>
+    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="S2 disposable Square cursor first page" enabled="true">
+      <stringProp name="TestPlan.comments">Run through run_s2_jmeter.py only. The default host is deliberately unroutable. No login credentials, token, response body, or URL are saved in the JTL.</stringProp>
+      <boolProp name="TestPlan.functional_mode">false</boolProp>
+      <boolProp name="TestPlan.tearDown_on_shutdown">true</boolProp>
+      <boolProp name="TestPlan.serialize_threadgroups">true</boolProp>
+      <elementProp name="TestPlan.user_defined_variables" elementType="Arguments" guiclass="ArgumentsPanel" testclass="Arguments" testname="Variables" enabled="true">
+        <collectionProp name="Arguments.arguments"/>
+      </elementProp>
+    </TestPlan>
+    <hashTree>
+      <OpenModelThreadGroup guiclass="OpenModelThreadGroupGui" testclass="OpenModelThreadGroup" testname="S2 warmup and sample random arrivals" enabled="true">
+        <stringProp name="OpenModelThreadGroup.schedule">pause(${__P(benchPrelude,3)} sec) rate(${__P(benchRate,1)}/sec) random_arrivals(${__P(benchWarmup,1)} sec) rate(${__P(benchRate,1)}/sec) random_arrivals(${__P(benchSample,1)} sec)</stringProp>
+        <longProp name="OpenModelThreadGroup.random_seed">20260928</longProp>
+      </OpenModelThreadGroup>
+      <hashTree>
+        <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="Bearer from process environment" enabled="true">
+          <collectionProp name="HeaderManager.headers">
+            <elementProp name="Authorization" elementType="Header">
+              <stringProp name="Header.name">Authorization</stringProp>
+              <stringProp name="Header.value">Bearer ${__groovy(System.getenv('PEERGRAB_BENCH_TOKEN'))}</stringProp>
+            </elementProp>
+            <elementProp name="Accept" elementType="Header">
+              <stringProp name="Header.name">Accept</stringProp>
+              <stringProp name="Header.value">application/json</stringProp>
+            </elementProp>
+          </collectionProp>
+        </HeaderManager>
+        <hashTree/>
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="S2" enabled="true">
+          <boolProp name="HTTPSampler.postBodyRaw">false</boolProp>
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="Parameters" enabled="true">
+            <collectionProp name="Arguments.arguments"/>
+          </elementProp>
+          <stringProp name="HTTPSampler.domain">${__P(benchHost,invalid.invalid)}</stringProp>
+          <stringProp name="HTTPSampler.port">${__P(benchPort,443)}</stringProp>
+          <stringProp name="HTTPSampler.protocol">${__P(benchScheme,https)}</stringProp>
+          <stringProp name="HTTPSampler.path">${__groovy(System.getenv('PEERGRAB_BENCH_PREFIX'))}/api/errands?campusId=1&amp;cursor=&amp;size=20</stringProp>
+          <stringProp name="HTTPSampler.method">GET</stringProp>
+          <boolProp name="HTTPSampler.follow_redirects">false</boolProp>
+          <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
+          <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+          <boolProp name="HTTPSampler.DO_MULTIPART_POST">false</boolProp>
+          <stringProp name="HTTPSampler.implementation">HttpClient4</stringProp>
+          <stringProp name="HTTPSampler.connect_timeout">${__P(benchTimeoutMs,5000)}</stringProp>
+          <stringProp name="HTTPSampler.response_timeout">${__P(benchTimeoutMs,5000)}</stringProp>
+        </HTTPSamplerProxy>
+        <hashTree>
+          <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="Tag warmup or sample by request start" enabled="true">
+            <stringProp name="cacheKey">s2-label-by-start-v1</stringProp>
+            <stringProp name="filename"></stringProp>
+            <stringProp name="parameters"></stringProp>
+            <stringProp name="scriptLanguage">groovy</stringProp>
+            <stringProp name="script"><![CDATA[
+import org.apache.jmeter.threads.JMeterContextService
+def startedAt = JMeterContextService.getTestStartTime()
+vars.put('benchStartMs', Long.toString(startedAt))
+def preludeMs = Long.parseLong(props.getProperty('benchPrelude', '3')) * 1000L
+def warmupMs = Long.parseLong(props.getProperty('benchWarmup', '1')) * 1000L
+prev.setSampleLabel(prev.getStartTime() - startedAt < preludeMs + warmupMs ? 'S2-warmup' : 'S2-sample')
+]]></stringProp>
+          </JSR223PostProcessor>
+          <hashTree/>
+          <JSR223Assertion guiclass="TestBeanGUI" testclass="JSR223Assertion" testname="HTTP 200 and Square cursor payload" enabled="true">
+            <stringProp name="cacheKey">s2-cursor-payload-v1</stringProp>
+            <stringProp name="filename"></stringProp>
+            <stringProp name="parameters"></stringProp>
+            <stringProp name="scriptLanguage">groovy</stringProp>
+            <stringProp name="script"><![CDATA[
+import groovy.json.JsonSlurper
+try {
+    def value = new JsonSlurper().parse(prev.getResponseData())
+    def rows = value?.data?.items
+    if (prev.getResponseCode() != '200' || value?.code != 'OK' ||
+            !(rows instanceof List) || rows.size() != 20 ||
+            !(value.data.nextCursor instanceof String) || value.data.nextCursor.isEmpty() ||
+            !rows.any { row ->
+                def id = row?.id?.toString()
+                id ==~ /930000\d{6}/ && id.toLong() > 930000000000L && id.toLong() <= 930000100000L
+            }) {
+        AssertionResult.setFailure(true)
+        AssertionResult.setFailureMessage('Unexpected S2 cursor response')
+    }
+} catch (Exception ignored) {
+    AssertionResult.setFailure(true)
+    AssertionResult.setFailureMessage('Invalid S2 cursor response')
+}
+]]></stringProp>
+          </JSR223Assertion>
+          <hashTree/>
+        </hashTree>
+      </hashTree>
+    </hashTree>
+  </hashTree>
+</jmeterTestPlan>

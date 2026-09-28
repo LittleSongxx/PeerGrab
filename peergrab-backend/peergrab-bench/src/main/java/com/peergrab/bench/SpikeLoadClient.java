@@ -18,12 +18,10 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * S1 尖峰抢单压测客户端。
  *
- * 为什么自研而不用 JMeter：
- *   1. 本机没装 JMeter/wrk，自研客户端零外部依赖，任何人 clone 下来就能跑
- *   2. CountDownLatch 同时放行虚拟线程；实际 send 开始时间仍受客户端调度影响，
- *      因此单独记录放行到 send 的延迟
- *   3. 压完能直接连数据库跑校验 SQL，不需要在两个工具间来回切
- * 阶梯加压出 QPS 曲线（S2）后续用 Docker 版 JMeter，那才是它的强项。
+ * 历史客户端，保留旧轮次复现与发压器对照；新 S1 HTTP 负载使用
+ * bench/jmeter/business/s1.jmx。CountDownLatch 同时放行虚拟线程，实际 send
+ * 开始时间仍受客户端调度影响，因此本客户端单独记录放行到 send 的延迟。
+ * 新旧工具的线程模型与到达分布不同，不能直接比较 P99 或宣称性能收益。
  *
  * Requires a disposable benchmark stack running JWT auth and its signing secret.
  *   PEERGRAB_BENCH_DISPOSABLE=YES PEERGRAB_BENCH_PROJECT=peergrab-bench-... \
@@ -56,8 +54,7 @@ public class SpikeLoadClient {
                 .version(HttpClient.Version.HTTP_1_1)
                 .build();
 
-        // 登记本轮，产生的任务都挂到这个 run_id 上：
-        // 数据得以保留用于改动前后对比，也能被 cleanup.sh 精确清理
+        // run_id 用于追溯和核验；清理只销毁经身份核验的整个独立栈。
         try (var db = java.sql.DriverManager.getConnection(jdbcUrl,
                 System.getenv().getOrDefault("PEERGRAB_TEST_DB_USER", "root"), dbPassword);
              BenchRunRecorder recorder = new BenchRunRecorder(jdbcUrl,

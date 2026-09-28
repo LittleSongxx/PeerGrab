@@ -8,11 +8,13 @@ It never stops a container, deletes a volume, or targets a public URL.
 import argparse
 from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import threading
@@ -27,6 +29,12 @@ import preflight
 
 BACKEND = Path(__file__).resolve().parents[2]
 RUNS = BACKEND / "bench" / "runs"
+JMETER_S2 = BACKEND / "bench" / "jmeter" / "s2"
+sys.path.insert(0, str(JMETER_S2))
+import jtl_summary  # noqa: E402 - shared safe JTL schema, after bench path resolution
+
+JMETER_DETAIL_PLAN = BACKEND / "bench" / "jmeter" / "s6" / "detail-read.jmx"
+JMETER_RESULTS = JMETER_S2 / "results.properties"
 TARGET = {"redis": "redis", "mq": "rmqbroker"}
 DETAIL_RATE = 10
 DETAIL_MAX_IN_FLIGHT = 32
@@ -335,6 +343,94 @@ def detail_phase(base_url, token, errand_id, seconds, phase):
             "maxMs": max((item["latencyMs"] for item in results), default=None)}
 
 
+def jmeter_detail_phase(base_url, token, errand_id, seconds, phase, jmeter_bin):
+    """Run one bounded HTTP read phase with JMeter; fault control stays in Python.
+
+    Open Model random arrivals have a nominal mean, not an exact offered count.
+    The JTL includes only actually started samples. Never report its count as
+    the exact scheduled number or claim an unobserved local-rejection count.
+    """
+    local_api_origin(base_url)
+    if not isinstance(errand_id, int) or errand_id <= 0 or seconds < 1:
+        raise Refused("Invalid JMeter detail phase parameters")
+    executable = Path(jmeter_bin)
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise Refused("Apache JMeter executable is unavailable")
+    if not JMETER_DETAIL_PLAN.is_file() or not JMETER_RESULTS.is_file():
+        raise Refused("JMeter S6 plan or private JTL schema is unavailable")
+    parsed = urlsplit(base_url)
+    RUNS.mkdir(parents=True, exist_ok=True)
+    private = RUNS / ("s6-jmeter-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                      + "-" + uuid.uuid4().hex[:8])
+    private.mkdir(mode=0o700)
+    jtl = private / "results.jtl"
+    log = private / "jmeter.log"
+    stdout = private / "stdout.log"
+    stderr = private / "stderr.log"
+    env = os.environ.copy()
+    for name in tuple(env):
+        if name.lower().endswith("_proxy") or name.lower() == "all_proxy":
+            env.pop(name, None)
+    env["PEERGRAB_BENCH_TOKEN"] = token
+    cmd = [str(executable), "-n", "-t", str(JMETER_DETAIL_PLAN), "-l", str(jtl),
+           "-j", str(log), "-q", str(JMETER_RESULTS),
+           "-JbenchHost=" + parsed.hostname, "-JbenchPort=" + str(parsed.port),
+           "-JbenchErrandId=" + str(errand_id), "-JbenchRate=" + str(DETAIL_RATE),
+           "-JbenchSeconds=" + str(seconds), "-JbenchTimeoutMs=3000"]
+    started_at = utc_now()
+    with stdout.open("w") as out, stderr.open("w") as err:
+        # The Apache launcher is a shell that starts Java without exec. Keep
+        # both processes in one private process group so a timeout or SIGTERM
+        # cannot leave a load-generating Java child behind.
+        process = subprocess.Popen(cmd, env=env, stdout=out, stderr=err,
+                                   start_new_session=True)
+        try:
+            returncode = process.wait(timeout=seconds + 7)
+        except BaseException as exc:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait(timeout=2)
+            if isinstance(exc, subprocess.TimeoutExpired):
+                raise Refused(f"JMeter {phase} phase exceeded its bounded time limit") from exc
+            raise
+    if returncode:
+        raise Refused(f"JMeter {phase} phase exited unsuccessfully; private log preserved")
+    try:
+        rows = jtl_summary.read_jtl(jtl, expected_labels={"S6-detail"}, max_rows=1_000)
+        measured = jtl_summary.summarize_rows(rows, duration_seconds=seconds)
+    except (OSError, ValueError) as exc:
+        raise Refused(f"JMeter {phase} returned invalid JTL") from exc
+    count = measured["samplesStarted"]
+    expected = jtl_summary.random_arrival_count_check(count, DETAIL_RATE, seconds)
+    http_codes = measured["httpStatusCodes"]
+    return {"phase": phase, "generator": "Apache JMeter Open Model random_arrivals",
+            "startedAtUtc": started_at, "nominalExpected": expected["nominalExpected"],
+            "offered": None, "sent": count, "completed": count,
+            "ok": measured["successfulSamples"],
+            "transportErrors": measured["nonHttpErrors"],
+            "httpErrors": measured["httpNon200"],
+            "applicationErrors": measured["http200BusinessFailures"],
+            "localRejected": None, "schedulerMissed": None,
+            "grossUnderproduction": expected["grossUnderproduction"],
+            "outcomes": {"ok": measured["successfulSamples"],
+                         "transport_error": measured["nonHttpErrors"],
+                         "http_error": measured["httpNon200"],
+                         "application_error": measured["http200BusinessFailures"]},
+            "httpStatusCodes": http_codes, "states": {},
+            "p95Ms": measured["allP95Ms"], "maxMs": measured["maxElapsedMs"],
+            "jtlSha256": hashlib.sha256(jtl.read_bytes()).hexdigest(),
+            "privateEvidenceDir": str(private)}
+
+
 class FaultWindow:
     """Pause/unpause only the exact, repeatedly identified disposable container."""
 
@@ -465,16 +561,24 @@ def execute(args, mark):
     base = stack["api"]
     publisher = login(base, 1001)
     runner = login(base, 2001)
+    run_detail = (lambda url, bearer, task_id, duration, name:
+                  jmeter_detail_phase(url, bearer, task_id, duration, name, args.jmeter_bin)) \
+        if args.detail_generator == "jmeter" else detail_phase
     run_key = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S") + "_" + uuid.uuid4().hex[:8]
     if args.fault == "redis":
         errand_id = publish(base, publisher, run_key)
         detail = api(base, "GET", f"/api/errands/{errand_id}", publisher)
         if detail.get("status") != "PUBLISHED":
             raise Refused("Redis prewarm did not see a published task")
-        pre_reads = detail_phase(base, publisher, errand_id, 5, "before")
+        pre_reads = run_detail(base, publisher, errand_id, 5, "before")
         mark("detail_phase_before", **pre_reads)
-        if (pre_reads["outcomes"]["ok"] != pre_reads["offered"]
-                or pre_reads["localRejected"] != 0 or pre_reads["schedulerMissed"] != 0):
+        pre_good = (pre_reads["ok"] == pre_reads["completed"]
+                    and (not pre_reads.get("grossUnderproduction", False))
+                    and (pre_reads["offered"] is None or
+                         (pre_reads["ok"] == pre_reads["offered"]
+                          and pre_reads["localRejected"] == 0
+                          and pre_reads["schedulerMissed"] == 0)))
+        if not pre_good:
             raise Refused("Redis detail baseline was not fully delivered and successful")
     else:
         errand_id = prepare_delivered(base, publisher, runner, run_key)
@@ -501,13 +605,20 @@ def execute(args, mark):
                 with ThreadPoolExecutor(max_workers=1) as grab_pool:
                     grab = grab_pool.submit(api, base, "POST", f"/api/errands/{errand_id}/grab",
                                            runner, {}, str(uuid.uuid4()))
-                    during_reads = detail_phase(base, publisher, errand_id,
-                                                args.fault_seconds - 5, "paused")
+                    # JMeter CLI startup and the drain pause both consume real
+                    # outage time; leave room before the exact-ID watchdog.
+                    duration = (args.fault_seconds - 12 if args.detail_generator == "jmeter"
+                                else args.fault_seconds - 5)
+                    during_reads = run_detail(base, publisher, errand_id,
+                                              duration, "paused")
                     mark("detail_phase_paused", **during_reads)
                     grab.result(timeout=1)
                 if during_reads["outcomes"]["ok"] == 0:
                     raise Refused("No detail request succeeded while Redis was paused")
-                if during_reads["localRejected"] != 0 or during_reads["schedulerMissed"] != 0:
+                if (during_reads.get("grossUnderproduction", False)
+                        or (during_reads["localRejected"] is not None
+                            and (during_reads["localRejected"] != 0
+                                 or during_reads["schedulerMissed"] != 0))):
                     raise Refused("Redis-outage 10 RPS phase was not fully offered to the API")
             else:
                 result = api(base, "POST", f"/api/errands/{errand_id}/settle", publisher, {})
@@ -540,10 +651,15 @@ def execute(args, mark):
             os.getenv("PEERGRAB_TEST_DB_HOST"), os.getenv("PEERGRAB_TEST_DB_PORT"), "true", "true")):
         raise Refused("Disposable stack did not pass preflight after unpause")
     if args.fault == "redis":
-        post_reads = detail_phase(base, publisher, errand_id, 5, "after")
+        post_reads = run_detail(base, publisher, errand_id, 5, "after")
         mark("detail_phase_after", **post_reads)
-        if (post_reads["outcomes"]["ok"] != post_reads["offered"]
-                or post_reads["localRejected"] != 0 or post_reads["schedulerMissed"] != 0):
+        post_good = (post_reads["ok"] == post_reads["completed"]
+                     and (not post_reads.get("grossUnderproduction", False))
+                     and (post_reads["offered"] is None or
+                          (post_reads["ok"] == post_reads["offered"]
+                           and post_reads["localRejected"] == 0
+                           and post_reads["schedulerMissed"] == 0)))
+        if not post_good:
             raise Refused("Redis detail did not recover to a fully successful read phase")
         state = one_row(mysql_id,
                         f"SELECT status,slot_taken,grabber_id FROM errand WHERE id={errand_id}", 3)
@@ -583,6 +699,9 @@ def main():
     parser.add_argument("--confirm-project", help="repeat the exact disposable project for --execute")
     parser.add_argument("--fault-seconds", type=int, default=30)
     parser.add_argument("--recovery-seconds", type=int, default=180)
+    parser.add_argument("--detail-generator", choices=("jmeter", "python"), default="jmeter",
+                        help="JMeter is the current HTTP load generator; python reproduces older rounds")
+    parser.add_argument("--jmeter-bin", default=os.getenv("PEERGRAB_JMETER_BIN") or shutil.which("jmeter"))
     args = parser.parse_args()
     if not 20 <= args.fault_seconds <= 30 or not 30 <= args.recovery_seconds <= 600:
         parser.error("fault-seconds must be 20..30; recovery-seconds must be 30..600")
@@ -592,7 +711,8 @@ def main():
         parser.error("project must match both benchmark environment variables")
     manifest = {"scenario": "S6-" + args.fault, "project": args.project,
                 "status": "RUNNING" if args.execute else "DRY_RUN", "faultSeconds": args.fault_seconds,
-                "recoverySeconds": args.recovery_seconds, "events": []}
+                "recoverySeconds": args.recovery_seconds,
+                "detailGenerator": args.detail_generator if args.fault == "redis" else "none", "events": []}
     run_name = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:6]
     output = RUNS / f"s6-{args.project}-{run_name}.json"
     mark_lock = threading.Lock()
@@ -614,6 +734,10 @@ def main():
                                 os.getenv("PEERGRAB_TEST_DB_HOST"), os.getenv("PEERGRAB_TEST_DB_PORT"),
                                 "true", "true")
         require_unpaused_services(args.project)
+        if args.fault == "redis" and args.detail_generator == "jmeter":
+            if not args.jmeter_bin or not Path(args.jmeter_bin).is_file() \
+                    or not os.access(args.jmeter_bin, os.X_OK):
+                raise Refused("Apache JMeter executable is required for S6 Redis read load")
         target = inspected_service(args.project, TARGET[args.fault])
         if not target["State"]["Running"] or target["State"]["Paused"]:
             raise Refused("Fault target is not running/unpaused")

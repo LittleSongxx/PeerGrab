@@ -64,6 +64,8 @@ API 与 Worker 复用应用用例；领域层定义状态规则和端口，基�
 
 [当前校招／实习简历指标卡](peergrab-backend/docs/校招实习简历性能指标-20260928.md)给出可追溯的表述和禁用说法。[2026-09-27 简历专项复测](peergrab-backend/bench/reports/peergrab-current/report-resume-metrics-20260927.md)与[旧版指标卡](peergrab-backend/docs/校招实习简历性能指标-20260927.md)保留为历史基线；旧镜像的广场路径、结算客户端及负载窗口与本轮不同，不能直接计算优化增益或沿用旧版零错误数字。这些有限窗口实验不是全站容量或生产 SLA 承诺。
 
+后续 HTTP 场景已迁移到 [JMeter 5.6.3 安全压测计划](peergrab-backend/bench/jmeter/README.md)；当前已在本机独立隔离栈完成小档链路验证，以上 ECS 历史数字仍按当时的 Vegeta／Java／Python 工具和负载模型标注。[可观测性现状评估](peergrab-backend/docs/可观测性现状评估-20260928.md)区分了已有 Micrometer 指标与尚未部署的持续看板、告警和链路追踪。
+
 ## 快速开始
 
 需要 Docker 与 Compose v2：

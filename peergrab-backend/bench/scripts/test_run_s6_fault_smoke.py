@@ -1,5 +1,6 @@
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 import time
 import tempfile
 from pathlib import Path
@@ -89,6 +90,61 @@ class S6SafetyTest(unittest.TestCase):
         self.assertEqual(4, result["ok"])
         self.assertEqual(0, result["transportErrors"])
         self.assertEqual(2.5, result["p95Ms"])
+
+    def test_jmeter_detail_phase_keeps_token_out_of_command_and_jtl(self):
+        with tempfile.TemporaryDirectory() as directory:
+            private = Path(directory)
+            executable = private / "jmeter"
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o700)
+
+            def fake_popen(command, **kwargs):
+                self.assertNotIn("private-token", " ".join(command))
+                self.assertEqual("private-token", kwargs["env"]["PEERGRAB_BENCH_TOKEN"])
+                self.assertTrue(all(not name.lower().endswith("_proxy")
+                                    for name in kwargs["env"]))
+                self.assertTrue(kwargs["start_new_session"])
+                jtl = Path(command[command.index("-l") + 1])
+                jtl.write_text("timeStamp,elapsed,label,responseCode,success,bytes,sentBytes,"
+                               "grpThreads,allThreads,Latency,IdleTime,Connect\n"
+                               "1790000000000,17,S6-detail,200,true,100,100,1,1,15,0,5\n")
+                return SimpleNamespace(wait=lambda timeout: 0)
+
+            with patch.object(s6, "RUNS", private), \
+                    patch.object(s6.subprocess, "Popen", side_effect=fake_popen), \
+                    patch.dict(s6.os.environ, {"HTTP_PROXY": "http://example.invalid"}, clear=False):
+                result = s6.jmeter_detail_phase("http://127.0.0.1:28080", "private-token",
+                                                7, 1, "before", executable)
+            self.assertEqual(1, result["sent"])
+            self.assertEqual(1, result["ok"])
+            self.assertIsNone(result["schedulerMissed"])
+            self.assertEqual(17, result["p95Ms"])
+
+    def test_jmeter_timeout_terminates_shell_and_java_process_group(self):
+        class Stuck:
+            pid = 1234
+            waits = 0
+
+            def wait(self, timeout):
+                self.waits += 1
+                if self.waits == 1:
+                    raise s6.subprocess.TimeoutExpired("jmeter", timeout)
+                return -15
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "jmeter"
+            binary.write_text("#!/bin/sh\nexit 0\n")
+            binary.chmod(0o700)
+            process = Stuck()
+            with patch.object(s6, "RUNS", root), \
+                    patch.object(s6.subprocess, "Popen", return_value=process), \
+                    patch.object(s6.os, "killpg") as killpg:
+                with self.assertRaisesRegex(s6.Refused, "bounded time limit"):
+                    s6.jmeter_detail_phase("http://127.0.0.1:28080", "private-token",
+                                           7, 1, "paused", binary)
+            killpg.assert_called_once_with(1234, s6.signal.SIGTERM)
+            self.assertEqual(2, process.waits)
 
     def test_publish_id_accepts_json_decimal_string_without_precision_loss(self):
         snowflake = "1902319203123456789"
@@ -228,7 +284,7 @@ class S6SafetyTest(unittest.TestCase):
                 patch.dict(s6.os.environ, {"PEERGRAB_BENCH_PROJECT": PROJECT,
                                            "COMPOSE_PROJECT_NAME": PROJECT}, clear=False), \
                 patch.object(s6.sys, "argv", ["run_s6_fault_smoke.py", "--project", PROJECT,
-                                              "--fault", "redis"]):
+                                              "--fault", "redis", "--detail-generator", "python"]):
             self.assertEqual(0, s6.main())
             self.assertEqual([], list(Path(directory).iterdir()))
             execute.assert_not_called()
