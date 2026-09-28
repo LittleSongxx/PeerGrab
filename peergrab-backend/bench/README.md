@@ -98,7 +98,7 @@ python3 bench/scripts/run_s2_ablations.py \
 
 默认顺序为 Hikari/Tomcat `20/200 → 8/200 → 20/200 → 20/64 → 20/200`；每次先做 20/80 RPS 预热爬坡，再测两轮 80 RPS、`maxInFlight=64`。若实际栈没有第四个 Compose 文件，省略 `--compose-overlay`。S1、S3、S4、S5 的写入或缓存状态对照仍需新卷。
 
-其他入口：`SpikeLoadClient <baseUrl> <concurrency> <slotTotal>`、`RampLoadClient <baseUrl> <concurrencyCsv> <stageSeconds>`、`CacheLoadClient <a|b|c|d> <baseUrl>`、`FundsHttpLoadClient <baseUrl> <distinctCount> <concurrency> [sameTaskAttempts] [timeoutMillis]`。S4 和 S5 的客户端均自行造数；旧 `seed.sql`、`seed_s4.sql`、`seed_s5.sql` 已禁用。S5 的 Worker 到期配置必须与探针命令一致。
+其他入口：`SpikeLoadClient <baseUrl> <concurrency> <slotTotal>`、`RampLoadClient <baseUrl> <concurrencyCsv> <stageSeconds>`、`CacheLoadClient <a|b|c|d> <baseUrl> [--concurrency=N --iterations=N --trials=N --seed=N]`、`FundsHttpLoadClient <baseUrl> <distinctCount> <concurrency> [sameTaskAttempts] [timeoutMillis]`。S3 的 a/b 是固定并发闭环读测试；每轮重新统计详情回源，首轮仅在新卷和空缓存时可叫冷态，后续轮次是热态。c 模式发布任务后读取**同一任务 ID** 九次，并单独做状态变更后的缓存可见性检查。S4 和 S5 的客户端均自行造数；旧 `seed.sql`、`seed_s4.sql`、`seed_s5.sql` 已禁用。S5 的 Worker 到期配置必须与探针命令一致。
 
 ECS 维护窗口的独立执行与正确性门槛见 [S1/S4 手册](S1_S4_MAINTENANCE.md)、[S3/S5 手册](S3_S5_ECS_RUNBOOK.md)。
 
@@ -135,7 +135,9 @@ python3 peergrab-backend/bench/scripts/run_remote_s2.py \
 
 判读拐点时，`schedulerMissed` 是客户端未按时送出的请求，`capacityRejected` 是本地 `maxInFlight` 拒载，两者都不能算服务端失败。只有按时送出的请求仍持续积压，才能把吞吐平台和 P99 上升作为服务端拐点。同步采 ECS 的整机 CPU、网卡、容器 CPU、数据库活跃连接与线程；与当轮带宽上限比较，`responseMbpsInWindowApprox` 只是响应体近似值。SSH 加密会占用 ECS CPU，因此 SSH 隧道轮与直连 HTTPS 轮不得混算容量。[2026-09-26 ECS 极限轮](reports/peergrab-current/report-ecs-max-20260926.md)记录当日配置和结果。
 
-`run_remote_s2_vegeta.py` 提供另一个固定到达率发压器，默认只做隔离栈和临时路由的身份预检；真正发压还要求 `--execute --confirm-project <隔离项目名>`。它只保存汇总 JSON，`status=0` 统计为无 HTTP 响应，不能算 HTTP 200 或应用 5xx。长档应同时报告采样秒数和全部错误数。
+`run_remote_s2_vegeta.py` 提供异机固定到达率发压，默认 `--workload cursor-first` 测当前广场的 `cursor=` 首屏；`legacy-first` 单独保留旧分页口径。未指定 `--execute --confirm-project <隔离项目名>` 时只做身份预检。结果保存聚合 JSON 和脱敏的约每秒**完成结果**快照，不保存 Bearer 或原始逐请求记录；该快照不是精确的逐秒计划到达数。`status=0` 是无 HTTP 响应，不能算 HTTP 200 或应用 5xx。长档应同时报告采样秒数、实际结果数和全部错误数。
+
+隔离栈内的 Redis／Broker 暂停与恢复探针见 [S6 故障冒烟手册](S6_FAULT_SMOKE.md)；它只检验指定故障窗口的响应与数据收敛，不代表完整 S6 容量或跨主机可用性。现有指标的口径与下一轮测试设计见[压测方法学审计](../docs/压测方法学审计-20260928.md)。
 
 正式极限测量应安排公开站可承受的维护窗口，或使用同规格独立目标机；生产站与隔离栈同驻时，结果必须写明资源配额及公开站的并发负载。[Docker Compose 项目隔离说明](https://docs.docker.com/compose/how-tos/project-name/)用于确认容器、网络和卷的命名边界。
 
