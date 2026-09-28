@@ -92,6 +92,7 @@ public class GrabErrandUseCase {
         }
     }
 
+    /** candidateRank is a legacy API name: it is the queue's total size at enqueue, not the runner's sorted position. */
     public record Result(ErrorCode code, boolean grabbed, Long candidateRank) {
         static Result success() {
             return new Result(ErrorCode.OK, true, null);
@@ -153,7 +154,7 @@ public class GrabErrandUseCase {
                 // 并发预占位尚未落库也可能短暂出现这个状态，CAS 仍保证不超卖。
                 Errand current = errandRepository.findById(cmd.errandId()).orElse(null);
                 if (current == null || current.status() != ErrandStatus.PUBLISHED || !current.slotAvailable()) {
-                    return classifyUnavailable(cmd);
+                    return classifyUnavailable(cmd, score);
                 }
                 try {
                     if (grabSlotPort.reservationPending(cmd.errandId())) {
@@ -209,7 +210,7 @@ public class GrabErrandUseCase {
                 Result committed = persistedResult(errand.campusId(), cmd);
                 if (committed != null) return committed;
                 rollbackIfReserved(cmd, reservedInRedis);
-                return classifyUnavailable(cmd);
+                return classifyUnavailable(cmd, score);
             }
             afterCommittedGrab(cmd, errand, reservedInRedis);
             return Result.success();
@@ -248,7 +249,7 @@ public class GrabErrandUseCase {
         }
     }
 
-    private Result classifyUnavailable(Command cmd) {
+    private Result classifyUnavailable(Command cmd, int credit) {
         Errand current = errandRepository.findById(cmd.errandId()).orElse(null);
         if (current == null) return Result.failed(ErrorCode.ERRAND_NOT_FOUND, null);
         if (current.grabberId() != null && current.grabberId() == cmd.runnerId()) {
@@ -256,7 +257,7 @@ public class GrabErrandUseCase {
         }
         if (current.status() == ErrandStatus.LOCKED) {
             try {
-                return Result.failed(ErrorCode.SLOT_FULL, enqueueCandidate(cmd));
+                return Result.failed(ErrorCode.SLOT_FULL, enqueueCandidate(cmd, credit));
             } catch (RuntimeException e) {
                 log.warn("候选排队失败 errandId={} runnerId={}", cmd.errandId(), cmd.runnerId(), e);
                 return Result.failed(ErrorCode.SLOT_FULL, null);
@@ -302,13 +303,11 @@ public class GrabErrandUseCase {
      * score 越小越优先：用时间戳减去信用分加权，让高信用用户略微占先，
      * 加权上限避免高信用用户完全垄断流转机会。
      */
-    private Long enqueueCandidate(Command cmd) {
-        // 信用分权重从后端读（入口处已查过一次，这里再查是为拿最新值——
-        // 单主键查询成本极低，换来的是不依赖入口快照的正确性）
-        int credit = creditRepository.scoreOf(cmd.runnerId());
+    private Long enqueueCandidate(Command cmd, int credit) {
+        // 使用本次资格校验已读取的信用分快照，避免热点失败请求重复查库。
+        // 候选人真正流转时会再次校验资格；排队分数不承诺反映后续信用分变化。
         double creditBonus = Math.min(credit, 100) * 10.0;
         double score = System.currentTimeMillis() - creditBonus;
-        candidateQueue.offer(cmd.errandId(), cmd.runnerId(), score);
-        return candidateQueue.size(cmd.errandId());
+        return candidateQueue.offer(cmd.errandId(), cmd.runnerId(), score);
     }
 }

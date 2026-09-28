@@ -127,6 +127,27 @@ class FundWorkflowUseCaseTest {
     }
 
     @Test
+    void committedSettlementSharesOneCreditSnapshotBetweenRankingAndNotification() {
+        when(errands.findById(55)).thenReturn(Optional.of(errand(55, ErrandStatus.DELIVERED)));
+        when(wallets.findEscrowByErrandId(1, 55)).thenReturn(Optional.of(escrow(55)));
+        when(errands.casSettle(55, 3)).thenReturn(1);
+        when(wallets.casEscrowStatus(eq(1L), eq(55L), any(), any())).thenReturn(1);
+        stubAccounts();
+        when(wallets.casDebit(10, Money.ofCents(1000))).thenReturn(1);
+        when(wallets.casCredit(30, Money.ofCents(950))).thenReturn(1);
+        when(wallets.casCredit(40, Money.ofCents(50))).thenReturn(1);
+        when(credits.scoreOf(2001)).thenReturn(62, 64);
+
+        assertEquals(SettleErrandUseCase.Result.SETTLED, settle.settle(55, 1001));
+
+        assertEquals(1, txManager.commits);
+        verify(credits).applyEvent(any(CreditEvent.class));
+        verify(credits, times(1)).scoreOf(2001);
+        verify(ranking).update(1, 2001, 62);
+        verify(notifier).creditChanged(2001, 62, 2, "完成结算");
+    }
+
+    @Test
     void failedOutboxInsertRollsBackRefundTransaction() {
         when(errands.findById(45)).thenReturn(Optional.of(errand(45, ErrandStatus.PUBLISHED)));
         when(wallets.findEscrowByErrandId(1, 45)).thenReturn(Optional.of(escrow(45)));

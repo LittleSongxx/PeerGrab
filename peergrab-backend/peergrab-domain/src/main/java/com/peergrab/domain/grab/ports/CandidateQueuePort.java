@@ -17,7 +17,8 @@ public interface CandidateQueuePort {
         }
     }
 
-    void offer(long errandId, long runnerId, double score);
+    /** 原子入队，并返回此时可用候选人与在途租约的总数。 */
+    long offer(long errandId, long runnerId, double score);
 
     /** 租约领取当前最优候选人；进程崩溃后租约到期会重新入队。 */
     Optional<Candidate> pollBest(long errandId);

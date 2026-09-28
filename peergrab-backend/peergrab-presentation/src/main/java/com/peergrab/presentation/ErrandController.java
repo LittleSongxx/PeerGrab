@@ -14,6 +14,8 @@ import com.peergrab.shared.Result;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.LinkedHashMap;
@@ -46,6 +48,12 @@ public class ErrandController {
     private final ErrandActionResolver actionResolver;
     private final ErrandRepository errandRepository;
     private final ObjectMapper objectMapper;
+    private final Timer grabSuccessTimer;
+    private final Timer grabSlotFullTimer;
+    private final Timer grabConflictTimer;
+    private final Timer grabRateLimitedTimer;
+    private final Timer grabOtherTimer;
+    private final Timer grabErrorTimer;
 
     public ErrandController(PublishErrandUseCase publishUseCase,
                             GrabErrandUseCase grabUseCase,
@@ -60,7 +68,8 @@ public class ErrandController {
                             GetErrandDetailUseCase detailUseCase,
                             ErrandActionResolver actionResolver,
                             ErrandRepository errandRepository,
-                            ObjectMapper objectMapper) {
+                            ObjectMapper objectMapper,
+                            MeterRegistry meterRegistry) {
         this.publishUseCase = publishUseCase;
         this.grabUseCase = grabUseCase;
         this.confirmUseCase = confirmUseCase;
@@ -75,6 +84,20 @@ public class ErrandController {
         this.actionResolver = actionResolver;
         this.errandRepository = errandRepository;
         this.objectMapper = objectMapper;
+        this.grabSuccessTimer = grabTimer(meterRegistry, "success");
+        this.grabSlotFullTimer = grabTimer(meterRegistry, "slot_full");
+        this.grabConflictTimer = grabTimer(meterRegistry, "conflict");
+        this.grabRateLimitedTimer = grabTimer(meterRegistry, "rate_limited");
+        this.grabOtherTimer = grabTimer(meterRegistry, "other");
+        this.grabErrorTimer = grabTimer(meterRegistry, "error");
+    }
+
+    private static Timer grabTimer(MeterRegistry registry, String outcome) {
+        return Timer.builder("peergrab.grab.usecase")
+                .description("Grab use case duration after authentication, grouped by bounded outcome")
+                .tag("outcome", outcome)
+                .publishPercentileHistogram()
+                .register(registry);
     }
 
     public record PublishRequest(Long campusId, ErrandType type, String title,
@@ -185,8 +208,21 @@ public class ErrandController {
                 errandId, runnerId,
                 requestId == null ? UUID.randomUUID().toString() : requestId,
                 60);
-        GrabErrandUseCase.Result result = grabUseCase.grab(cmd);
-        return result.grabbed() ? Result.ok(result) : Result.fail(result.code(), result);
+        long started = System.nanoTime();
+        Timer timer = grabErrorTimer;
+        try {
+            GrabErrandUseCase.Result result = grabUseCase.grab(cmd);
+            timer = switch (result.code()) {
+                case OK -> grabSuccessTimer;
+                case SLOT_FULL -> grabSlotFullTimer;
+                case GRAB_CONFLICT -> grabConflictTimer;
+                case GRAB_RATE_LIMITED -> grabRateLimitedTimer;
+                default -> grabOtherTimer;
+            };
+            return result.grabbed() ? Result.ok(result) : Result.fail(result.code(), result);
+        } finally {
+            timer.record(System.nanoTime() - started, java.util.concurrent.TimeUnit.NANOSECONDS);
+        }
     }
 
     @PostMapping("/{errandId}/confirm")

@@ -188,6 +188,37 @@ class GrabErrandUseCaseTest {
         verify(slot).rollback(errand.id(), 2001L, "quota-request");
     }
 
+    @Test
+    @DisplayName("候选入队复用已校验信用分和 Lua 返回的队列大小")
+    void failed_grab_uses_atomic_candidate_size_without_extra_reads() {
+        var slot = mock(GrabSlotPort.class);
+        var records = mock(GrabRecordRepository.class);
+        var errands = mock(ErrandRepository.class);
+        var queue = mock(CandidateQueuePort.class);
+        var credit = mock(CreditRepository.class);
+        var errand = Errand.rehydrate(10001L, 1L, 1001L, ErrandType.DELIVERY,
+                "测试任务", Money.ofCents(100), 1, 2001L, ErrandStatus.LOCKED,
+                1, 0, 2L, java.time.Instant.now());
+        when(errands.findById(errand.id())).thenReturn(Optional.of(errand));
+        when(records.findRunnerByRequestId(1L, errand.id(), "candidate-request")).thenReturn(Optional.empty());
+        when(credit.scoreOf(2002L)).thenReturn(60);
+        when(slot.tryAcquire(errand.id(), 2002L, "candidate-request")).thenReturn(SlotOutcome.SLOT_FULL);
+        when(queue.offer(eq(errand.id()), eq(2002L), anyDouble())).thenReturn(7L);
+        var useCase = new GrabErrandUseCase(slot, records, queue, errands,
+                mock(GrabTransactionalStep.class), new SnowflakeIdGenerator(1),
+                mock(TimeoutTransferUseCase.class), mock(CacheEvictSupport.class),
+                credit, new NoopErrandQueryPort(), 40, 5,
+                new NoopRealtimeNotifier(), (id, runner) -> true);
+
+        var result = useCase.grab(new GrabErrandUseCase.Command(errand.id(), 2002L, "candidate-request"));
+
+        assertEquals(ErrorCode.SLOT_FULL, result.code());
+        assertEquals(7L, result.candidateRank());
+        verify(credit).scoreOf(2002L);
+        verify(queue).offer(eq(errand.id()), eq(2002L), anyDouble());
+        verify(queue, never()).size(anyLong());
+    }
+
     private static Errand publishedErrand() {
         Errand errand = Errand.draft(10001L, 1L, 1001L, ErrandType.DELIVERY,
                 "测试任务", Money.ofCents(100), 1);
@@ -254,7 +285,7 @@ class GrabErrandUseCaseTest {
     }
 
     private static final class NoopCandidateQueue implements CandidateQueuePort {
-        @Override public void offer(long errandId, long runnerId, double score) {}
+        @Override public long offer(long errandId, long runnerId, double score) { return 0; }
         @Override public Optional<Candidate> pollBest(long errandId) { return Optional.empty(); }
         @Override public void acknowledge(long errandId, Candidate candidate) {}
         @Override public void release(long errandId, Candidate candidate) {}

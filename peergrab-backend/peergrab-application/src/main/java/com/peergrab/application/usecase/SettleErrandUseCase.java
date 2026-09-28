@@ -135,9 +135,11 @@ public class SettleErrandUseCase {
             // 所以 evictAfterCommit 会走"无事务上下文"分支立即删除
             cacheEvict.evictAfterCommit(errandId);
             // 排行榜是展示层：事务提交后更新，Redis 失败由每日校准 job 自愈
+            Integer runnerScore = errand.grabberId() == null
+                    ? null : creditRepository.scoreOf(errand.grabberId());
             if (errand.grabberId() != null) {
                 creditRankingPort.update(errand.campusId(), errand.grabberId(),
-                        creditRepository.scoreOf(errand.grabberId()));
+                        runnerScore);
             }
             auditPort.record(bizNo, "SETTLE", errandId, operatorId,
                     String.format("{\"runner\":%d,\"commission\":%d}", runnerCents, commissionCents),
@@ -147,7 +149,7 @@ public class SettleErrandUseCase {
                     com.peergrab.domain.errand.model.ErrandStatus.SETTLED.name(), errand.round());
             if (errand.grabberId() != null) {
                 notifier.creditChanged(errand.grabberId(),
-                        creditRepository.scoreOf(errand.grabberId()),
+                        runnerScore,
                         com.peergrab.domain.credit.model.CreditEventType.SETTLE.delta(),
                         "完成结算");
             }

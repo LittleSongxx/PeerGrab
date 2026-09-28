@@ -6,24 +6,36 @@ import com.peergrab.domain.wallet.model.LedgerEntry;
 import com.peergrab.domain.wallet.model.WalletAccount;
 import com.peergrab.domain.wallet.ports.WalletRepository;
 import com.peergrab.shared.Money;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.TimeUnit;
 
 @Repository
 public class JdbcWalletRepository implements WalletRepository {
 
     private final JdbcTemplate jdbc;
+    private final Timer accountLockTimer;
 
-    public JdbcWalletRepository(JdbcTemplate jdbc) {
+    public JdbcWalletRepository(JdbcTemplate jdbc, MeterRegistry registry) {
         this.jdbc = jdbc;
+        this.accountLockTimer = Timer.builder("peergrab.wallet.account.lock")
+                .description("Time to fetch and lock all participating wallet rows, including SQL and lock wait")
+                .serviceLevelObjectives(Duration.ofMillis(1), Duration.ofMillis(5),
+                        Duration.ofMillis(10), Duration.ofMillis(25), Duration.ofMillis(50),
+                        Duration.ofMillis(100), Duration.ofMillis(250), Duration.ofMillis(500),
+                        Duration.ofSeconds(1))
+                .register(registry);
     }
 
     private static final RowMapper<WalletAccount> MAPPER = (rs, n) -> new WalletAccount(
@@ -47,13 +59,18 @@ public class JdbcWalletRepository implements WalletRepository {
         if (!TransactionSynchronizationManager.isActualTransactionActive()) {
             throw new IllegalStateException("wallet account locks require an active transaction");
         }
-        Map<Long, WalletAccount> locked = new LinkedHashMap<>();
-        Arrays.stream(accountIds).distinct().sorted().forEach(id -> {
-            List<WalletAccount> rows = jdbc.query(
-                    "SELECT * FROM wallet_account WHERE id = ? FOR UPDATE", MAPPER, id);
-            if (!rows.isEmpty()) locked.put(id, rows.get(0));
-        });
-        return locked;
+        long started = System.nanoTime();
+        try {
+            Map<Long, WalletAccount> locked = new LinkedHashMap<>();
+            Arrays.stream(accountIds).distinct().sorted().forEach(id -> {
+                List<WalletAccount> rows = jdbc.query(
+                        "SELECT * FROM wallet_account WHERE id = ? FOR UPDATE", MAPPER, id);
+                if (!rows.isEmpty()) locked.put(id, rows.get(0));
+            });
+            return locked;
+        } finally {
+            accountLockTimer.record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
+        }
     }
 
     /**

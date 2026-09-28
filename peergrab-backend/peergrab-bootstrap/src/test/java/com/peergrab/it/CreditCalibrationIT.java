@@ -5,6 +5,7 @@ import com.peergrab.domain.credit.model.CreditEvent;
 import com.peergrab.domain.credit.model.CreditEventType;
 import com.peergrab.domain.credit.ports.CreditRepository;
 import com.peergrab.infrastructure.persistence.JdbcCreditRepository;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.*;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -84,7 +85,7 @@ class CreditCalibrationIT {
             }
         };
 
-        int changed = new JdbcCreditRepository(interleavingJdbc)
+        int changed = new JdbcCreditRepository(interleavingJdbc, new SimpleMeterRegistry())
                 .calibrateScores(CreditEventType.WINDOW_DAYS, 100);
 
         assertEquals(0, changed, "并发业务事件已修正快照，校准不能再覆盖它");

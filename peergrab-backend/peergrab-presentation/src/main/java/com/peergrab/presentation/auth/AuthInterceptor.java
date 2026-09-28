@@ -1,6 +1,8 @@
 package com.peergrab.presentation.auth;
 
 import com.peergrab.domain.auth.ports.AuthPort;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.beans.factory.annotation.Value;
@@ -25,11 +27,26 @@ public class AuthInterceptor implements HandlerInterceptor {
 
     private final AuthPort authPort;
     private final boolean allowHeaderIdentity;
+    private final Timer acceptedResolve;
+    private final Timer rejectedResolve;
+    private final Timer failedResolve;
 
     public AuthInterceptor(AuthPort authPort,
-                           @Value("${peergrab.auth.allow-header-identity:false}") boolean allowHeaderIdentity) {
+                           @Value("${peergrab.auth.allow-header-identity:false}") boolean allowHeaderIdentity,
+                           MeterRegistry registry) {
         this.authPort = authPort;
         this.allowHeaderIdentity = allowHeaderIdentity;
+        this.acceptedResolve = resolveTimer(registry, "accepted");
+        this.rejectedResolve = resolveTimer(registry, "rejected");
+        this.failedResolve = resolveTimer(registry, "error");
+    }
+
+    private static Timer resolveTimer(MeterRegistry registry, String outcome) {
+        return Timer.builder("peergrab.auth.resolve")
+                .description("Bearer authentication resolution, including the session store lookup")
+                .tag("outcome", outcome)
+                .publishPercentileHistogram()
+                .register(registry);
     }
 
     @Override
@@ -52,8 +69,15 @@ public class AuthInterceptor implements HandlerInterceptor {
         if (userId == null) {
             String auth = req.getHeader("Authorization");
             if (auth != null && auth.startsWith("Bearer ")) {
-                Optional<Long> resolved = authPort.resolve(auth.substring(7).trim());
-                userId = resolved.orElse(null);
+                long started = System.nanoTime();
+                Timer timer = failedResolve;
+                try {
+                    Optional<Long> resolved = authPort.resolve(auth.substring(7).trim());
+                    userId = resolved.orElse(null);
+                    timer = userId == null ? rejectedResolve : acceptedResolve;
+                } finally {
+                    timer.record(System.nanoTime() - started, java.util.concurrent.TimeUnit.NANOSECONDS);
+                }
             }
         }
 

@@ -38,9 +38,13 @@ public class RedisCandidateQueueAdapter implements CandidateQueuePort {
     }
 
     @Override
-    public void offer(long errandId, long runnerId, double score) {
-        redis.execute(OFFER_SCRIPT, keys(errandId),
+    public long offer(long errandId, long runnerId, double score) {
+        Long size = redis.execute(OFFER_SCRIPT, keys(errandId),
                 String.valueOf(score), String.valueOf(runnerId), String.valueOf(ttlSeconds));
+        if (size == null) {
+            throw new IllegalStateException("候选入队脚本未返回队列大小");
+        }
+        return size;
     }
 
     @Override

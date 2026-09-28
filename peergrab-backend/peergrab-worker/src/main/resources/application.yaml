@@ -34,6 +34,8 @@ peergrab:
     max-transfer-rounds: 5      # 防无限流转：超过则回退让所有人重新抢        # 生产 5 分钟；测试用 10 秒
     scan-interval-ms: 5000
     scan-grace-seconds: 2       # 宽限期：让 MQ 主通道先处理
+    scan-max-batches: 5         # 同一轮最多连续处理 5 页，每页 200 条
+    scan-max-run-ms: 10000      # 新到期任务扫描最多 10 秒；前置的失败重试另有 50 条上限
   message:
     retry-interval-ms: 10000
   credit:

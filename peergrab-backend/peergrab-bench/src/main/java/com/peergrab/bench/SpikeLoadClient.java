@@ -6,19 +6,22 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.EnumMap;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * S1 尖峰抢单压测客户端。
  *
  * 为什么自研而不用 JMeter：
  *   1. 本机没装 JMeter/wrk，自研客户端零外部依赖，任何人 clone 下来就能跑
- *   2. CountDownLatch 对齐释放比 JMeter 的 Synchronizing Timer 更可控，
- *      能保证 N 个请求真正在同一时刻发出
+ *   2. CountDownLatch 同时放行虚拟线程；实际 send 开始时间仍受客户端调度影响，
+ *      因此单独记录放行到 send 的延迟
  *   3. 压完能直接连数据库跑校验 SQL，不需要在两个工具间来回切
  * 阶梯加压出 QPS 曲线（S2）后续用 Docker 版 JMeter，那才是它的强项。
  *
@@ -66,8 +69,8 @@ public class SpikeLoadClient {
         List<Long> trackedErrands = new ArrayList<>();
         System.out.println("[run] runId=" + runId);
 
-        // 预热：让 JIT 编译热点方法、连接池填满。不预热的话前 30 秒数据惨不忍睹，
-        // 但那不是应用的真实性能。
+        // 串行预热应用/JIT 和少量可复用连接；并未预建 2,000 条并发连接，
+        // 因此尖峰结果仍包含发压端的连接建立与调度成本。
         System.out.println("[warmup] 串行发布并抢取 30 个任务，预热发布与抢单路径...");
         warmup(client, baseUrl, trackedErrands, publisherToken, tokens);
         // Session fixture creation is setup work; exclude it from the timed spike.
@@ -87,14 +90,22 @@ public class SpikeLoadClient {
         AtomicInteger error = new AtomicInteger();
         // 错误必须分类统计：不区分类型就无法判断瓶颈在发压端还是被压端
         java.util.Map<String, AtomicInteger> errorTypes = new java.util.concurrent.ConcurrentHashMap<>();
-        List<Long> latencies = Collections.synchronizedList(new ArrayList<>(concurrency));
+        // Each virtual thread writes only its own slot. Shared collection locks would
+        // distort exactly the client dispatch and response phases being measured.
+        long[] latencies = new long[concurrency];
+        long[] dispatchLags = new long[concurrency];
+        long[] releaseToComplete = new long[concurrency];
+        Outcome[] outcomes = new Outcome[concurrency];
+        Arrays.fill(latencies, -1);
 
         CountDownLatch ready = new CountDownLatch(concurrency);
         CountDownLatch fire = new CountDownLatch(1);
         CountDownLatch done = new CountDownLatch(concurrency);
+        AtomicLong releaseNanos = new AtomicLong();
 
         try (ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor()) {
             for (int i = 0; i < concurrency; i++) {
+                int runnerIndex = i;
                 String runnerToken = runnerTokens[i];
                 pool.submit(() -> {
                     HttpRequest req = HttpRequest.newBuilder()
@@ -107,21 +118,28 @@ public class SpikeLoadClient {
                             .build();
                     ready.countDown();
                     try {
-                        fire.await();   // 所有线程在这里对齐，开闸即瞬时并发
+                        fire.await();   // 同时放行，实际 send 开始时间另行统计
+                        long releaseAt = releaseNanos.get();
                         long t0 = System.nanoTime();
+                        HttpResponse<String> resp;
                         try {
-                            HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString());
-                            switch (classifyResponse(resp.statusCode(), resp.body())) {
-                                case SUCCESS -> success.incrementAndGet();
-                                case SLOT_FULL -> slotFull.incrementAndGet();
-                                case GRAB_CONFLICT -> conflict.incrementAndGet();
-                                case RATE_LIMITED -> rateLimited.incrementAndGet();
-                                case ERROR -> error.incrementAndGet();
-                            }
+                            resp = client.send(req, HttpResponse.BodyHandlers.ofString());
                         } finally {
-                            latencies.add((System.nanoTime() - t0) / 1_000_000);
+                            long finishedAt = System.nanoTime();
+                            latencies[runnerIndex] = TimeUnit.NANOSECONDS.toMillis(finishedAt - t0);
+                            dispatchLags[runnerIndex] = TimeUnit.NANOSECONDS.toMillis(t0 - releaseAt);
+                            releaseToComplete[runnerIndex] = TimeUnit.NANOSECONDS.toMillis(finishedAt - releaseAt);
+                        }
+                        outcomes[runnerIndex] = classifyResponse(resp.statusCode(), resp.body());
+                        switch (outcomes[runnerIndex]) {
+                            case SUCCESS -> success.incrementAndGet();
+                            case SLOT_FULL -> slotFull.incrementAndGet();
+                            case GRAB_CONFLICT -> conflict.incrementAndGet();
+                            case RATE_LIMITED -> rateLimited.incrementAndGet();
+                            case ERROR -> error.incrementAndGet();
                         }
                     } catch (Exception e) {
+                        outcomes[runnerIndex] = Outcome.ERROR;
                         error.incrementAndGet();
                         String type = e.getClass().getSimpleName()
                                 + (e.getMessage() == null ? "" : ": " + e.getMessage());
@@ -136,14 +154,28 @@ public class SpikeLoadClient {
                 throw new IllegalStateException("线程未在 60s 内就绪");
             }
             long start = System.currentTimeMillis();
+            releaseNanos.set(System.nanoTime());
             fire.countDown();
             if (!done.await(180, TimeUnit.SECONDS)) {
                 throw new IllegalStateException("压测未在 180s 内完成");
             }
             long elapsed = System.currentTimeMillis() - start;
 
-            List<Long> sorted = new ArrayList<>(latencies);
+            List<Long> sorted = new ArrayList<>(concurrency);
+            List<Long> sortedDispatch = new ArrayList<>(concurrency);
+            List<Long> sortedFromRelease = new ArrayList<>(concurrency);
+            EnumMap<Outcome, List<Long>> outcomeLatencies = new EnumMap<>(Outcome.class);
+            for (Outcome outcome : Outcome.values()) outcomeLatencies.put(outcome, new ArrayList<>());
+            for (int i = 0; i < concurrency; i++) {
+                if (latencies[i] < 0) continue;
+                sorted.add(latencies[i]);
+                sortedDispatch.add(dispatchLags[i]);
+                sortedFromRelease.add(releaseToComplete[i]);
+                outcomeLatencies.get(outcomes[i]).add(latencies[i]);
+            }
             Collections.sort(sorted);
+            Collections.sort(sortedDispatch);
+            Collections.sort(sortedFromRelease);
             System.out.println("================ S1 尖峰抢单结果 ================");
             System.out.printf("并发数        : %d%n", concurrency);
             System.out.printf("名额总数      : %d%n", slotTotal);
@@ -164,6 +196,21 @@ public class SpikeLoadClient {
             if (!sorted.isEmpty()) {
                 System.out.printf("延迟 P50/P95/P99/Max : %d / %d / %d / %d ms%n",
                         pct(sorted, 50), pct(sorted, 95), pct(sorted, 99), sorted.get(sorted.size() - 1));
+            }
+            if (!sortedDispatch.isEmpty()) {
+                System.out.printf("放行到 send P50/P99/Max : %d / %d / %d ms%n",
+                        pct(sortedDispatch, 50), pct(sortedDispatch, 99),
+                        sortedDispatch.get(sortedDispatch.size() - 1));
+                System.out.printf("放行到完成 P50/P99/Max : %d / %d / %d ms%n",
+                        pct(sortedFromRelease, 50), pct(sortedFromRelease, 99),
+                        sortedFromRelease.get(sortedFromRelease.size() - 1));
+            }
+            for (Outcome outcome : Outcome.values()) {
+                List<Long> subset = new ArrayList<>(outcomeLatencies.get(outcome));
+                if (subset.isEmpty()) continue;
+                Collections.sort(subset);
+                System.out.printf("%-16s n=%d P50/P95/P99=%d/%d/%d ms%n", outcome,
+                        subset.size(), pct(subset, 50), pct(subset, 95), pct(subset, 99));
             }
             System.out.println("errandId=" + errandId);
             System.out.println("runId=" + runId + "（校验：RUN_ID=" + runId + " bench/scripts/verify_run.sql）");

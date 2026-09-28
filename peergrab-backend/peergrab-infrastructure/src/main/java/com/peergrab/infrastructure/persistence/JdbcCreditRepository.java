@@ -4,24 +4,44 @@ import com.peergrab.domain.credit.model.CreditEvent;
 import com.peergrab.domain.credit.model.CreditEventType;
 import com.peergrab.domain.credit.model.CreditScore;
 import com.peergrab.domain.credit.ports.CreditRepository;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.sql.Timestamp;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.TimeUnit;
 
 @Repository
 public class JdbcCreditRepository implements CreditRepository {
 
     private final JdbcTemplate jdbc;
+    private final Timer scoreAcquireTimer;
+    private final Timer applyReplayTimer;
 
-    public JdbcCreditRepository(JdbcTemplate jdbc) {
+    public JdbcCreditRepository(JdbcTemplate jdbc, MeterRegistry registry) {
         this.jdbc = jdbc;
+        this.scoreAcquireTimer = Timer.builder("peergrab.credit.score.acquire")
+                .description("Time to create or lock the credit_score row before applying an event")
+                .serviceLevelObjectives(Duration.ofMillis(1), Duration.ofMillis(5),
+                        Duration.ofMillis(10), Duration.ofMillis(25), Duration.ofMillis(50),
+                        Duration.ofMillis(100), Duration.ofMillis(250), Duration.ofMillis(500),
+                        Duration.ofSeconds(1))
+                .register(registry);
+        this.applyReplayTimer = Timer.builder("peergrab.credit.apply.replay")
+                .description("Time to replay recent credit events inside applyEvent")
+                .serviceLevelObjectives(Duration.ofMillis(1), Duration.ofMillis(5),
+                        Duration.ofMillis(10), Duration.ofMillis(25), Duration.ofMillis(50),
+                        Duration.ofMillis(100), Duration.ofMillis(250), Duration.ofMillis(500),
+                        Duration.ofSeconds(1))
+                .register(registry);
     }
 
     @Override
@@ -51,10 +71,17 @@ public class JdbcCreditRepository implements CreditRepository {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public boolean applyEvent(CreditEvent event) {
-        jdbc.update("INSERT IGNORE INTO credit_score (user_id, score, version) VALUES (?, ?, 0)",
-                event.userId(), CreditEventType.BASE_SCORE);
-        jdbc.queryForObject("SELECT score FROM credit_score WHERE user_id = ? FOR UPDATE",
-                Integer.class, event.userId());
+        // This measures both INSERT IGNORE and the locking read: either statement may wait
+        // for another transaction on the same user's score row.
+        long acquireStart = System.nanoTime();
+        try {
+            jdbc.update("INSERT IGNORE INTO credit_score (user_id, score, version) VALUES (?, ?, 0)",
+                    event.userId(), CreditEventType.BASE_SCORE);
+            jdbc.queryForObject("SELECT score FROM credit_score WHERE user_id = ? FOR UPDATE",
+                    Integer.class, event.userId());
+        } finally {
+            scoreAcquireTimer.record(System.nanoTime() - acquireStart, TimeUnit.NANOSECONDS);
+        }
         try {
             jdbc.update("""
                     INSERT INTO credit_event (id, biz_no, user_id, type, delta, ref_type, ref_id)
@@ -66,7 +93,8 @@ public class JdbcCreditRepository implements CreditRepository {
             // biz_no 已存在：重复事件，幂等跳过（不更新分数）
             return false;
         }
-        int score = replayScore(event.userId(), CreditEventType.WINDOW_DAYS, true);
+        int score = applyReplayTimer.record(() ->
+                replayScore(event.userId(), CreditEventType.WINDOW_DAYS, true));
         jdbc.update("UPDATE credit_score SET score = ?, version = version + 1 WHERE user_id = ?",
                 score, event.userId());
         return true;
