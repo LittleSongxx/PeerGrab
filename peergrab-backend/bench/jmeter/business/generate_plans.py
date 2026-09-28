@@ -183,18 +183,21 @@ def s3_read():
 
 def s3_mixed():
     root, tree = plan("PeerGrab S3 publish and read nine times")
-    t = group(tree, "S3 mixed 1 write + 9 reads", "${__P(threads,50)}",
-              loops="${__P(iterations,10)}")
+    t = group(tree, "S3 mixed 1 write + 9 reads", "${__P(threads,50)}")
     csv(t, "s3_mixed_csv", "token,request_id")
-    headers(t, "${request_id}")
-    request(t, "S3 publish", "POST", "/api/errands",
+    # JMeter 5.6.3 does not reinitialize a finished nested LoopController
+    # for every parent cycle in this plan. Keep one explicit outer cycle and
+    # nine consecutive samplers so every publish is followed by nine reads.
+    headers(t)
+    cycle, cycle_tree = pair(t, "LoopController", "Repeated publish/read cycles", "LoopControlPanel")
+    prop(cycle, "bool", "LoopController.continue_forever", "false")
+    prop(cycle, "string", "LoopController.loops", "${__P(iterations,10)}")
+    request(cycle_tree, "S3 publish", "POST", "/api/errands",
             '{"title":"jmeter_${__P(run_id)}_${__threadNum}_${__counter(TRUE)}","rewardCents":100,"slotTotal":1}',
             S3_PUBLISH_CHECK)
-    loop, loop_tree = pair(t, "LoopController", "Nine same-ID detail reads", "LoopControlPanel")
-    prop(loop, "bool", "LoopController.continue_forever", "false")
-    prop(loop, "string", "LoopController.loops", "9")
-    request(loop_tree, "S3 read after write", "GET", "/api/errands/${errand_id}",
-            classification=S3_MIXED_READ_CHECK)
+    for _ in range(9):
+        request(cycle_tree, "S3 read after write", "GET", "/api/errands/${errand_id}",
+                classification=S3_MIXED_READ_CHECK)
     return root
 
 

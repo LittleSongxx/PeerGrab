@@ -53,6 +53,7 @@ import groovy.json.JsonSlurper
 try {
     def payload = new JsonSlurper().parse(prev.getResponseData())
     if (prev.getResponseCode() != '200' || payload?.code != 'OK' ||
+            payload?.data?.id?.toString() != props.getProperty('benchErrandId', '0') ||
             !(payload?.data?.status in ['PUBLISHED', 'LOCKED'])) {
         AssertionResult.setFailure(true)
         AssertionResult.setFailureMessage('Unexpected S6 detail status')

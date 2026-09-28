@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 from types import SimpleNamespace
 import time
 import tempfile
@@ -108,10 +108,15 @@ class S6SafetyTest(unittest.TestCase):
                 jtl.write_text("timeStamp,elapsed,label,responseCode,success,bytes,sentBytes,"
                                "grpThreads,allThreads,Latency,IdleTime,Connect\n"
                                "1790000000000,17,S6-detail,200,true,100,100,1,1,15,0,5\n")
-                return SimpleNamespace(wait=lambda timeout: 0)
+                return SimpleNamespace(pid=1234, wait=lambda timeout: 0)
+
+            def no_remaining_group(_pid, sig):
+                if sig == 0:
+                    raise ProcessLookupError
 
             with patch.object(s6, "RUNS", private), \
                     patch.object(s6.subprocess, "Popen", side_effect=fake_popen), \
+                    patch.object(s6.os, "killpg", side_effect=no_remaining_group), \
                     patch.dict(s6.os.environ, {"HTTP_PROXY": "http://example.invalid"}, clear=False):
                 result = s6.jmeter_detail_phase("http://127.0.0.1:28080", "private-token",
                                                 7, 1, "before", executable)
@@ -143,8 +148,16 @@ class S6SafetyTest(unittest.TestCase):
                 with self.assertRaisesRegex(s6.Refused, "bounded time limit"):
                     s6.jmeter_detail_phase("http://127.0.0.1:28080", "private-token",
                                            7, 1, "paused", binary)
-            killpg.assert_called_once_with(1234, s6.signal.SIGTERM)
-            self.assertEqual(2, process.waits)
+            self.assertEqual([call(1234, s6.signal.SIGTERM), call(1234, 0),
+                              call(1234, s6.signal.SIGKILL)], killpg.call_args_list)
+            self.assertEqual(3, process.waits)
+
+    def test_jmeter_fault_phase_rejects_severe_target_rate_shortfall(self):
+        self.assertTrue(s6.jmeter_count_gate(8, 10, 5)["grossUnderproduction"])
+        self.assertTrue(s6.jmeter_count_gate(100, 10, 18)["grossUnderproduction"])
+        self.assertFalse(s6.jmeter_count_gate(45, 10, 5)["grossUnderproduction"])
+        self.assertFalse(s6.jmeter_count_gate(180, 10, 18)["grossUnderproduction"])
+        self.assertTrue(s6.jmeter_count_gate(60, 10, 5)["grossOverproduction"])
 
     def test_publish_id_accepts_json_decimal_string_without_precision_loss(self):
         snowflake = "1902319203123456789"

@@ -15,6 +15,8 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
+import statistics
 import subprocess
 import sys
 import threading
@@ -29,13 +31,37 @@ import jtl_summary as jtl
 
 
 ROOT = Path(__file__).resolve().parent
-PLAN = ROOT / "cursor-first.jmx"
+PLAN = ROOT / "cursor-first-pooled.jmx"
 PROPERTIES = ROOT / "results.properties"
 WORKLOAD = "/api/errands?campusId=1&cursor=&size=20"
 WORKLOAD_VERSION = "square-cursor-first-jmeter-v1"
 VERSION = "5.6.3"
 TEST_START = re.compile(rb"Starting standalone test @[^\n]*\((\d{13})\)")
 MAX_CONSOLE_BYTES = 2_000_000
+TAIL_SECONDS = 10
+
+
+def stop_jmeter_process_group(process):
+    """Stop Apache's shell launcher and its Java child as one bounded unit."""
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+    # The launcher shell can exit before a Java child. A completed wait() on
+    # the shell alone does not prove its process group stopped.
+    try:
+        os.killpg(process.pid, 0)
+    except ProcessLookupError:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait(timeout=5)
 
 
 def parse_args(argv=None):
@@ -70,8 +96,9 @@ def parse_args(argv=None):
 def validate(args):
     args.direct = True
     guard.validate_config(args)
-    if any(rate * (args.warmup + args.sample) > 500_000 for rate in args.rates):
-        raise guard.Refused("Each JMeter round is limited to 500,000 nominal arrivals")
+    if any(rate * (args.warmup + args.sample + TAIL_SECONDS) > 500_000
+           for rate in args.rates):
+        raise guard.Refused("Each JMeter round including tail is limited to 500,000 arrivals")
     if args.execute and args.confirm_project != args.project:
         raise guard.Refused("--execute requires --confirm-project matching --project")
     if args.execute and not args.jmeter.is_file():
@@ -178,6 +205,8 @@ def run_jmeter(args, identity, token, rate, round_number, folder):
                "-JbenchHost=www.peergrab.cn", "-JbenchPort=443", "-JbenchScheme=https",
                f"-JbenchRate={rate}", f"-JbenchWarmup={args.warmup}",
                f"-JbenchSample={args.sample}", f"-JbenchTimeoutMs={args.timeout_ms}",
+               f"-JbenchPerMinute={rate * 60}", "-JbenchUsers=128",
+               f"-JbenchTotalSeconds={args.warmup + args.sample + TAIL_SECONDS}",
                "-JbenchPrelude=3", "-Jsample_variables=benchStartMs",
                "-Jjmeterengine.nongui.port=1000", "-Lorg.apache.jmeter.threads.JMeterThread=WARN"]
     env = clean_env(token, prefix, args.heap_mb)
@@ -190,7 +219,8 @@ def run_jmeter(args, identity, token, rate, round_number, folder):
     old_umask = os.umask(0o077)
     try:
         process = subprocess.Popen(command, cwd=folder, env=env,
-                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                   start_new_session=True)
     finally:
         os.umask(old_umask)
 
@@ -213,7 +243,8 @@ def run_jmeter(args, identity, token, rate, round_number, folder):
     watcher = threading.Thread(target=watch_stack, daemon=True)
     reader.start()
     watcher.start()
-    deadline = time.monotonic() + 3 + args.warmup + args.sample + args.timeout_ms / 1000 + 60
+    deadline = (time.monotonic() + 3 + args.warmup + args.sample + TAIL_SECONDS
+                + args.timeout_ms / 1000 + 60)
     try:
         previous = None
         while process.poll() is None:
@@ -237,7 +268,7 @@ def run_jmeter(args, identity, token, rate, round_number, folder):
         if not match:
             raise guard.Refused("JMeter did not report a test start timestamp")
         console_start_ms = int(match.group(1))
-        rows = jtl.read_jtl(jtl_path, expected_labels={"S2-warmup", "S2-sample"},
+        rows = jtl.read_jtl(jtl_path, expected_labels={"S2-warmup", "S2-sample", "S2-tail"},
                             max_rows=500_000)
         exact_starts = {row.get("benchStartMs") for row in rows}
         if (len(exact_starts) != 1 or None in exact_starts
@@ -250,9 +281,9 @@ def run_jmeter(args, identity, token, rate, round_number, folder):
         sample = jtl.summarize_rows(rows, label="S2-sample",
                                     duration_seconds=args.sample,
                                     test_start_ms=test_start_ms + (3 + args.warmup) * 1000)
-        warm["arrivalCountCheck"] = jtl.random_arrival_count_check(
+        warm["targetCountCheck"] = jtl.paced_target_count_check(
             warm["samplesStarted"], rate, args.warmup)
-        sample["arrivalCountCheck"] = jtl.random_arrival_count_check(
+        sample["targetCountCheck"] = jtl.paced_target_count_check(
             sample["samplesStarted"], rate, args.sample)
         warm["arrivalPacing"] = jtl.per_second_pacing_check(warm, rate)
         sample["arrivalPacing"] = jtl.per_second_pacing_check(sample, rate)
@@ -261,28 +292,37 @@ def run_jmeter(args, identity, token, rate, round_number, folder):
                 "startedAtUtc": started_at, "endedAtUtc": datetime.now(timezone.utc).isoformat(),
                 "jtlFile": jtl_path.name, "privateLogFile": log_path.name,
                 "warmup": warm, "sample": sample,
+                "tail": {"samplesStarted": sum(row["label"] == "S2-tail" for row in rows),
+                         "failedSamples": sum(row["label"] == "S2-tail" and not row["success"]
+                                              for row in rows)},
                 "generator": {"sampleCount": len(resource),
                               "maxRssMiB": round(max((x["rssKiB"] for x in resource), default=0) / 1024, 2),
                               "maxOpenFds": max((x["openFds"] for x in resource), default=0),
+                              "medianCpuPercentOneCore": round(statistics.median(
+                                  [x["cpuPercentOneCore"] for x in resource
+                                   if x["cpuPercentOneCore"] is not None]), 2)
+                                  if any(x["cpuPercentOneCore"] is not None for x in resource) else None,
                               "maxCpuPercentOneCore": max((x["cpuPercentOneCore"] or 0 for x in resource),
                                                           default=0)}}
     finally:
         stop.set()
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
+        # The stock bin/jmeter launcher forks Java rather than exec'ing it.
+        # An exited shell is not proof that its Java child is gone.
+        stop_jmeter_process_group(process)
         reader.join(timeout=5)
         watcher.join(timeout=40)
 
 
 def degraded(phase):
     return (phase["failedSamples"] > 0 or phase["outsideScheduledWindowBeyond100Ms"] > 0
-            or phase["arrivalCountCheck"]["grossUnderproduction"]
+            or phase["targetCountCheck"]["grossUnderproduction"]
             or bool(phase["arrivalPacing"]["badSeconds"]))
+
+
+def round_degraded(result):
+    # A fixed pool ramps during warmup, so the first second may be below the
+    # target. Keep its facts in the report, but judge steady pacing on sample.
+    return result["warmup"]["failedSamples"] > 0 or degraded(result["sample"])
 
 
 def main(argv=None):
@@ -300,7 +340,7 @@ def main(argv=None):
         folder.mkdir(mode=0o700, parents=True, exist_ok=False)
         manifest_path = folder / "summary.json"
         manifest = {"project": args.project, "generator": "Apache JMeter 5.6.3",
-                    "model": "experimental Open Model random arrivals",
+                    "model": "128 persistent users paced by Constant Throughput Timer",
                     "transport": "verified public HTTPS to disposable stack",
                     "workload": WORKLOAD, "workloadVersion": WORKLOAD_VERSION,
                     "seedCount": count,
@@ -328,7 +368,7 @@ def main(argv=None):
                     print(f"{rate} target RPS round {number}: started {sample['samplesStarted']}, "
                           f"successful {sample['successfulSamples']}, "
                           f"all-attempt P99 {sample['allP99Ms']} ms")
-                    if degraded(result["warmup"]) or degraded(sample):
+                    if round_degraded(result):
                         manifest["status"] = "DEGRADED"
                         save()
                         print("Stopped at first degraded round; inspect private evidence.")

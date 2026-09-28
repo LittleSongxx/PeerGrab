@@ -343,6 +343,37 @@ def detail_phase(base_url, token, errand_id, seconds, phase):
             "maxMs": max((item["latencyMs"] for item in results), default=None)}
 
 
+def stop_jmeter_process_group(process):
+    """Reap the launcher and any Java process remaining in its private group."""
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, 0)
+    except ProcessLookupError:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait(timeout=2)
+
+
+def jmeter_count_gate(count, rate, seconds):
+    """Small fault phases need a tighter realized-rate gate than 6σ."""
+    expected = rate * seconds
+    minimum = (expected * 9 + 9) // 10
+    maximum = expected * 11 // 10
+    return {"nominalExpected": expected, "minimumAccepted": minimum,
+            "maximumAccepted": maximum, "grossUnderproduction": count < minimum,
+            "grossOverproduction": count > maximum}
+
+
 def jmeter_detail_phase(base_url, token, errand_id, seconds, phase, jmeter_bin):
     """Run one bounded HTTP read phase with JMeter; fault control stays in Python.
 
@@ -385,23 +416,12 @@ def jmeter_detail_phase(base_url, token, errand_id, seconds, phase, jmeter_bin):
         process = subprocess.Popen(cmd, env=env, stdout=out, stderr=err,
                                    start_new_session=True)
         try:
-            returncode = process.wait(timeout=seconds + 7)
-        except BaseException as exc:
             try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                process.wait(timeout=2)
-            if isinstance(exc, subprocess.TimeoutExpired):
+                returncode = process.wait(timeout=seconds + 7)
+            except subprocess.TimeoutExpired as exc:
                 raise Refused(f"JMeter {phase} phase exceeded its bounded time limit") from exc
-            raise
+        finally:
+            stop_jmeter_process_group(process)
     if returncode:
         raise Refused(f"JMeter {phase} phase exited unsuccessfully; private log preserved")
     try:
@@ -410,7 +430,7 @@ def jmeter_detail_phase(base_url, token, errand_id, seconds, phase, jmeter_bin):
     except (OSError, ValueError) as exc:
         raise Refused(f"JMeter {phase} returned invalid JTL") from exc
     count = measured["samplesStarted"]
-    expected = jtl_summary.random_arrival_count_check(count, DETAIL_RATE, seconds)
+    expected = jmeter_count_gate(count, DETAIL_RATE, seconds)
     http_codes = measured["httpStatusCodes"]
     return {"phase": phase, "generator": "Apache JMeter Open Model random_arrivals",
             "startedAtUtc": started_at, "nominalExpected": expected["nominalExpected"],
@@ -421,6 +441,8 @@ def jmeter_detail_phase(base_url, token, errand_id, seconds, phase, jmeter_bin):
             "applicationErrors": measured["http200BusinessFailures"],
             "localRejected": None, "schedulerMissed": None,
             "grossUnderproduction": expected["grossUnderproduction"],
+            "grossOverproduction": expected["grossOverproduction"],
+            "actualStartedRps": round(count / seconds, 3),
             "outcomes": {"ok": measured["successfulSamples"],
                          "transport_error": measured["nonHttpErrors"],
                          "http_error": measured["httpNon200"],
@@ -574,6 +596,7 @@ def execute(args, mark):
         mark("detail_phase_before", **pre_reads)
         pre_good = (pre_reads["ok"] == pre_reads["completed"]
                     and (not pre_reads.get("grossUnderproduction", False))
+                    and (not pre_reads.get("grossOverproduction", False))
                     and (pre_reads["offered"] is None or
                          (pre_reads["ok"] == pre_reads["offered"]
                           and pre_reads["localRejected"] == 0
@@ -616,6 +639,7 @@ def execute(args, mark):
                 if during_reads["outcomes"]["ok"] == 0:
                     raise Refused("No detail request succeeded while Redis was paused")
                 if (during_reads.get("grossUnderproduction", False)
+                        or during_reads.get("grossOverproduction", False)
                         or (during_reads["localRejected"] is not None
                             and (during_reads["localRejected"] != 0
                                  or during_reads["schedulerMissed"] != 0))):
@@ -655,6 +679,7 @@ def execute(args, mark):
         mark("detail_phase_after", **post_reads)
         post_good = (post_reads["ok"] == post_reads["completed"]
                      and (not post_reads.get("grossUnderproduction", False))
+                     and (not post_reads.get("grossOverproduction", False))
                      and (post_reads["offered"] is None or
                           (post_reads["ok"] == post_reads["offered"]
                            and post_reads["localRejected"] == 0

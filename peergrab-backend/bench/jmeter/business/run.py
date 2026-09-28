@@ -63,6 +63,27 @@ def clean_jmeter_env():
     return env
 
 
+def stop_jmeter_process_group(process):
+    """Stop JMeter's launcher shell and any still-running Java child."""
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, 0)
+    except ProcessLookupError:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait(timeout=5)
+
+
 def run_jmeter(command, output, base, project, db_host, db_port, jmeter):
     environment = clean_jmeter_env()
     version = subprocess.run([jmeter, "-v"], cwd=output, env=environment,
@@ -84,21 +105,8 @@ def run_jmeter(command, output, base, project, db_host, db_port, jmeter):
                 check_stack(project, base, db_host, db_port)
             if process.returncode:
                 raise RuntimeError("JMeter failed; inspect private jmeter-console.txt")
-        except Exception:
-            if process.poll() is None:
-                try:
-                    os.killpg(process.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    process.wait(timeout=5)
-            raise
+        finally:
+            stop_jmeter_process_group(process)
 
 
 def mysql(container, sql):
@@ -189,6 +197,18 @@ def percentiles(rows):
     return {"p50Ms": at(50), "p95Ms": at(95), "p99Ms": at(99)}
 
 
+def batch_duration_ms(rows):
+    """First HTTP sample start to final HTTP sample completion in a finite batch."""
+    return max(1, max(int(r["timeStamp"]) + int(r["elapsed"]) for r in rows)
+               - min(int(r["timeStamp"]) for r in rows))
+
+
+def batch_start_span_ms(rows):
+    """Client sampler start-time spread; it is not server arrival skew."""
+    starts = [int(r["timeStamp"]) for r in rows]
+    return max(starts) - min(starts)
+
+
 def by_label(rows, name, expected):
     samples = [r for r in rows if r["label"] == name]
     if len(samples) != expected or any(r["success"].lower() != "true" for r in samples):
@@ -225,6 +245,10 @@ def verify(mode, rows, manifest, mysql_id, base, output):
             raise RuntimeError("S1 durable DB slot/grab invariant failed")
         result.update(outcomes)
         result.update(percentiles(samples))
+        result.update({"samplerStartSpanMs": batch_start_span_ms(samples),
+                       "batchCompletionMs": batch_duration_ms(samples),
+                       "positiveConnectTimeSamples": sum(int(r.get("Connect") or 0) > 0
+                                                         for r in samples)})
     elif mode == "s3-read":
         expected = manifest["requests"]
         samples = by_label(rows, "S3 detail", expected)
@@ -272,6 +296,9 @@ def verify(mode, rows, manifest, mysql_id, base, output):
         result.update({"durableSettled": durable, "escrowReleased": released,
                        "walletTotalDelta": total - manifest["walletTotalBefore"],
                        "globalDebitCreditDiff": debits,
+                       "distinctBatchSeconds": round(batch_duration_ms(distinct) / 1000, 3),
+                       "distinctDurableTps": round(manifest["tasks"] * 1000
+                                                  / batch_duration_ms(distinct), 2),
                        "distinct": percentiles(distinct), "sameTask": percentiles(same)})
     if mode.startswith("s3"):
         admin = read_token(output)

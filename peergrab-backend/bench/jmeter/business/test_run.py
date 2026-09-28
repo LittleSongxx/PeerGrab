@@ -6,12 +6,42 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
+import signal
+import xml.etree.ElementTree as ET
 
 import run
 
 
 class BusinessRunnerTest(unittest.TestCase):
+    def test_jmeter_cleanup_checks_group_after_launcher_exits(self):
+        class ExitedShell:
+            pid = 9876
+
+            def wait(self, timeout):
+                return 0
+
+        with patch.object(run.os, "killpg") as killpg:
+            run.stop_jmeter_process_group(ExitedShell())
+        self.assertEqual([call(9876, signal.SIGTERM), call(9876, 0),
+                          call(9876, signal.SIGKILL)], killpg.call_args_list)
+
+    def test_batch_duration_uses_first_start_and_last_completion(self):
+        rows = [{"timeStamp": "1790000000000", "elapsed": "50"},
+                {"timeStamp": "1790000000020", "elapsed": "70"}]
+        self.assertEqual(90, run.batch_duration_ms(rows))
+        self.assertEqual(20, run.batch_start_span_ms(rows))
+
+    def test_mixed_plan_has_one_publish_and_nine_reads_per_cycle(self):
+        root = ET.parse(Path(__file__).with_name("s3_mixed.jmx")).getroot()
+        samplers = root.findall(".//HTTPSamplerProxy")
+        self.assertEqual(1, sum(item.get("testname") == "S3 publish" for item in samplers))
+        self.assertEqual(9, sum(item.get("testname") == "S3 read after write"
+                                for item in samplers))
+        cycles = [item for item in root.findall(".//LoopController")
+                  if item.get("testname") == "Repeated publish/read cycles"]
+        self.assertEqual(1, len(cycles))
+
     def test_cache_counters_accept_json_decimal_strings_only(self):
         self.assertEqual(run.json_count("4", "requests"), 4)
         self.assertEqual(run.json_count(0, "dbLoads"), 0)

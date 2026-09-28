@@ -13,7 +13,7 @@
       <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="S3 mixed 1 write + 9 reads" enabled="true">
         <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller" enabled="true">
           <boolProp name="LoopController.continue_forever">false</boolProp>
-          <stringProp name="LoopController.loops">${__P(iterations,10)}</stringProp>
+          <stringProp name="LoopController.loops">1</stringProp>
         </elementProp>
         <stringProp name="ThreadGroup.num_threads">${__P(threads,50)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">0</stringProp>
@@ -43,44 +43,45 @@
               <stringProp name="Header.name">Content-Type</stringProp>
               <stringProp name="Header.value">application/json</stringProp>
             </elementProp>
-            <elementProp name="" elementType="Header">
-              <stringProp name="Header.name">X-Request-Id</stringProp>
-              <stringProp name="Header.value">${request_id}</stringProp>
-            </elementProp>
           </collectionProp>
         </HeaderManager>
         <hashTree />
-        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="S3 publish" enabled="true">
-          <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables" enabled="true">
-            <collectionProp name="Arguments.arguments">
-              <elementProp name="" elementType="HTTPArgument">
-                <boolProp name="HTTPArgument.always_encode">false</boolProp>
-                <stringProp name="Argument.value">{"title":"jmeter_${__P(run_id)}_${__threadNum}_${__counter(TRUE)}","rewardCents":100,"slotTotal":1}</stringProp>
-                <stringProp name="Argument.metadata">=</stringProp>
-                <boolProp name="HTTPArgument.use_equals">false</boolProp>
-                <stringProp name="Argument.name" />
-              </elementProp>
-            </collectionProp>
-          </elementProp>
-          <stringProp name="HTTPSampler.domain">${__P(host,127.0.0.1)}</stringProp>
-          <stringProp name="HTTPSampler.port">${__P(port,8080)}</stringProp>
-          <stringProp name="HTTPSampler.protocol">${__P(protocol,http)}</stringProp>
-          <stringProp name="HTTPSampler.contentEncoding">UTF-8</stringProp>
-          <stringProp name="HTTPSampler.path">/api/errands</stringProp>
-          <stringProp name="HTTPSampler.method">POST</stringProp>
-          <stringProp name="HTTPSampler.connect_timeout">${__P(connect_timeout_ms,5000)}</stringProp>
-          <stringProp name="HTTPSampler.response_timeout">${__P(response_timeout_ms,30000)}</stringProp>
-          <boolProp name="HTTPSampler.follow_redirects">false</boolProp>
-          <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
-          <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
-          <boolProp name="HTTPSampler.DO_MULTIPART_POST">false</boolProp>
-          <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
-        </HTTPSamplerProxy>
+        <LoopController guiclass="LoopControlPanel" testclass="LoopController" testname="Repeated publish/read cycles" enabled="true">
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+          <stringProp name="LoopController.loops">${__P(iterations,10)}</stringProp>
+        </LoopController>
         <hashTree>
-          <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="Validate HTTP and business JSON" enabled="true">
-            <stringProp name="scriptLanguage">groovy</stringProp>
-            <stringProp name="cacheKey" />
-            <stringProp name="script">def status = prev.getResponseCode()
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="S3 publish" enabled="true">
+            <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables" enabled="true">
+              <collectionProp name="Arguments.arguments">
+                <elementProp name="" elementType="HTTPArgument">
+                  <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                  <stringProp name="Argument.value">{"title":"jmeter_${__P(run_id)}_${__threadNum}_${__counter(TRUE)}","rewardCents":100,"slotTotal":1}</stringProp>
+                  <stringProp name="Argument.metadata">=</stringProp>
+                  <boolProp name="HTTPArgument.use_equals">false</boolProp>
+                  <stringProp name="Argument.name" />
+                </elementProp>
+              </collectionProp>
+            </elementProp>
+            <stringProp name="HTTPSampler.domain">${__P(host,127.0.0.1)}</stringProp>
+            <stringProp name="HTTPSampler.port">${__P(port,8080)}</stringProp>
+            <stringProp name="HTTPSampler.protocol">${__P(protocol,http)}</stringProp>
+            <stringProp name="HTTPSampler.contentEncoding">UTF-8</stringProp>
+            <stringProp name="HTTPSampler.path">/api/errands</stringProp>
+            <stringProp name="HTTPSampler.method">POST</stringProp>
+            <stringProp name="HTTPSampler.connect_timeout">${__P(connect_timeout_ms,5000)}</stringProp>
+            <stringProp name="HTTPSampler.response_timeout">${__P(response_timeout_ms,30000)}</stringProp>
+            <boolProp name="HTTPSampler.follow_redirects">false</boolProp>
+            <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
+            <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+            <boolProp name="HTTPSampler.DO_MULTIPART_POST">false</boolProp>
+            <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+          </HTTPSamplerProxy>
+          <hashTree>
+            <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="Validate HTTP and business JSON" enabled="true">
+              <stringProp name="scriptLanguage">groovy</stringProp>
+              <stringProp name="cacheKey" />
+              <stringProp name="script">def status = prev.getResponseCode()
 vars.put('peergrabOutcome', 'UNCLASSIFIED')
 def body
 try { body = new groovy.json.JsonSlurper().parseText(prev.getResponseDataAsString()) }
@@ -98,14 +99,329 @@ prev.setSuccessful(ok)
 vars.put('peergrabOutcome', ok ? 'PUBLISHED' : 'PUBLISH_MISMATCH')
 if (ok) vars.put('errand_id', id)
 </stringProp>
-          </JSR223PostProcessor>
-          <hashTree />
-        </hashTree>
-        <LoopController guiclass="LoopControlPanel" testclass="LoopController" testname="Nine same-ID detail reads" enabled="true">
-          <boolProp name="LoopController.continue_forever">false</boolProp>
-          <stringProp name="LoopController.loops">9</stringProp>
-        </LoopController>
-        <hashTree>
+            </JSR223PostProcessor>
+            <hashTree />
+          </hashTree>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="S3 read after write" enabled="true">
+            <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables" enabled="true">
+              <collectionProp name="Arguments.arguments" />
+            </elementProp>
+            <stringProp name="HTTPSampler.domain">${__P(host,127.0.0.1)}</stringProp>
+            <stringProp name="HTTPSampler.port">${__P(port,8080)}</stringProp>
+            <stringProp name="HTTPSampler.protocol">${__P(protocol,http)}</stringProp>
+            <stringProp name="HTTPSampler.contentEncoding">UTF-8</stringProp>
+            <stringProp name="HTTPSampler.path">/api/errands/${errand_id}</stringProp>
+            <stringProp name="HTTPSampler.method">GET</stringProp>
+            <stringProp name="HTTPSampler.connect_timeout">${__P(connect_timeout_ms,5000)}</stringProp>
+            <stringProp name="HTTPSampler.response_timeout">${__P(response_timeout_ms,30000)}</stringProp>
+            <boolProp name="HTTPSampler.follow_redirects">false</boolProp>
+            <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
+            <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+            <boolProp name="HTTPSampler.DO_MULTIPART_POST">false</boolProp>
+          </HTTPSamplerProxy>
+          <hashTree>
+            <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="Validate HTTP and business JSON" enabled="true">
+              <stringProp name="scriptLanguage">groovy</stringProp>
+              <stringProp name="cacheKey" />
+              <stringProp name="script">def status = prev.getResponseCode()
+vars.put('peergrabOutcome', 'UNCLASSIFIED')
+def body
+try { body = new groovy.json.JsonSlurper().parseText(prev.getResponseDataAsString()) }
+catch (Exception ignored) { prev.setSuccessful(false); vars.put('peergrabOutcome', 'INVALID_JSON'); return }
+if (!(body instanceof Map)) {
+  prev.setSuccessful(false); vars.put('peergrabOutcome', 'HTTP_OR_SHAPE_ERROR'); return
+}
+def code = body.code?.toString()
+if (status != '200') {
+  prev.setSuccessful(false); vars.put('peergrabOutcome', 'HTTP_OR_SHAPE_ERROR'); return
+}
+def ok = code == 'OK' &amp;&amp; body.data?.id?.toString() == vars.get('errand_id') &amp;&amp; body.data?.status == 'PUBLISHED'
+prev.setSuccessful(ok)
+vars.put('peergrabOutcome', ok ? 'READ_AFTER_WRITE_OK' : 'READ_AFTER_WRITE_MISMATCH')
+</stringProp>
+            </JSR223PostProcessor>
+            <hashTree />
+          </hashTree>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="S3 read after write" enabled="true">
+            <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables" enabled="true">
+              <collectionProp name="Arguments.arguments" />
+            </elementProp>
+            <stringProp name="HTTPSampler.domain">${__P(host,127.0.0.1)}</stringProp>
+            <stringProp name="HTTPSampler.port">${__P(port,8080)}</stringProp>
+            <stringProp name="HTTPSampler.protocol">${__P(protocol,http)}</stringProp>
+            <stringProp name="HTTPSampler.contentEncoding">UTF-8</stringProp>
+            <stringProp name="HTTPSampler.path">/api/errands/${errand_id}</stringProp>
+            <stringProp name="HTTPSampler.method">GET</stringProp>
+            <stringProp name="HTTPSampler.connect_timeout">${__P(connect_timeout_ms,5000)}</stringProp>
+            <stringProp name="HTTPSampler.response_timeout">${__P(response_timeout_ms,30000)}</stringProp>
+            <boolProp name="HTTPSampler.follow_redirects">false</boolProp>
+            <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
+            <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+            <boolProp name="HTTPSampler.DO_MULTIPART_POST">false</boolProp>
+          </HTTPSamplerProxy>
+          <hashTree>
+            <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="Validate HTTP and business JSON" enabled="true">
+              <stringProp name="scriptLanguage">groovy</stringProp>
+              <stringProp name="cacheKey" />
+              <stringProp name="script">def status = prev.getResponseCode()
+vars.put('peergrabOutcome', 'UNCLASSIFIED')
+def body
+try { body = new groovy.json.JsonSlurper().parseText(prev.getResponseDataAsString()) }
+catch (Exception ignored) { prev.setSuccessful(false); vars.put('peergrabOutcome', 'INVALID_JSON'); return }
+if (!(body instanceof Map)) {
+  prev.setSuccessful(false); vars.put('peergrabOutcome', 'HTTP_OR_SHAPE_ERROR'); return
+}
+def code = body.code?.toString()
+if (status != '200') {
+  prev.setSuccessful(false); vars.put('peergrabOutcome', 'HTTP_OR_SHAPE_ERROR'); return
+}
+def ok = code == 'OK' &amp;&amp; body.data?.id?.toString() == vars.get('errand_id') &amp;&amp; body.data?.status == 'PUBLISHED'
+prev.setSuccessful(ok)
+vars.put('peergrabOutcome', ok ? 'READ_AFTER_WRITE_OK' : 'READ_AFTER_WRITE_MISMATCH')
+</stringProp>
+            </JSR223PostProcessor>
+            <hashTree />
+          </hashTree>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="S3 read after write" enabled="true">
+            <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables" enabled="true">
+              <collectionProp name="Arguments.arguments" />
+            </elementProp>
+            <stringProp name="HTTPSampler.domain">${__P(host,127.0.0.1)}</stringProp>
+            <stringProp name="HTTPSampler.port">${__P(port,8080)}</stringProp>
+            <stringProp name="HTTPSampler.protocol">${__P(protocol,http)}</stringProp>
+            <stringProp name="HTTPSampler.contentEncoding">UTF-8</stringProp>
+            <stringProp name="HTTPSampler.path">/api/errands/${errand_id}</stringProp>
+            <stringProp name="HTTPSampler.method">GET</stringProp>
+            <stringProp name="HTTPSampler.connect_timeout">${__P(connect_timeout_ms,5000)}</stringProp>
+            <stringProp name="HTTPSampler.response_timeout">${__P(response_timeout_ms,30000)}</stringProp>
+            <boolProp name="HTTPSampler.follow_redirects">false</boolProp>
+            <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
+            <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+            <boolProp name="HTTPSampler.DO_MULTIPART_POST">false</boolProp>
+          </HTTPSamplerProxy>
+          <hashTree>
+            <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="Validate HTTP and business JSON" enabled="true">
+              <stringProp name="scriptLanguage">groovy</stringProp>
+              <stringProp name="cacheKey" />
+              <stringProp name="script">def status = prev.getResponseCode()
+vars.put('peergrabOutcome', 'UNCLASSIFIED')
+def body
+try { body = new groovy.json.JsonSlurper().parseText(prev.getResponseDataAsString()) }
+catch (Exception ignored) { prev.setSuccessful(false); vars.put('peergrabOutcome', 'INVALID_JSON'); return }
+if (!(body instanceof Map)) {
+  prev.setSuccessful(false); vars.put('peergrabOutcome', 'HTTP_OR_SHAPE_ERROR'); return
+}
+def code = body.code?.toString()
+if (status != '200') {
+  prev.setSuccessful(false); vars.put('peergrabOutcome', 'HTTP_OR_SHAPE_ERROR'); return
+}
+def ok = code == 'OK' &amp;&amp; body.data?.id?.toString() == vars.get('errand_id') &amp;&amp; body.data?.status == 'PUBLISHED'
+prev.setSuccessful(ok)
+vars.put('peergrabOutcome', ok ? 'READ_AFTER_WRITE_OK' : 'READ_AFTER_WRITE_MISMATCH')
+</stringProp>
+            </JSR223PostProcessor>
+            <hashTree />
+          </hashTree>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="S3 read after write" enabled="true">
+            <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables" enabled="true">
+              <collectionProp name="Arguments.arguments" />
+            </elementProp>
+            <stringProp name="HTTPSampler.domain">${__P(host,127.0.0.1)}</stringProp>
+            <stringProp name="HTTPSampler.port">${__P(port,8080)}</stringProp>
+            <stringProp name="HTTPSampler.protocol">${__P(protocol,http)}</stringProp>
+            <stringProp name="HTTPSampler.contentEncoding">UTF-8</stringProp>
+            <stringProp name="HTTPSampler.path">/api/errands/${errand_id}</stringProp>
+            <stringProp name="HTTPSampler.method">GET</stringProp>
+            <stringProp name="HTTPSampler.connect_timeout">${__P(connect_timeout_ms,5000)}</stringProp>
+            <stringProp name="HTTPSampler.response_timeout">${__P(response_timeout_ms,30000)}</stringProp>
+            <boolProp name="HTTPSampler.follow_redirects">false</boolProp>
+            <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
+            <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+            <boolProp name="HTTPSampler.DO_MULTIPART_POST">false</boolProp>
+          </HTTPSamplerProxy>
+          <hashTree>
+            <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="Validate HTTP and business JSON" enabled="true">
+              <stringProp name="scriptLanguage">groovy</stringProp>
+              <stringProp name="cacheKey" />
+              <stringProp name="script">def status = prev.getResponseCode()
+vars.put('peergrabOutcome', 'UNCLASSIFIED')
+def body
+try { body = new groovy.json.JsonSlurper().parseText(prev.getResponseDataAsString()) }
+catch (Exception ignored) { prev.setSuccessful(false); vars.put('peergrabOutcome', 'INVALID_JSON'); return }
+if (!(body instanceof Map)) {
+  prev.setSuccessful(false); vars.put('peergrabOutcome', 'HTTP_OR_SHAPE_ERROR'); return
+}
+def code = body.code?.toString()
+if (status != '200') {
+  prev.setSuccessful(false); vars.put('peergrabOutcome', 'HTTP_OR_SHAPE_ERROR'); return
+}
+def ok = code == 'OK' &amp;&amp; body.data?.id?.toString() == vars.get('errand_id') &amp;&amp; body.data?.status == 'PUBLISHED'
+prev.setSuccessful(ok)
+vars.put('peergrabOutcome', ok ? 'READ_AFTER_WRITE_OK' : 'READ_AFTER_WRITE_MISMATCH')
+</stringProp>
+            </JSR223PostProcessor>
+            <hashTree />
+          </hashTree>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="S3 read after write" enabled="true">
+            <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables" enabled="true">
+              <collectionProp name="Arguments.arguments" />
+            </elementProp>
+            <stringProp name="HTTPSampler.domain">${__P(host,127.0.0.1)}</stringProp>
+            <stringProp name="HTTPSampler.port">${__P(port,8080)}</stringProp>
+            <stringProp name="HTTPSampler.protocol">${__P(protocol,http)}</stringProp>
+            <stringProp name="HTTPSampler.contentEncoding">UTF-8</stringProp>
+            <stringProp name="HTTPSampler.path">/api/errands/${errand_id}</stringProp>
+            <stringProp name="HTTPSampler.method">GET</stringProp>
+            <stringProp name="HTTPSampler.connect_timeout">${__P(connect_timeout_ms,5000)}</stringProp>
+            <stringProp name="HTTPSampler.response_timeout">${__P(response_timeout_ms,30000)}</stringProp>
+            <boolProp name="HTTPSampler.follow_redirects">false</boolProp>
+            <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
+            <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+            <boolProp name="HTTPSampler.DO_MULTIPART_POST">false</boolProp>
+          </HTTPSamplerProxy>
+          <hashTree>
+            <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="Validate HTTP and business JSON" enabled="true">
+              <stringProp name="scriptLanguage">groovy</stringProp>
+              <stringProp name="cacheKey" />
+              <stringProp name="script">def status = prev.getResponseCode()
+vars.put('peergrabOutcome', 'UNCLASSIFIED')
+def body
+try { body = new groovy.json.JsonSlurper().parseText(prev.getResponseDataAsString()) }
+catch (Exception ignored) { prev.setSuccessful(false); vars.put('peergrabOutcome', 'INVALID_JSON'); return }
+if (!(body instanceof Map)) {
+  prev.setSuccessful(false); vars.put('peergrabOutcome', 'HTTP_OR_SHAPE_ERROR'); return
+}
+def code = body.code?.toString()
+if (status != '200') {
+  prev.setSuccessful(false); vars.put('peergrabOutcome', 'HTTP_OR_SHAPE_ERROR'); return
+}
+def ok = code == 'OK' &amp;&amp; body.data?.id?.toString() == vars.get('errand_id') &amp;&amp; body.data?.status == 'PUBLISHED'
+prev.setSuccessful(ok)
+vars.put('peergrabOutcome', ok ? 'READ_AFTER_WRITE_OK' : 'READ_AFTER_WRITE_MISMATCH')
+</stringProp>
+            </JSR223PostProcessor>
+            <hashTree />
+          </hashTree>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="S3 read after write" enabled="true">
+            <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables" enabled="true">
+              <collectionProp name="Arguments.arguments" />
+            </elementProp>
+            <stringProp name="HTTPSampler.domain">${__P(host,127.0.0.1)}</stringProp>
+            <stringProp name="HTTPSampler.port">${__P(port,8080)}</stringProp>
+            <stringProp name="HTTPSampler.protocol">${__P(protocol,http)}</stringProp>
+            <stringProp name="HTTPSampler.contentEncoding">UTF-8</stringProp>
+            <stringProp name="HTTPSampler.path">/api/errands/${errand_id}</stringProp>
+            <stringProp name="HTTPSampler.method">GET</stringProp>
+            <stringProp name="HTTPSampler.connect_timeout">${__P(connect_timeout_ms,5000)}</stringProp>
+            <stringProp name="HTTPSampler.response_timeout">${__P(response_timeout_ms,30000)}</stringProp>
+            <boolProp name="HTTPSampler.follow_redirects">false</boolProp>
+            <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
+            <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+            <boolProp name="HTTPSampler.DO_MULTIPART_POST">false</boolProp>
+          </HTTPSamplerProxy>
+          <hashTree>
+            <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="Validate HTTP and business JSON" enabled="true">
+              <stringProp name="scriptLanguage">groovy</stringProp>
+              <stringProp name="cacheKey" />
+              <stringProp name="script">def status = prev.getResponseCode()
+vars.put('peergrabOutcome', 'UNCLASSIFIED')
+def body
+try { body = new groovy.json.JsonSlurper().parseText(prev.getResponseDataAsString()) }
+catch (Exception ignored) { prev.setSuccessful(false); vars.put('peergrabOutcome', 'INVALID_JSON'); return }
+if (!(body instanceof Map)) {
+  prev.setSuccessful(false); vars.put('peergrabOutcome', 'HTTP_OR_SHAPE_ERROR'); return
+}
+def code = body.code?.toString()
+if (status != '200') {
+  prev.setSuccessful(false); vars.put('peergrabOutcome', 'HTTP_OR_SHAPE_ERROR'); return
+}
+def ok = code == 'OK' &amp;&amp; body.data?.id?.toString() == vars.get('errand_id') &amp;&amp; body.data?.status == 'PUBLISHED'
+prev.setSuccessful(ok)
+vars.put('peergrabOutcome', ok ? 'READ_AFTER_WRITE_OK' : 'READ_AFTER_WRITE_MISMATCH')
+</stringProp>
+            </JSR223PostProcessor>
+            <hashTree />
+          </hashTree>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="S3 read after write" enabled="true">
+            <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables" enabled="true">
+              <collectionProp name="Arguments.arguments" />
+            </elementProp>
+            <stringProp name="HTTPSampler.domain">${__P(host,127.0.0.1)}</stringProp>
+            <stringProp name="HTTPSampler.port">${__P(port,8080)}</stringProp>
+            <stringProp name="HTTPSampler.protocol">${__P(protocol,http)}</stringProp>
+            <stringProp name="HTTPSampler.contentEncoding">UTF-8</stringProp>
+            <stringProp name="HTTPSampler.path">/api/errands/${errand_id}</stringProp>
+            <stringProp name="HTTPSampler.method">GET</stringProp>
+            <stringProp name="HTTPSampler.connect_timeout">${__P(connect_timeout_ms,5000)}</stringProp>
+            <stringProp name="HTTPSampler.response_timeout">${__P(response_timeout_ms,30000)}</stringProp>
+            <boolProp name="HTTPSampler.follow_redirects">false</boolProp>
+            <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
+            <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+            <boolProp name="HTTPSampler.DO_MULTIPART_POST">false</boolProp>
+          </HTTPSamplerProxy>
+          <hashTree>
+            <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="Validate HTTP and business JSON" enabled="true">
+              <stringProp name="scriptLanguage">groovy</stringProp>
+              <stringProp name="cacheKey" />
+              <stringProp name="script">def status = prev.getResponseCode()
+vars.put('peergrabOutcome', 'UNCLASSIFIED')
+def body
+try { body = new groovy.json.JsonSlurper().parseText(prev.getResponseDataAsString()) }
+catch (Exception ignored) { prev.setSuccessful(false); vars.put('peergrabOutcome', 'INVALID_JSON'); return }
+if (!(body instanceof Map)) {
+  prev.setSuccessful(false); vars.put('peergrabOutcome', 'HTTP_OR_SHAPE_ERROR'); return
+}
+def code = body.code?.toString()
+if (status != '200') {
+  prev.setSuccessful(false); vars.put('peergrabOutcome', 'HTTP_OR_SHAPE_ERROR'); return
+}
+def ok = code == 'OK' &amp;&amp; body.data?.id?.toString() == vars.get('errand_id') &amp;&amp; body.data?.status == 'PUBLISHED'
+prev.setSuccessful(ok)
+vars.put('peergrabOutcome', ok ? 'READ_AFTER_WRITE_OK' : 'READ_AFTER_WRITE_MISMATCH')
+</stringProp>
+            </JSR223PostProcessor>
+            <hashTree />
+          </hashTree>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="S3 read after write" enabled="true">
+            <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables" enabled="true">
+              <collectionProp name="Arguments.arguments" />
+            </elementProp>
+            <stringProp name="HTTPSampler.domain">${__P(host,127.0.0.1)}</stringProp>
+            <stringProp name="HTTPSampler.port">${__P(port,8080)}</stringProp>
+            <stringProp name="HTTPSampler.protocol">${__P(protocol,http)}</stringProp>
+            <stringProp name="HTTPSampler.contentEncoding">UTF-8</stringProp>
+            <stringProp name="HTTPSampler.path">/api/errands/${errand_id}</stringProp>
+            <stringProp name="HTTPSampler.method">GET</stringProp>
+            <stringProp name="HTTPSampler.connect_timeout">${__P(connect_timeout_ms,5000)}</stringProp>
+            <stringProp name="HTTPSampler.response_timeout">${__P(response_timeout_ms,30000)}</stringProp>
+            <boolProp name="HTTPSampler.follow_redirects">false</boolProp>
+            <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
+            <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+            <boolProp name="HTTPSampler.DO_MULTIPART_POST">false</boolProp>
+          </HTTPSamplerProxy>
+          <hashTree>
+            <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="Validate HTTP and business JSON" enabled="true">
+              <stringProp name="scriptLanguage">groovy</stringProp>
+              <stringProp name="cacheKey" />
+              <stringProp name="script">def status = prev.getResponseCode()
+vars.put('peergrabOutcome', 'UNCLASSIFIED')
+def body
+try { body = new groovy.json.JsonSlurper().parseText(prev.getResponseDataAsString()) }
+catch (Exception ignored) { prev.setSuccessful(false); vars.put('peergrabOutcome', 'INVALID_JSON'); return }
+if (!(body instanceof Map)) {
+  prev.setSuccessful(false); vars.put('peergrabOutcome', 'HTTP_OR_SHAPE_ERROR'); return
+}
+def code = body.code?.toString()
+if (status != '200') {
+  prev.setSuccessful(false); vars.put('peergrabOutcome', 'HTTP_OR_SHAPE_ERROR'); return
+}
+def ok = code == 'OK' &amp;&amp; body.data?.id?.toString() == vars.get('errand_id') &amp;&amp; body.data?.status == 'PUBLISHED'
+prev.setSuccessful(ok)
+vars.put('peergrabOutcome', ok ? 'READ_AFTER_WRITE_OK' : 'READ_AFTER_WRITE_MISMATCH')
+</stringProp>
+            </JSR223PostProcessor>
+            <hashTree />
+          </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="S3 read after write" enabled="true">
             <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables" enabled="true">
               <collectionProp name="Arguments.arguments" />

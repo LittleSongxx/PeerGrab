@@ -115,6 +115,8 @@ def summarize_rows(rows, *, label=None, duration_seconds=None, test_start_ms=Non
         "maxAllThreads": max(row.get("allThreads", 0) for row in selected),
         "responseBytes": sum(row.get("bytes", 0) for row in selected),
         "sentBytes": sum(row.get("sentBytes", 0) for row in selected),
+        "positiveConnectTimeSamples": sum(row.get("Connect", 0) > 0
+                                          for row in selected),
         "startsPerSecond": per_second,
     }
     if duration_seconds is not None:
@@ -141,6 +143,14 @@ def random_arrival_count_check(count, rate, seconds):
     return {"nominalExpected": expected, "samplesStarted": count,
             "minimumPlausible": math.floor(lower),
             "grossUnderproduction": count < lower}
+
+
+def paced_target_count_check(count, rate, seconds):
+    """Fail a persistent-user JMeter round that materially misses target RPS."""
+    expected = rate * seconds
+    lower = math.floor(expected * .975)
+    return {"nominalExpected": expected, "samplesStarted": count,
+            "minimumAcceptable": lower, "grossUnderproduction": count < lower}
 
 
 def per_second_pacing_check(phase, rate):
