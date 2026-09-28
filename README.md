@@ -54,15 +54,15 @@ API 与 Worker 复用应用用例；领域层定义状态规则和端口，基�
 | 后端 | Java 21 · Spring Boot 3.5.8 · Maven |
 | 数据与消息 | MySQL 8 · Redis 7 · RocketMQ 5 |
 
-[PeerGrab ECS 实测与原版历史评测](peergrab-backend/bench/reports/README.md)按来源分别归档。
+[当前镜像 ECS 六类场景实测](peergrab-backend/bench/reports/peergrab-current/report-ecs-spectrum-20260928.md)及[按版本归档的历史评测](peergrab-backend/bench/reports/README.md)分别说明负载、路径和结果。
 
 ## 上线与实测
 
 2026-09-27 首次上线版本为 `2370c45`（压测夹具随后修正为 `7da0a92`）：旧库经备份、独立恢复和迁移演练后升级；一笔虚拟交易从发布到结算完成，资金事件进入 v2 普通消息 Topic、持久通知落库，资金不变量全部通过。当时隔离 MySQL/Redis 的后端测试 **214 项通过、0 跳过**，前端与后端生产包构建通过。
 
-随后在同一台 8 vCPU ECS 停站维护、独立数据卷的条件下，针对简历关键指标加做了[完整 HTTPS 路径复测](peergrab-backend/bench/reports/peergrab-current/report-resume-metrics-20260927.md)：**600 RPS × 180 秒 × 3 轮**，每轮 108,000 次请求全部发出且全部 HTTP 200，三轮 P99 为 183／256／93 ms；650 RPS 长档出现 23 次传输超时，不属于零错误档。2,000 人同单抢 1 个名额重复三轮，均恰好 1 人成功、0 超卖；共享钱包热点结算 200 任务／32 线程两轮约 **60 持久化 TPS**，账务校验通过。[校招／实习简历指标卡](peergrab-backend/docs/校招实习简历性能指标-20260927.md)给出可核验的写法与禁用说法。此前的[SSH 转发及 S1–S5 复测](peergrab-backend/bench/reports/peergrab-current/report-ecs-release-20260927.md)仍保留独立口径：缓存热态减少回源，但未证明吞吐提升；MQ 与扫描独占组各完成 1,000 条自然到期任务。这些是个人演示环境的有限窗口测量，不是生产流量容量承诺。
+2026-09-28 已部署优化版 `5ace500`，独立 MySQL/Redis 上的 223 项后端测试全部通过。[当前镜像 ECS 六类场景实测](peergrab-backend/bench/reports/peergrab-current/report-ecs-spectrum-20260928.md)在 8 vCPU、100 Mbps ECS 停站后，以独立数据卷运行：广场游标首屏经异机公网 HTTPS 以 **600 RPS × 180 秒 × 3 轮**发出各 108,000 次请求，P99 为 **46.9／52.3／47.8 ms**，第三轮有 **4 次客户端传输超时**，因此不能声称 600 RPS 零错误稳态容量。2,000 个虚拟客户端同单抢 1 个名额，两轮均仅 1 人成功、0 超卖，但请求 P99 约 **4.7–5.1 秒**；200 单／32 线程共享钱包热点结算两轮约 **36.1–39.5 持久化 TPS**，P99 约 **1.45–1.48 秒**，这是短批次结果。缓存开启后的热态详情回源为 0，整个窗口 MySQL 查询约少 49%，但首次冷态 P99 更高；1,000 单同刻到期的 MQ／扫描兜底状态日志 P99 分别为 **9.51／25.10 秒**。Redis 暂停期间详情读全部成功但 P95 升至约 2.01 秒；Broker 暂停时默认配置的结算已提交却在客户端 8 秒超时，属于待修复的故障体验问题。
 
-2026-09-28 已部署优化版 `5ace500`，独立 MySQL/Redis 上的 223 项后端测试全部通过。同条件隔离栈各一轮的[优化与复测报告](peergrab-backend/docs/性能优化与复测-20260928.md)显示：候选入队少做重复查询，S4+S1 合并窗口内的 Redis `ZCARD` 调用约减半；1,000 条同刻到期任务的扫描兜底状态日志 P99 从 39.47 秒降至 23.33 秒，均全部完成。2,000 人抢单的端到端尖峰 P99 基本未变，结算单轮结果更慢，不能将这两项写成已提升；公网偶发超时也尚未复测。旧版简历指标保留为历史基线，不代表当前镜像的同口径容量。
+[当前校招／实习简历指标卡](peergrab-backend/docs/校招实习简历性能指标-20260928.md)给出可追溯的表述和禁用说法。[2026-09-27 简历专项复测](peergrab-backend/bench/reports/peergrab-current/report-resume-metrics-20260927.md)与[旧版指标卡](peergrab-backend/docs/校招实习简历性能指标-20260927.md)保留为历史基线；旧镜像的广场路径、结算客户端及负载窗口与本轮不同，不能直接计算优化增益或沿用旧版零错误数字。这些有限窗口实验不是全站容量或生产 SLA 承诺。
 
 ## 快速开始
 

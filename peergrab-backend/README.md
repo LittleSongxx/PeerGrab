@@ -37,7 +37,7 @@ docker compose -f docker-compose.yaml -f docker-compose.full.yaml --env-file .en
 
 本机完整演示栈默认使用 Redis Session；[生产栈](docker/ECS_DEPLOY.md)使用 MySQL 真值的 JWT，以便 Redis 故障时仍能校验已签发令牌，并要求至少 32 个 UTF-8 字节的 `PEERGRAB_AUTH_JWT_SECRET`。已有旧卷升级前必须先执行迁移脚本；仅重建镜像不会重新运行 `init.sql`。[旧项目迁移](docker/UPGRADE.md)另有独立步骤。停止演示栈使用相同两个 `-f` 参数执行 `docker compose down`，保留数据时不要加 `-v`。
 
-2026-09-27 首次在单 ECS 演示站部署 `2370c45`：旧卷先备份、在隔离 MySQL 中恢复并试跑迁移，再停写执行正式迁移。新资金事件使用 `errand-fund-event-v2` 普通 Topic；一笔上线验收交易的 outbox 为 `SENT`、持久通知已落库、消费组积压为 0。S5 压测夹具的截止时间修正见后续提交 `7da0a92`。2026-09-28 生产 API 与 Worker 已切换到 `5ace500`，本轮变更和实测见[性能优化与复测报告](docs/性能优化与复测-20260928.md)。
+2026-09-27 首次在单 ECS 演示站部署 `2370c45`：旧卷先备份、在隔离 MySQL 中恢复并试跑迁移，再停写执行正式迁移。新资金事件使用 `errand-fund-event-v2` 普通 Topic；一笔上线验收交易的 outbox 为 `SENT`、持久通知已落库、消费组积压为 0。S5 压测夹具的截止时间修正见后续提交 `7da0a92`。2026-09-28 生产 API 与 Worker 已切换到 `5ace500`；[当前镜像 ECS 六类场景实测](bench/reports/peergrab-current/report-ecs-spectrum-20260928.md)覆盖完整 HTTPS 首屏、并发抢单、缓存、结算、到期处理及受限故障注入。
 
 ## 本机开发
 
@@ -89,8 +89,10 @@ docker compose -f docker/docker-compose.yaml --env-file docker/.env exec -T mysq
 
 ## 实验记录与边界
 
-[2026-09-27 优化前简历指标基线](bench/reports/peergrab-current/report-resume-metrics-20260927.md)及[历史简历指标卡](docs/校招实习简历性能指标-20260927.md)在生产停站后用独立卷与完整 HTTPS 路径测得：600 RPS × 180 秒重复三轮，每轮 108,000／108,000 次 HTTP 200，P99 范围 93–256 ms；2,000 人同单抢 1 名额重复三轮均恰好 1 人成功、0 超卖；共享钱包热点结算 200 任务／32 线程两轮约 60 持久化 TPS。650 RPS 长档出现 23 次传输超时，不能写为稳定零错误容量。[先前的 S1–S5 隔离复测](bench/reports/peergrab-current/report-ecs-release-20260927.md)还记录缓存热态回源下降但吞吐未提高、MQ 与扫描独占组各 1,000 条自然到期任务全部完成。旧镜像的[8 vCPU 公网实测](bench/reports/peergrab-current/report-ecs-8cpu-20260927.md)、[4 vCPU 实测](bench/reports/peergrab-current/report-ecs-max-20260926.md)和[原版 P6/P7 报告](bench/reports/original-project/report-P6-P7-20260822-complete.md)单独保留；不同代码、路径与窗口不能直接计算优化增益。复测从[压测运行手册](bench/README.md)建立独立环境，不能作用于演示库。
+[当前镜像 ECS 六类场景实测](bench/reports/peergrab-current/report-ecs-spectrum-20260928.md)以已部署的 `5ace500` API／Worker 为对象，停站备份后逐场景建立可丢弃的 MySQL、Redis、RocketMQ 卷。S2 广场游标首屏走异机公网 HTTPS，600 RPS × 180 秒三轮各发出 108,000 次，客户端 P99 为 **46.919／52.332／47.839 ms**；第三轮有 **4 次传输超时**，所以尚无该档零错误稳态容量结论。S1 两轮各 2,000 个虚拟客户端同单抢一名额，均只成功 1 人且 0 超卖，但请求 P99 **4.682／5.081 秒**。S4 共享钱包热点 200 单／32 线程短批次两轮持久化结算 **39.52／36.09 TPS**，P99 **1.446／1.483 秒**，资金校验通过。
 
-[高延迟与超时定位报告](docs/高延迟与超时定位报告-20260928.md)区分了公网连接路径、抢单入口排队及结算／到期任务的结构性等待。[优化版单轮复测](docs/性能优化与复测-20260928.md)记录扫描 P99 下降、抢单请求次数下降及仍未解决的秒级尾延迟；S2 公网 HTTPS 尚未以新镜像重测，历史简历指标不可归属到 `5ace500`。
+S3 缓存开启后热态详情回源为 0，三个批次累计 MySQL `Com_select` 较关闭缓存约少 **49.5%**，但首次冷态 P99 更高，不能宣称稳定吞吐提升。S5 两个独立栈分别处理 1,000 单同刻到期，MQ／扫描兜底的到期至状态日志 P99 为 **9.512／25.100 秒**，均最终排空。S6 的 Redis 暂停轮详情读 250/250 成功、P95 **2.013 秒**；Broker 暂停时，默认配置的一次结算已经在数据库提交，却触发客户端 **8 秒超时**。另起新栈仅关闭延迟双删后，结算在 Broker 暂停期间约 **0.095 秒**返回，这只是定位对照，线上默认配置尚未修复。六类负载的计时起止与发压模型不同，不能将短批次 TPS、秒级尖峰和 HTTP 首屏 RPS 合成全站 SLA。
 
-当前公开 API 限制 `slotTotal=1`；Redis 或 MQ 故障注入后的完整性能恢复、多库资金方案仍待验证。ES/Canal 已退出运行架构，缓存一致性靠失效、TTL 与校验任务，不使用 binlog 秒级纠偏。[设计演进](docs/设计演进记录.md)、[分片取舍](docs/数据库分片相关思考.md)和[压测实验方案](docs/压测方案与容量评估.md)保存了相关设计和历史证据。
+[当前校招／实习简历指标卡](docs/校招实习简历性能指标-20260928.md)给出可追溯的写法。[2026-09-27 优化前简历指标基线](bench/reports/peergrab-current/report-resume-metrics-20260927.md)和[历史简历指标卡](docs/校招实习简历性能指标-20260927.md)单独保留；旧镜像、旧路径及窗口与当前报告不完全一致，不能据此计算优化增益。[高延迟与超时定位报告](docs/高延迟与超时定位报告-20260928.md)、[优化版单轮复测](docs/性能优化与复测-20260928.md)记录了改动前后的阶段性分析。复测须按[压测运行手册](bench/README.md)使用独立环境，不能作用于演示库。
+
+当前公开 API 限制 `slotTotal=1`；完整故障注入矩阵、故障恢复容量、多库资金方案仍待验证。ES/Canal 已退出运行架构，缓存一致性靠失效、TTL 与校验任务，不使用 binlog 秒级纠偏。[设计演进](docs/设计演进记录.md)、[分片取舍](docs/数据库分片相关思考.md)和[压测实验方案](docs/压测方案与容量评估.md)保存了相关设计和历史证据。
