@@ -158,7 +158,7 @@ python3 bench/scripts/summarize_s5.py "$run_id" \
   --output "bench/runs/$project/s5-completions.json"
 ```
 
-确认 `expected=completed=1000`，`unprocessed=duplicate=premature=wrongState=0`，再比较 P50/P95/P99、到期后逐秒完成数与峰值；MQ 轮同时保存 `consumerProgress` 结束快照。扫描轮默认有 2 秒宽限、5 秒调度间隔；2026-09-28 版 Worker 单次调度最多连续 5 批、每批 200 条，新到期扫描有 10 秒预算，失败重试另有 50 条上限。旧版一次只处理一批，其约 39 秒 P99 不能解释成 CPU 饱和；新版单轮实测见[优化与复测报告](../docs/性能优化与复测-20260928.md)。1k 首档通过后，若要找吞吐拐点，使用**新的项目和卷**逐级做 5k/10k，给 MQ 同步发送足够的 `leadSeconds`（10k 建议至少 300 秒）。
+确认 `expected=completed=1000`，`unprocessed=duplicate=premature=wrongState=0`，再比较 P50/P95/P99、到期后逐秒完成数与峰值；MQ 轮同时保存 `consumerProgress` 结束快照。扫描轮默认有 2 秒宽限、5 秒调度间隔；2026-09-28 版 Worker 单次调度最多连续 5 批、每批 200 条，新到期扫描有 10 秒预算，失败重试另有 50 条上限。旧版一次只处理一批，其约 39 秒 P99 不能解释成 CPU 饱和；阶段性对照见 `bench/reports/peergrab-current/performance-optimization-analysis-20260929.md`。1k 首档通过后，若要找吞吐拐点，使用**新的项目和卷**逐级做 5k/10k，给 MQ 同步发送足够的 `leadSeconds`（10k 建议至少 300 秒）。
 
 ## 清理与恢复顺序
 

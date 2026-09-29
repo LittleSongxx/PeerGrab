@@ -128,6 +128,20 @@ class PreflightTest(unittest.TestCase):
             self.check(confirm_seconds=5)
         self.check(confirm_seconds=300)
 
+    def test_maintenance_gate_requires_opt_in_and_stopped_production(self):
+        with patch.dict(os.environ, {"PEERGRAB_MAINTENANCE_APPROVED": ""}), \
+             patch.object(preflight, "docker") as docker:
+            with self.assertRaisesRegex(preflight.Refused, "MAINTENANCE_APPROVED"):
+                preflight.require_maintenance_window()
+            docker.assert_not_called()
+        with patch.dict(os.environ, {"PEERGRAB_MAINTENANCE_APPROVED": "YES"}), \
+             patch.object(preflight, "docker", return_value="prod-container"):
+            with self.assertRaisesRegex(preflight.Refused, "Production containers are running"):
+                preflight.require_maintenance_window()
+        with patch.dict(os.environ, {"PEERGRAB_MAINTENANCE_APPROVED": "YES"}), \
+             patch.object(preflight, "docker", return_value=""):
+            preflight.require_maintenance_window()
+
 
 if __name__ == "__main__":
     unittest.main()

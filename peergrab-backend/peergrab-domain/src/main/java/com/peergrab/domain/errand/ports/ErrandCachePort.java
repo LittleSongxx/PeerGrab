@@ -1,5 +1,6 @@
 package com.peergrab.domain.errand.ports;
 
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -26,8 +27,20 @@ public interface ErrandCachePort {
     /** Redis 暂时不可用时，详情查询跳过 Bloom、分布式锁及回填，直接回源。 */
     default boolean isDegraded() { return false; }
 
+    /** Whether this adapter has a real cache backend and can accept prewarm writes. */
+    default boolean isEnabled() { return true; }
+
     /** 写缓存：回填全部分片，物理 TTL 带随机抖动 */
     void put(long errandId, String payloadJson);
+
+    /**
+     * 批量回填详情。默认逐条写入，Redis 适配器可用 pipeline 覆盖，
+     * 以便运维预热不会把一次批量操作放大成大量网络往返。
+     */
+    default void putAll(Map<Long, String> payloads) {
+        if (payloads == null || payloads.isEmpty()) return;
+        payloads.forEach(this::put);
+    }
 
     /** 缓存空值：防穿透用，TTL 短（默认 60s） */
     void putEmpty(long errandId);

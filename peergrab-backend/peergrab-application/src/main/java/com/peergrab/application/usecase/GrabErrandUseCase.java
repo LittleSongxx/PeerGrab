@@ -17,6 +17,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import static com.peergrab.application.usecase.GrabPhaseMetrics.Stage.*;
+
 /**
  * 抢单用例——整个项目的心脏。
  *
@@ -50,6 +52,7 @@ public class GrabErrandUseCase {
     private final int maxOngoing;
     private final RealtimeNotifier notifier;
     private final GrabRateLimiterPort rateLimiter;
+    private final GrabPhaseMetrics metrics;
 
     public GrabErrandUseCase(GrabSlotPort grabSlotPort,
                              GrabRecordRepository grabRecordRepository,
@@ -64,7 +67,8 @@ public class GrabErrandUseCase {
                               @org.springframework.beans.factory.annotation.Value("${peergrab.credit.min-score:40}") int minCreditScore,
                               @org.springframework.beans.factory.annotation.Value("${peergrab.credit.max-ongoing:5}") int maxOngoing,
                               RealtimeNotifier notifier,
-                              GrabRateLimiterPort rateLimiter) {
+                              GrabRateLimiterPort rateLimiter,
+                              GrabPhaseMetrics metrics) {
         this.grabSlotPort = grabSlotPort;
         this.grabRecordRepository = grabRecordRepository;
         this.candidateQueue = candidateQueue;
@@ -79,6 +83,7 @@ public class GrabErrandUseCase {
         this.maxOngoing = maxOngoing;
         this.notifier = notifier;
         this.rateLimiter = rateLimiter;
+        this.metrics = metrics;
     }
 
     /**
@@ -108,12 +113,13 @@ public class GrabErrandUseCase {
         }
 
         // L1：热点任务限流。放在所有下游调用之前，避免过热任务继续消耗 Redis 与 DB。
-        if (!rateLimiter.tryPass(cmd.errandId(), cmd.runnerId())) {
+        if (!metrics.time(RATE_LIMIT, () -> rateLimiter.tryPass(cmd.errandId(), cmd.runnerId()))) {
             return Result.failed(ErrorCode.GRAB_RATE_LIMITED, null);
         }
 
         // 发单人不能领取自己的任务。必须在 Lua 扣名额前拒绝，避免自抢后资金回流。
-        Errand target = errandRepository.findById(cmd.errandId()).orElse(null);
+        Errand target = metrics.time(TASK_READ,
+                () -> errandRepository.findById(cmd.errandId()).orElse(null));
         if (target == null) {
             return Result.failed(ErrorCode.ERRAND_NOT_FOUND, null);
         }
@@ -130,18 +136,32 @@ public class GrabErrandUseCase {
 
         // L2：资格前置校验（P5 起读后端数据，不再信任客户端传的 creditScore）。
         // 放在 Lua 判定之前：没资格的人连名额裁决都不该参与，省 Redis 压力
-        int score = creditRepository.scoreOf(cmd.runnerId());
+        int score = metrics.time(CREDIT_READ, () -> creditRepository.scoreOf(cmd.runnerId()));
         if (score < minCreditScore) {
             return Result.failed(ErrorCode.CREDIT_TOO_LOW, null);
         }
-        if (errandQueryPort.countOngoingByRunner(cmd.runnerId()) >= maxOngoing) {
+        if (metrics.time(ONGOING_READ,
+                () -> errandQueryPort.countOngoingByRunner(cmd.runnerId())) >= maxOngoing) {
             return Result.failed(ErrorCode.TOO_MANY_ONGOING, null);
+        }
+
+        // 绝大多数同单争抢者到达时任务已锁定。复核一次数据库状态后直接入候选队列，
+        // 省去必然满额的 Lua 和满额分支查询；若超时流程刚将任务重新开放，继续参与抢单。
+        if (target.status() == ErrandStatus.LOCKED) {
+            Errand current = metrics.time(TASK_READ,
+                    () -> errandRepository.findById(cmd.errandId()).orElse(null));
+            if (current == null) return Result.failed(ErrorCode.ERRAND_NOT_FOUND, null);
+            if (current.status() != ErrandStatus.PUBLISHED) {
+                return classifyUnavailable(cmd, score, current);
+            }
+            target = current;
         }
 
         // L3：Redis Lua 原子判定，减少后续竞争性数据库写入；前面的身份和资格校验已读数据库。
         SlotOutcome outcome;
         try {
-            outcome = grabSlotPort.tryAcquire(cmd.errandId(), cmd.runnerId(), cmd.requestId());
+            outcome = metrics.time(SLOT_RESERVE,
+                    () -> grabSlotPort.tryAcquire(cmd.errandId(), cmd.runnerId(), cmd.requestId()));
         } catch (RuntimeException e) {
             // Redis 暂不可用时仍由 DB CAS 裁决，不能让开放任务永久失去抢单能力。
             log.warn("Redis 名额裁决不可用，走数据库 CAS errandId={}", cmd.errandId(), e);
@@ -152,12 +172,14 @@ public class GrabErrandUseCase {
             case SLOT_FULL -> {
                 // Redis 可能保存着回退前的 0；DB 仍开放时让 CAS 直接裁决。
                 // 并发预占位尚未落库也可能短暂出现这个状态，CAS 仍保证不超卖。
-                Errand current = errandRepository.findById(cmd.errandId()).orElse(null);
+                Errand current = metrics.time(TASK_READ,
+                        () -> errandRepository.findById(cmd.errandId()).orElse(null));
                 if (current == null || current.status() != ErrandStatus.PUBLISHED || !current.slotAvailable()) {
-                    return classifyUnavailable(cmd, score);
+                    return classifyUnavailable(cmd, score, current);
                 }
                 try {
-                    if (grabSlotPort.reservationPending(cmd.errandId())) {
+                    if (metrics.time(SLOT_PENDING,
+                            () -> grabSlotPort.reservationPending(cmd.errandId()))) {
                         return Result.failed(ErrorCode.GRAB_CONFLICT, null);
                     }
                 } catch (RuntimeException e) {
@@ -166,7 +188,8 @@ public class GrabErrandUseCase {
                 outcome = SlotOutcome.SLOT_MISSING;
             }
             case ALREADY_GRABBED -> {
-                Errand current = errandRepository.findById(cmd.errandId()).orElse(null);
+                Errand current = metrics.time(TASK_READ,
+                        () -> errandRepository.findById(cmd.errandId()).orElse(null));
                 return current != null && current.status() == ErrandStatus.PUBLISHED
                         ? Result.failed(ErrorCode.GRAB_CONFLICT, null)
                         : Result.failed(ErrorCode.ALREADY_GRABBED, null);
@@ -190,16 +213,18 @@ public class GrabErrandUseCase {
         // L4：数据库 CAS 落库，最终裁决
         boolean reservedInRedis = outcome == SlotOutcome.ACQUIRED;
         try {
-            Errand errand = errandRepository.findById(cmd.errandId()).orElse(null);
+            Errand errand = metrics.time(TASK_READ,
+                    () -> errandRepository.findById(cmd.errandId()).orElse(null));
             if (errand == null) {
                 rollbackIfReserved(cmd, reservedInRedis);
                 return Result.failed(ErrorCode.ERRAND_NOT_FOUND, null);
             }
 
             int seq = errand.slotTaken() + 1;
-            GrabTransactionalStep.LockResult lockResult = transactionalStep.lockAndRecord(
-                    errand.campusId(), cmd.errandId(), cmd.runnerId(), errand.version(), seq, errand.round(),
-                    idGenerator.nextId(), errand.status(), cmd.requestId());
+            GrabTransactionalStep.LockResult lockResult = metrics.time(DB_TRANSACTION,
+                    () -> transactionalStep.lockAndRecord(
+                            errand.campusId(), cmd.errandId(), cmd.runnerId(), errand.version(), seq, errand.round(),
+                            idGenerator.nextId(), errand.status(), cmd.requestId()));
             if (lockResult == GrabTransactionalStep.LockResult.QUOTA_FULL) {
                 Result committed = persistedResult(errand.campusId(), cmd);
                 if (committed != null) return committed;
@@ -212,7 +237,7 @@ public class GrabErrandUseCase {
                 rollbackIfReserved(cmd, reservedInRedis);
                 return classifyUnavailable(cmd, score);
             }
-            afterCommittedGrab(cmd, errand, reservedInRedis);
+            metrics.time(POST_COMMIT, () -> afterCommittedGrab(cmd, errand, reservedInRedis));
             return Result.success();
         } catch (RuntimeException e) {
             // 提交结果不明时先查数据库；只有确认未落库才撤销 Redis 预占位。
@@ -229,7 +254,8 @@ public class GrabErrandUseCase {
     }
 
     private Result persistedResult(long campusId, Command cmd) {
-        var holder = grabRecordRepository.findRunnerByRequestId(campusId, cmd.errandId(), cmd.requestId());
+        var holder = metrics.time(REPLAY_READ,
+                () -> grabRecordRepository.findRunnerByRequestId(campusId, cmd.errandId(), cmd.requestId()));
         if (holder.isEmpty()) return null;
         return holder.get() == cmd.runnerId()
                 ? Result.success() : Result.failed(ErrorCode.DUPLICATE_REQUEST, null);
@@ -243,21 +269,28 @@ public class GrabErrandUseCase {
     private void rollbackIfReserved(Command cmd, boolean reserved) {
         if (!reserved) return;
         try {
-            grabSlotPort.rollback(cmd.errandId(), cmd.runnerId(), cmd.requestId());
+            metrics.time(SLOT_ROLLBACK,
+                    () -> grabSlotPort.rollback(cmd.errandId(), cmd.runnerId(), cmd.requestId()));
         } catch (RuntimeException e) {
             log.warn("Redis 名额补偿失败 errandId={} runnerId={}", cmd.errandId(), cmd.runnerId(), e);
         }
     }
 
     private Result classifyUnavailable(Command cmd, int credit) {
-        Errand current = errandRepository.findById(cmd.errandId()).orElse(null);
+        Errand current = metrics.time(TASK_READ,
+                () -> errandRepository.findById(cmd.errandId()).orElse(null));
+        return classifyUnavailable(cmd, credit, current);
+    }
+
+    private Result classifyUnavailable(Command cmd, int credit, Errand current) {
         if (current == null) return Result.failed(ErrorCode.ERRAND_NOT_FOUND, null);
         if (current.grabberId() != null && current.grabberId() == cmd.runnerId()) {
             return Result.failed(ErrorCode.ALREADY_GRABBED, null);
         }
         if (current.status() == ErrandStatus.LOCKED) {
             try {
-                return Result.failed(ErrorCode.SLOT_FULL, enqueueCandidate(cmd, credit));
+                return Result.failed(ErrorCode.SLOT_FULL,
+                        metrics.time(CANDIDATE_OFFER, () -> enqueueCandidate(cmd, credit)));
             } catch (RuntimeException e) {
                 log.warn("候选排队失败 errandId={} runnerId={}", cmd.errandId(), cmd.runnerId(), e);
                 return Result.failed(ErrorCode.SLOT_FULL, null);

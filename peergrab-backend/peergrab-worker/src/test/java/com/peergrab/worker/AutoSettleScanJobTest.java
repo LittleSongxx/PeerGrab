@@ -6,14 +6,19 @@ import com.peergrab.domain.errand.model.ErrandStatus;
 import com.peergrab.domain.errand.model.ErrandType;
 import com.peergrab.domain.errand.ports.ErrandRepository;
 import com.peergrab.shared.Money;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.IntStream;
 
 import static org.mockito.Mockito.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class AutoSettleScanJobTest {
 
@@ -101,6 +106,56 @@ class AutoSettleScanJobTest {
 
         verify(retry).reschedule(eq(ScanRetryQueue.Type.AUTO_SETTLE), eq(item), any(Exception.class));
         verify(settle).settle(2, Errand.SYSTEM_OPERATOR);
+    }
+
+    @Test
+    void one_invocation_drains_multiple_pages_without_waiting_for_next_schedule() {
+        ErrandRepository repository = mock(ErrandRepository.class);
+        SettleErrandUseCase settle = mock(SettleErrandUseCase.class);
+        ScanRetryQueue retry = mock(ScanRetryQueue.class);
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        List<Errand> first = new ArrayList<>();
+        for (int i = 0; i < 200; i++) {
+            first.add(errand(i + 1, Instant.parse("2026-01-01T00:00:00Z").plusSeconds(i)));
+        }
+        Errand last = first.get(first.size() - 1);
+        List<Errand> second = List.of(errand(201,
+                Instant.parse("2026-01-01T00:00:00Z").plusSeconds(200)));
+        when(retry.claimDue(ScanRetryQueue.Type.AUTO_SETTLE, 50)).thenReturn(List.of());
+        when(repository.findAutoSettleDueAfter(0, null, 0, 200)).thenReturn(first);
+        when(repository.findAutoSettleDueAfter(0, last.autoSettleDeadlineAt(), last.id(), 200))
+                .thenReturn(second);
+        when(retry.trackedRounds(eq(ScanRetryQueue.Type.AUTO_SETTLE), anyList())).thenReturn(Map.of());
+
+        AtomicLong clock = new AtomicLong();
+        AutoSettleScanJob job = new AutoSettleScanJob(repository, settle, retry, registry,
+                2, 10_000, clock::incrementAndGet);
+        job.scan();
+
+        verify(settle, times(201)).settle(anyLong(), eq(Errand.SYSTEM_OPERATOR));
+        assertEquals(2.0, registry.counter("peergrab.auto_settle.scan.batches").count());
+        assertEquals(201.0, registry.counter("peergrab.auto_settle.scan.processed").count());
+        assertEquals(201L, registry.timer("peergrab.auto_settle.scan.item").count());
+        verify(repository).findAutoSettleDueAfter(0, last.autoSettleDeadlineAt(), last.id(), 200);
+        registry.close();
+    }
+
+    @Test
+    void one_page_uses_transactional_batch_and_does_not_replay_single_rows() {
+        ErrandRepository repository = mock(ErrandRepository.class);
+        SettleErrandUseCase settle = mock(SettleErrandUseCase.class);
+        ScanRetryQueue retry = mock(ScanRetryQueue.class);
+        Instant firstTime = Instant.parse("2026-01-01T00:00:00Z");
+        List<Errand> due = List.of(errand(1, firstTime), errand(2, firstTime.plusSeconds(1)));
+        when(retry.claimDue(ScanRetryQueue.Type.AUTO_SETTLE, 50)).thenReturn(List.of());
+        when(retry.trackedRounds(eq(ScanRetryQueue.Type.AUTO_SETTLE), anyList())).thenReturn(Map.of());
+        when(repository.findAutoSettleDueAfter(0, null, 0, 200)).thenReturn(due);
+        when(settle.settleAutoBatch(due)).thenReturn(new SettleErrandUseCase.BatchResult(2, 0));
+
+        new AutoSettleScanJob(repository, settle, retry).scan();
+
+        verify(settle).settleAutoBatch(due);
+        verify(settle, never()).settle(anyLong(), eq(Errand.SYSTEM_OPERATOR));
     }
 
     private static Errand errand(long id, Instant deliveredAt) {

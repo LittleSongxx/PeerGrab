@@ -18,6 +18,7 @@ import com.peergrab.domain.notify.ports.RealtimeNotifier;
 import com.peergrab.shared.ErrorCode;
 import com.peergrab.shared.SnowflakeIdGenerator;
 import com.peergrab.shared.Money;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -50,7 +51,7 @@ class GrabErrandUseCaseTest {
                 40,
                 5,
                 new NoopRealtimeNotifier(),
-                rateLimiter);
+                rateLimiter, metrics());
 
         GrabErrandUseCase.Result result = useCase.grab(
                 new GrabErrandUseCase.Command(10001L, 2001L, "req-limited"));
@@ -73,7 +74,8 @@ class GrabErrandUseCaseTest {
                 grabSlotPort, new EmptyGrabRecordRepository(), new NoopCandidateQueue(),
                 new EmptyErrandRepository(ownErrand),
                 null, new SnowflakeIdGenerator(1), null, null, creditRepository,
-                new NoopErrandQueryPort(), 40, 5, new NoopRealtimeNotifier(), (id, runner) -> true);
+                new NoopErrandQueryPort(), 40, 5, new NoopRealtimeNotifier(), (id, runner) -> true,
+                metrics());
 
         var result = useCase.grab(new GrabErrandUseCase.Command(10001L, 1001L, "self-grab"));
         assertEquals(ErrorCode.SELF_GRAB_FORBIDDEN, result.code());
@@ -189,8 +191,8 @@ class GrabErrandUseCaseTest {
     }
 
     @Test
-    @DisplayName("候选入队复用已校验信用分和 Lua 返回的队列大小")
-    void failed_grab_uses_atomic_candidate_size_without_extra_reads() {
+    @DisplayName("已锁定任务跳过名额 Lua，候选入队复用已校验信用分")
+    void locked_task_skips_slot_reservation_before_candidate_offer() {
         var slot = mock(GrabSlotPort.class);
         var records = mock(GrabRecordRepository.class);
         var errands = mock(ErrandRepository.class);
@@ -202,13 +204,12 @@ class GrabErrandUseCaseTest {
         when(errands.findById(errand.id())).thenReturn(Optional.of(errand));
         when(records.findRunnerByRequestId(1L, errand.id(), "candidate-request")).thenReturn(Optional.empty());
         when(credit.scoreOf(2002L)).thenReturn(60);
-        when(slot.tryAcquire(errand.id(), 2002L, "candidate-request")).thenReturn(SlotOutcome.SLOT_FULL);
         when(queue.offer(eq(errand.id()), eq(2002L), anyDouble())).thenReturn(7L);
         var useCase = new GrabErrandUseCase(slot, records, queue, errands,
                 mock(GrabTransactionalStep.class), new SnowflakeIdGenerator(1),
                 mock(TimeoutTransferUseCase.class), mock(CacheEvictSupport.class),
                 credit, new NoopErrandQueryPort(), 40, 5,
-                new NoopRealtimeNotifier(), (id, runner) -> true);
+                new NoopRealtimeNotifier(), (id, runner) -> true, metrics());
 
         var result = useCase.grab(new GrabErrandUseCase.Command(errand.id(), 2002L, "candidate-request"));
 
@@ -217,6 +218,58 @@ class GrabErrandUseCaseTest {
         verify(credit).scoreOf(2002L);
         verify(queue).offer(eq(errand.id()), eq(2002L), anyDouble());
         verify(queue, never()).size(anyLong());
+        verify(slot, never()).tryAcquire(anyLong(), anyLong(), anyString());
+        verify(errands, times(2)).findById(errand.id());
+    }
+
+    @Test
+    @DisplayName("读取到已锁定任务后若超时回退重新开放，仍参与名额裁决")
+    void reopened_task_still_attempts_grab() {
+        var slot = mock(GrabSlotPort.class);
+        var records = mock(GrabRecordRepository.class);
+        var errands = mock(ErrandRepository.class);
+        var step = mock(GrabTransactionalStep.class);
+        var locked = Errand.rehydrate(10001L, 1L, 1001L, ErrandType.DELIVERY,
+                "回退任务", Money.ofCents(100), 1, 2001L, ErrandStatus.LOCKED,
+                1, 0, 2L, java.time.Instant.now());
+        var reopened = Errand.rehydrate(10001L, 1L, 1001L, ErrandType.DELIVERY,
+                "回退任务", Money.ofCents(100), 1, null, ErrandStatus.PUBLISHED,
+                0, 1, 3L, null);
+        when(errands.findById(locked.id())).thenReturn(Optional.of(locked), Optional.of(reopened));
+        when(records.findRunnerByRequestId(1L, locked.id(), "reopened-request"))
+                .thenReturn(Optional.empty());
+        when(slot.tryAcquire(locked.id(), 2002L, "reopened-request"))
+                .thenReturn(SlotOutcome.SLOT_MISSING);
+        when(step.lockAndRecord(eq(1L), eq(locked.id()), eq(2002L), eq(3L),
+                eq(1), eq(1), anyLong(), eq(ErrandStatus.PUBLISHED), eq("reopened-request")))
+                .thenReturn(GrabTransactionalStep.LockResult.GRABBED);
+
+        var result = useCase(slot, records, errands, step).grab(
+                new GrabErrandUseCase.Command(locked.id(), 2002L, "reopened-request"));
+
+        assertTrue(result.grabbed());
+        verify(slot).tryAcquire(locked.id(), 2002L, "reopened-request");
+    }
+
+    @Test
+    @DisplayName("满额时复用刚读取的任务状态，不重复查询")
+    void slot_full_reuses_current_task_snapshot() {
+        var slot = mock(GrabSlotPort.class);
+        var records = mock(GrabRecordRepository.class);
+        var errands = mock(ErrandRepository.class);
+        var published = publishedErrand();
+        var locked = Errand.rehydrate(published.id(), 1L, 1001L, ErrandType.DELIVERY,
+                "测试任务", Money.ofCents(100), 1, 2001L, ErrandStatus.LOCKED,
+                1, 0, 2L, java.time.Instant.now());
+        when(errands.findById(published.id())).thenReturn(Optional.of(published), Optional.of(locked));
+        when(slot.tryAcquire(published.id(), 2002L, "full-request"))
+                .thenReturn(SlotOutcome.SLOT_FULL);
+
+        var result = useCase(slot, records, errands, mock(GrabTransactionalStep.class)).grab(
+                new GrabErrandUseCase.Command(published.id(), 2002L, "full-request"));
+
+        assertEquals(ErrorCode.SLOT_FULL, result.code());
+        verify(errands, times(2)).findById(published.id());
     }
 
     private static Errand publishedErrand() {
@@ -239,7 +292,11 @@ class GrabErrandUseCaseTest {
         return new GrabErrandUseCase(slot, records, new NoopCandidateQueue(), errands,
                 step, new SnowflakeIdGenerator(1), timeout, mock(CacheEvictSupport.class),
                 credit, new NoopErrandQueryPort(), 40, 5,
-                new NoopRealtimeNotifier(), (id, runner) -> true);
+                new NoopRealtimeNotifier(), (id, runner) -> true, metrics());
+    }
+
+    private static GrabPhaseMetrics metrics() {
+        return new GrabPhaseMetrics(new SimpleMeterRegistry());
     }
 
     private static final class RejectingRateLimiter implements GrabRateLimiterPort {

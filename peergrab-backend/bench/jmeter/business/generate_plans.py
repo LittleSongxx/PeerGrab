@@ -132,6 +132,10 @@ def success = code == 'OK' && body.data?.grabbed == true
 prev.setSuccessful(success || expectedReject)
 vars.put('peergrabOutcome', success ? 'GRABBED' : (expectedReject ? code : 'UNEXPECTED'))
 """
+S1_DISTINCT_CHECK = STRICT_CHECK + """def ok = code == 'OK' && body.data?.grabbed == true
+prev.setSuccessful(ok)
+vars.put('peergrabOutcome', ok ? 'GRABBED' : 'UNEXPECTED')
+"""
 S3_READ_CHECK = STRICT_CHECK + """def ok = code == 'OK' && body.data?.id?.toString() == vars.get('errand_id')
 prev.setSuccessful(ok)
 vars.put('peergrabOutcome', ok ? 'DETAIL_OK' : 'DETAIL_MISMATCH')
@@ -168,6 +172,16 @@ def s1():
     headers(t, "${request_id}")
     sync(t, "${__P(users,16)}")
     request(t, "S1 grab", "POST", "/api/errands/${__P(errand_id)}/grab", "{}", S1_CHECK)
+    return root
+
+
+def s1_distinct():
+    root, tree = plan("PeerGrab S1 independent task grab batch")
+    t = group(tree, "S1 one runner per task", "${__P(threads,64)}", forever=True)
+    csv(t, "s1_distinct_csv", "errand_id,token,request_id")
+    headers(t, "${request_id}")
+    request(t, "S1 distinct grab", "POST", "/api/errands/${errand_id}/grab",
+            "{}", S1_DISTINCT_CHECK)
     return root
 
 
@@ -218,7 +232,8 @@ def s4():
 
 
 def main():
-    plans = {"s1.jmx": s1(), "s3_read.jmx": s3_read(),
+    plans = {"s1.jmx": s1(), "s1_distinct.jmx": s1_distinct(),
+             "s3_read.jmx": s3_read(),
              "s3_mixed.jmx": s3_mixed(), "s4.jmx": s4()}
     for filename, root in plans.items():
         ET.indent(root, space="  ")

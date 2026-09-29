@@ -3,10 +3,8 @@ package com.peergrab.application.usecase;
 import com.peergrab.domain.credit.ports.CreditRepository;
 import com.peergrab.domain.errand.model.Errand;
 import com.peergrab.domain.errand.model.ErrandStatus;
-import com.peergrab.domain.errand.ports.DelayMessagePort;
 import com.peergrab.domain.errand.ports.ErrandRepository;
 import com.peergrab.domain.errand.ports.ErrandQueryPort;
-import com.peergrab.domain.errand.ports.LocalMessageRepository;
 import com.peergrab.domain.grab.ports.CandidateQueuePort;
 import com.peergrab.domain.grab.ports.GrabSlotPort;
 import org.slf4j.Logger;
@@ -37,8 +35,7 @@ public class TimeoutTransferUseCase {
     private final ErrandRepository errandRepository;
     private final CandidateQueuePort candidateQueue;
     private final GrabSlotPort grabSlotPort;
-    private final DelayMessagePort delayMessagePort;
-    private final LocalMessageRepository localMessageRepository;
+    private final TimeoutMessageDispatcher messageDispatcher;
     private final TimeoutTransferStep step;
     private final CacheEvictSupport cacheEvict;
     private final CreditRepository creditRepository;
@@ -58,8 +55,7 @@ public class TimeoutTransferUseCase {
     public TimeoutTransferUseCase(ErrandRepository errandRepository,
                                   CandidateQueuePort candidateQueue,
                                   GrabSlotPort grabSlotPort,
-                                  DelayMessagePort delayMessagePort,
-                                  LocalMessageRepository localMessageRepository,
+                                  TimeoutMessageDispatcher messageDispatcher,
                                   TimeoutTransferStep step,
                                   CacheEvictSupport cacheEvict,
                                   CreditRepository creditRepository,
@@ -70,8 +66,7 @@ public class TimeoutTransferUseCase {
         this.errandRepository = errandRepository;
         this.candidateQueue = candidateQueue;
         this.grabSlotPort = grabSlotPort;
-        this.delayMessagePort = delayMessagePort;
-        this.localMessageRepository = localMessageRepository;
+        this.messageDispatcher = messageDispatcher;
         this.step = step;
         this.cacheEvict = cacheEvict;
         this.creditRepository = creditRepository;
@@ -168,7 +163,7 @@ public class TimeoutTransferUseCase {
                         errandId, nextRunner, e);
             }
             cacheEvict.evictAfterCommit(errandId);
-            dispatch(result.pendingSend());
+            messageDispatcher.dispatch(result.pendingSend());
             log.info("任务已流转 errandId={} round={} -> nextRunner={}",
                     errandId, expectedRound + 1, nextRunner);
             return Outcome.TRANSFERRED;
@@ -220,29 +215,8 @@ public class TimeoutTransferUseCase {
 
     /** 抢单成功后登记首轮超时消息，供 GrabErrandUseCase 在事务提交后调用 */
     public void scheduleFirstTimeout(long errandId, int round, long version) {
-        dispatch(step.enqueueTimeout(errandId, round, version));
-    }
-
-    /**
-     * 事务提交后再发 MQ。
-     * 发送失败不抛出：消息已在 local_message 里是 PENDING 状态，
-     * worker 的重发 job 会兜底，业务不受影响。
-     */
-    private void dispatch(TimeoutTransferStep.PendingSend send) {
-        if (send == null) {
-            return;
-        }
-        if (!delayMessagePort.available()) {
-            // The DB scanner owns due work until MQ is enabled again; keep the
-            // local_message row PENDING so the retry worker can later publish it.
-            return;
-        }
-        try {
-            delayMessagePort.send(send.topic(), send.msgKey(), send.payload(), send.deliverAt());
-            localMessageRepository.markSent(send.msgKey());
-        } catch (RuntimeException e) {
-            log.warn("超时消息发送失败，留待 worker 重发 msgKey={}", send.msgKey(), e);
-        }
+        // enqueueTimeout commits PENDING first; MQ I/O stays off the request thread.
+        messageDispatcher.dispatch(step.enqueueTimeout(errandId, round, version));
     }
 
 }

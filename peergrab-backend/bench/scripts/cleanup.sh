@@ -40,7 +40,7 @@ python3 "$script_dir/preflight.py" --project "$project" \
   --base-url "${PEERGRAB_BENCH_BASE_URL:-}" \
   --db-host "${PEERGRAB_TEST_DB_HOST:-}" --db-port "${PEERGRAB_TEST_DB_PORT:-}"
 
-compose=(docker compose -p "$project" --env-file "$env_file"
+compose=(docker compose -p "$project" --profile web --env-file "$env_file"
   -f "$docker_dir/docker-compose.yaml"
   -f "$docker_dir/docker-compose.full.yaml"
   -f "$docker_dir/docker-compose.bench.yaml")

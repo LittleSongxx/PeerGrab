@@ -43,6 +43,10 @@ def run(kind, values):
     db_port = os.getenv("PEERGRAB_TEST_DB_PORT")
     preflight.require(all((project, base_url, db_host, db_port)),
                       "Export the benchmark environment shown in bench/README.md")
+    candidate = kind == "s5" and bool(getattr(values, "candidate", False))
+    if candidate:
+        preflight.require(bool(os.getenv("PEERGRAB_AUTH_JWT_SECRET")),
+                          "Candidate S5 requires PEERGRAB_AUTH_JWT_SECRET")
     verified = preflight.check(project, base_url, db_host, db_port, "true",
                                "false" if kind == "s5" else None,
                                values.confirm_seconds if kind == "s5" else None)
@@ -65,6 +69,7 @@ def run(kind, values):
 
     repo_cache = Path.home() / ".m2"
     preflight.require(repo_cache.is_dir(), "Build peergrab-bench on the host before running the MQ probe")
+    preflight.require_maintenance_window()
     runner_name = f"{project}-mq-probe-{uuid.uuid4().hex[:12]}"
     env = os.environ.copy()
     env.update({
@@ -76,6 +81,7 @@ def run(kind, values):
         "PEERGRAB_BENCH_VERIFIED_MQ_MODE": "true",
         "PEERGRAB_BENCH_VERIFIED_SCAN_MODE": "false" if kind == "s5" else "",
         "PEERGRAB_BENCH_VERIFIED_CONFIRM_SECONDS": str(values.confirm_seconds) if kind == "s5" else "",
+        "PEERGRAB_BENCH_PRODUCTION_STOPPED": "YES",
     })
     if verified["worker_scan_interval_ms"] is not None:
         env["PEERGRAB_BENCH_WORKER_SCAN_INTERVAL_MS"] = str(verified["worker_scan_interval_ms"])
@@ -83,11 +89,14 @@ def run(kind, values):
         "PEERGRAB_BENCH_RUNNER_CONTEXT", "PEERGRAB_BENCH_BASE_URL", "PEERGRAB_TEST_DB_HOST",
         "PEERGRAB_TEST_DB_PORT", "PEERGRAB_TEST_MQ_PORT", "PEERGRAB_BENCH_VERIFIED_MQ_MODE",
         "PEERGRAB_BENCH_VERIFIED_SCAN_MODE", "PEERGRAB_BENCH_VERIFIED_CONFIRM_SECONDS",
+        "PEERGRAB_BENCH_PRODUCTION_STOPPED", "PEERGRAB_MAINTENANCE_APPROVED",
         "PEERGRAB_TEST_DB_PASSWORD", "PEERGRAB_BENCH_PROJECT", "COMPOSE_PROJECT_NAME",
         "PEERGRAB_BENCH_DISPOSABLE",
     )
     if "PEERGRAB_BENCH_WORKER_SCAN_INTERVAL_MS" in env:
         passed_env += ("PEERGRAB_BENCH_WORKER_SCAN_INTERVAL_MS",)
+    if candidate:
+        passed_env += ("PEERGRAB_AUTH_JWT_SECRET",)
     preflight.require(bool(env.get("PEERGRAB_TEST_DB_PASSWORD")), "Missing benchmark DB password")
     runner_lifetime = (max(600, values.lead_seconds + values.timeout_seconds + 120)
                        if kind == "s5" else 600)
@@ -121,7 +130,8 @@ def run(kind, values):
             args = f"rmqbroker:8081 {values.delay_seconds}"
         else:
             main_class = "com.peergrab.bench.S5TimelineProbe"
-            args = (f"mq {values.count} {values.lead_seconds} {values.confirm_seconds} "
+            mode = "mq-candidate" if candidate else "mq"
+            args = (f"{mode} {values.count} {values.lead_seconds} {values.confirm_seconds} "
                     f"{values.timeout_seconds} rmqbroker:8081")
         print(f"Verified {project} runner {runner_id[:12]} on {network_name}; running {kind} probe", flush=True)
         command("docker", "exec", "-e", f"PEERGRAB_BENCH_RUNNER_ID={runner_id}",
@@ -161,6 +171,9 @@ def main():
     s5.add_argument("lead_seconds", type=int)
     s5.add_argument("confirm_seconds", type=int)
     s5.add_argument("timeout_seconds", type=int)
+    s5.add_argument("--candidate", action="store_true",
+                    help="enqueue one real candidate per task through the grab API; "
+                         "confirmation timeout must outlast the observation window")
     args = parser.parse_args()
     if args.kind == "delay":
         if not 1 <= args.delay_seconds <= 3600:
@@ -169,6 +182,8 @@ def main():
         if not (1 <= args.count <= 10_000 and 15 <= args.lead_seconds <= 86_000
                 and args.confirm_seconds >= 1 and args.timeout_seconds >= 10):
             parser.error("Invalid S5 probe parameters")
+        if args.candidate and args.confirm_seconds <= args.timeout_seconds + 5:
+            parser.error("Candidate confirmation timeout must exceed observation by at least 6 seconds")
     try:
         run(args.kind, args)
     except Exception as exc:

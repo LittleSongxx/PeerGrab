@@ -5,24 +5,28 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.peergrab.domain.errand.ports.ErrandCachePort;
 import org.redisson.api.RBloomFilter;
-import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Lazy;
+import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.ThreadLocalRandom;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 任务详情缓存的 Redis 实现：默认单 key 的 Cache Aside 与互斥重建。
@@ -55,6 +59,28 @@ public class RedisErrandCacheAdapter implements ErrandCachePort {
     private static final String BLOOM_READY_KEY = "errand:bloom:ready";
     private static final String REBUILD_LOCK_PREFIX = "errand:rebuild:";
     private static final long FAILURE_COOLDOWN_MILLIS = 2_000L;
+    /**
+     * Publish a complete generation atomically. The previous implementation
+     * sent one SET per shard and then switched the active pointer. Under a
+     * cold fill that multiplied round trips (and a mid-flight connection
+     * failure could expose a partial generation). One Lua command keeps the
+     * pointer switch and all shard writes in the same Redis atomic section.
+     */
+    private static final DefaultRedisScript<Long> WRITE_GENERATION_SCRIPT =
+            new DefaultRedisScript<>("""
+                    for i = 1, #KEYS - 1 do
+                      redis.call('SET', KEYS[i], ARGV[1], 'PX', ARGV[2])
+                    end
+                    redis.call('SET', KEYS[#KEYS], ARGV[3], 'PX', ARGV[2])
+                    return 1
+                    """, Long.class);
+    private static final DefaultRedisScript<Long> RELEASE_REBUILD_SCRIPT =
+            new DefaultRedisScript<>("""
+                    if redis.call('GET', KEYS[1]) == ARGV[1] then
+                      return redis.call('DEL', KEYS[1])
+                    end
+                    return 0
+                    """, Long.class);
 
     private final StringRedisTemplate redis;
     private final RedissonClient redisson;
@@ -63,16 +89,48 @@ public class RedisErrandCacheAdapter implements ErrandCachePort {
     private final long jitterSeconds;
     private final long emptyTtlSeconds;
     private final boolean bloomEnabled;
+    private final long localFallbackTtlMillis;
+    private final int localFallbackMaxEntries;
     private final AtomicLong retryAfterMillis = new AtomicLong();
     private final AtomicBoolean probing = new AtomicBoolean();
+    /** SET NX tokens let the one-key path acquire/release in one round trip each. */
+    private final ConcurrentHashMap<Long, String> rebuildTokens = new ConcurrentHashMap<>();
+    /**
+     * Tiny process-local safety net used only while Redis is degraded. It is
+     * deliberately short-lived and bounded: it absorbs the Redis timeout
+     * without turning the local copy into a second authoritative cache.
+     */
+    private final ConcurrentHashMap<Long, LocalFallback> localFallbacks = new ConcurrentHashMap<>();
 
+    @Autowired
     public RedisErrandCacheAdapter(StringRedisTemplate redis,
                                    @Lazy RedissonClient redisson,
                                    @Value("${peergrab.cache.shards:1}") int shards,
                                    @Value("${peergrab.cache.ttl-seconds:600}") long ttlSeconds,
                                    @Value("${peergrab.cache.jitter-seconds:120}") long jitterSeconds,
                                    @Value("${peergrab.cache.empty-ttl-seconds:60}") long emptyTtlSeconds,
-                                   @Value("${peergrab.cache.bloom-enabled:false}") boolean bloomEnabled) {
+                                   @Value("${peergrab.cache.bloom-enabled:false}") boolean bloomEnabled,
+                                   @Value("${peergrab.cache.local-fallback-ttl-millis:1000}") long localFallbackTtlMillis,
+                                   @Value("${peergrab.cache.local-fallback-max-entries:10000}") int localFallbackMaxEntries) {
+        this(redis, redisson, shards, ttlSeconds, jitterSeconds, emptyTtlSeconds, bloomEnabled,
+                localFallbackTtlMillis, localFallbackMaxEntries, true);
+    }
+
+    /** Lightweight constructor retained for infrastructure unit tests. */
+    public RedisErrandCacheAdapter(StringRedisTemplate redis,
+                                   @Lazy RedissonClient redisson,
+                                   int shards, long ttlSeconds, long jitterSeconds,
+                                   long emptyTtlSeconds, boolean bloomEnabled) {
+        this(redis, redisson, shards, ttlSeconds, jitterSeconds, emptyTtlSeconds, bloomEnabled,
+                1_000L, 10_000, false);
+    }
+
+    private RedisErrandCacheAdapter(StringRedisTemplate redis,
+                                    RedissonClient redisson,
+                                    int shards, long ttlSeconds, long jitterSeconds,
+                                    long emptyTtlSeconds, boolean bloomEnabled,
+                                    long localFallbackTtlMillis, int localFallbackMaxEntries,
+                                    boolean ignored) {
         this.redis = redis;
         this.redisson = redisson;
         this.shards = Math.max(1, shards);
@@ -80,6 +138,8 @@ public class RedisErrandCacheAdapter implements ErrandCachePort {
         this.jitterSeconds = jitterSeconds;
         this.emptyTtlSeconds = emptyTtlSeconds;
         this.bloomEnabled = bloomEnabled;
+        this.localFallbackTtlMillis = Math.max(0, localFallbackTtlMillis);
+        this.localFallbackMaxEntries = Math.max(0, localFallbackMaxEntries);
     }
 
     private String activeKey(long errandId) {
@@ -110,7 +170,7 @@ public class RedisErrandCacheAdapter implements ErrandCachePort {
 
     @Override
     public Optional<CachedErrand> get(long errandId) {
-        if (isDegraded()) return Optional.empty();
+        if (isDegraded()) return localFallback(errandId);
         boolean probe = retryAfterMillis.get() != 0;
         if (probe && !probing.compareAndSet(false, true)) return Optional.empty();
         try {
@@ -129,11 +189,13 @@ public class RedisErrandCacheAdapter implements ErrandCachePort {
             if (raw == null) {
                 return Optional.empty();
             }
-            return Optional.of(parse(raw));
+            CachedErrand cached = parse(raw);
+            rememberLocal(errandId, cached);
+            return Optional.of(cached);
         } catch (RuntimeException e) {
             markFailure();
             log.warn("读缓存失败，降级回源 errandId={}", errandId, e);
-            return Optional.empty();
+            return localFallback(errandId);
         } finally {
             if (probe) probing.set(false);
         }
@@ -141,11 +203,55 @@ public class RedisErrandCacheAdapter implements ErrandCachePort {
 
     @Override
     public void put(long errandId, String payloadJson) {
+        PreparedValue prepared = prepareValue(payloadJson);
+        writeAllShards(errandId, prepared.value(), prepared.ttl());
+    }
+
+    /**
+     * 预热专用批量写入。单 Redis 实例下把多个 SETEX 放入一个 pipeline，
+     * 把每个任务一次写入的网络往返从 N 次降为 1 次；每个 key 仍有独立的
+     * 逻辑过期和物理 TTL，且失败时整个预热只影响加速，不影响业务读路径。
+     * 多分片仍走逐任务的原子代切换，避免破坏分片发布语义。
+     */
+    @Override
+    public void putAll(Map<Long, String> payloads) {
+        if (payloads == null || payloads.isEmpty() || isDegraded()) return;
+        if (shards != 1 || redis.getConnectionFactory() == null) {
+            payloads.forEach(this::put);
+            return;
+        }
+
+        Map<Long, PreparedValue> prepared = new java.util.LinkedHashMap<>();
+        payloads.forEach((id, json) -> {
+            if (id == null || id <= 0 || json == null) {
+                throw new IllegalArgumentException("Invalid detail cache prewarm entry");
+            }
+            prepared.put(id, prepareValue(json));
+        });
+        try {
+            redis.executePipelined((RedisCallback<Object>) connection -> {
+                prepared.forEach((id, value) -> connection.setEx(
+                        singleKey(id).getBytes(StandardCharsets.UTF_8),
+                        value.ttl().toSeconds(),
+                        value.value().getBytes(StandardCharsets.UTF_8)));
+                return null;
+            });
+            prepared.forEach((id, value) -> rememberLocal(id, parse(value.value())));
+            markSuccess();
+        } catch (RuntimeException e) {
+            markFailure();
+            log.warn("批量预热详情缓存失败（不影响业务结果），entries={}", prepared.size(), e);
+        }
+    }
+
+    private PreparedValue prepareValue(String payloadJson) {
         long physicalTtl = ttlSeconds + ThreadLocalRandom.current().nextLong(-jitterSeconds, jitterSeconds + 1);
         long logicalExpireAt = System.currentTimeMillis() + physicalTtl * 1000 / 2;
         String value = encode(logicalExpireAt, false, parsePayload(payloadJson));
-        writeAllShards(errandId, value, Duration.ofSeconds(Math.max(60, physicalTtl)));
+        return new PreparedValue(value, Duration.ofSeconds(Math.max(60, physicalTtl)));
     }
+
+    private record PreparedValue(String value, Duration ttl) {}
 
     @Override
     public void putEmpty(long errandId) {
@@ -162,12 +268,30 @@ public class RedisErrandCacheAdapter implements ErrandCachePort {
                 redis.opsForValue().set(singleKey(errandId), value, ttl);
             } else {
                 String generation = UUID.randomUUID().toString();
+                List<String> keys = new java.util.ArrayList<>(shards + 1);
                 for (int i = 0; i < shards; i++) {
-                    redis.opsForValue().set(key(errandId, generation, i), value, ttl);
+                    keys.add(key(errandId, generation, i));
                 }
-                // 指针是提交标记：半写入的代不会被任何读请求看到。
-                redis.opsForValue().set(activeKey(errandId), generation, ttl);
+                keys.add(activeKey(errandId));
+                if (redis.getConnectionFactory() != null) {
+                    // One atomic EVAL replaces 2*shards+1 sequential round
+                    // trips and preserves the old generation on script error.
+                    Long result = redis.execute(WRITE_GENERATION_SCRIPT, keys, value,
+                            String.valueOf(Math.max(1, ttl.toMillis())), generation);
+                    if (result == null || result != 1L) {
+                        throw new IllegalStateException("Redis generation publish returned no acknowledgement");
+                    }
+                } else {
+                    // Lightweight unit-test doubles do not expose a connection
+                    // factory. Keep their old observable behavior without
+                    // weakening the production path above.
+                    for (int i = 0; i < shards; i++) {
+                        redis.opsForValue().set(keys.get(i), value, ttl);
+                    }
+                    redis.opsForValue().set(keys.get(shards), generation, ttl);
+                }
             }
+            rememberLocal(errandId, parse(value));
             markSuccess();
         } catch (RuntimeException e) {
             markFailure();
@@ -177,6 +301,9 @@ public class RedisErrandCacheAdapter implements ErrandCachePort {
 
     @Override
     public void evict(long errandId) {
+        // A committed write must never leave a process-local stale copy even
+        // when Redis is already in its failure cooldown.
+        localFallbacks.remove(errandId);
         if (isDegraded()) {
             throw new IllegalStateException("Redis 缓存处于故障冷却期，失效需重试: errandId=" + errandId);
         }
@@ -191,20 +318,45 @@ public class RedisErrandCacheAdapter implements ErrandCachePort {
         }
     }
 
+    private void rememberLocal(long errandId, CachedErrand value) {
+        if (localFallbackTtlMillis <= 0 || localFallbackMaxEntries <= 0 || value.isEmpty()) return;
+        if (!localFallbacks.containsKey(errandId) && localFallbacks.size() >= localFallbackMaxEntries) {
+            var iterator = localFallbacks.keySet().iterator();
+            if (iterator.hasNext()) localFallbacks.remove(iterator.next());
+        }
+        localFallbacks.put(errandId, new LocalFallback(value,
+                System.currentTimeMillis() + localFallbackTtlMillis));
+    }
+
+    private Optional<CachedErrand> localFallback(long errandId) {
+        LocalFallback fallback = localFallbacks.get(errandId);
+        if (fallback == null || fallback.expiresAtMillis() <= System.currentTimeMillis()) {
+            if (fallback != null) localFallbacks.remove(errandId, fallback);
+            return Optional.empty();
+        }
+        return Optional.of(fallback.value());
+    }
+
+    private record LocalFallback(CachedErrand value, long expiresAtMillis) {}
+
     /**
-     * 重建权：tryLock 不等待（waitTime=0）。
-     * 拿不到就立刻返回 false 让调用方返回旧值——阻塞等待会把线程耗在这里，
-     * 热 Key 场景下几百个线程一起等，等于把击穿变成了线程池打满。
+     * 重建权：用 Redis SET NX PX token 取代 Redisson RLock。
+     *
+     * A cold S3 fill otherwise pays the Redisson lock protocol before the DB
+     * read and again on release. The token is checked by a Lua unlock, so a
+     * late releaser cannot delete a newer owner's lock; the 10-second lease
+     * still bounds abandoned locks. trySetIfAbsent never waits, preserving the
+     * stale-value/non-blocking hot-key behavior.
      */
     @Override
     public boolean tryAcquireRebuild(long errandId) {
         if (isDegraded()) return false;
         try {
-            RLock lock = redisson.getLock(REBUILD_LOCK_PREFIX + errandId);
-            return lock.tryLock(0, 10, TimeUnit.SECONDS);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return false;
+            String token = UUID.randomUUID().toString();
+            boolean acquired = Boolean.TRUE.equals(redis.opsForValue().setIfAbsent(
+                    REBUILD_LOCK_PREFIX + errandId, token, Duration.ofSeconds(10)));
+            if (acquired) rebuildTokens.put(errandId, token);
+            return acquired;
         } catch (RuntimeException e) {
             markFailure();
             log.warn("获取重建锁失败 errandId={}", errandId, e);
@@ -214,11 +366,12 @@ public class RedisErrandCacheAdapter implements ErrandCachePort {
 
     @Override
     public void releaseRebuild(long errandId) {
+        String token = rebuildTokens.remove(errandId);
+        if (token == null || isDegraded()) return;
         try {
-            RLock lock = redisson.getLock(REBUILD_LOCK_PREFIX + errandId);
-            if (lock.isHeldByCurrentThread()) {
-                lock.unlock();
-            }
+            Long result = redis.execute(RELEASE_REBUILD_SCRIPT,
+                    List.of(REBUILD_LOCK_PREFIX + errandId), token);
+            if (result == null) throw new IllegalStateException("Redis unlock returned no acknowledgement");
         } catch (RuntimeException e) {
             markFailure();
             log.warn("释放重建锁失败 errandId={}", errandId, e);

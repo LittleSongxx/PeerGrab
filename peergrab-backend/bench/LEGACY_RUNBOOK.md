@@ -140,7 +140,7 @@ python3 peergrab-backend/bench/scripts/run_remote_s2.py \
 
 `run_remote_s2_vegeta.py` 提供异机固定到达率发压，默认 `--workload cursor-first` 测当前广场的 `cursor=` 首屏；`legacy-first` 单独保留旧分页口径。未指定 `--execute --confirm-project <隔离项目名>` 时只做身份预检。结果保存聚合 JSON 和脱敏的约每秒**完成结果**快照，不保存 Bearer 或原始逐请求记录；该快照不是精确的逐秒计划到达数。`status=0` 是无 HTTP 响应，不能算 HTTP 200 或应用 5xx。长档应同时报告采样秒数、实际结果数和全部错误数。
 
-隔离栈内的 Redis／Broker 暂停与恢复探针见 [S6 故障冒烟手册](S6_FAULT_SMOKE.md)；它只检验指定故障窗口的响应与数据收敛，不代表完整 S6 容量或跨主机可用性。现有指标的口径与下一轮测试设计见[压测方法学审计](../docs/压测方法学审计-20260928.md)。
+隔离栈内的 Redis／Broker 暂停与恢复探针见 [S6 故障冒烟手册](S6_FAULT_SMOKE.md)；它只检验指定故障窗口的响应与数据收敛，不代表完整 S6 容量或跨主机可用性。现行口径见当前 ECS 报告和 `bench/README.md`。
 
 正式极限测量应安排公开站可承受的维护窗口，或使用同规格独立目标机；生产站与隔离栈同驻时，结果必须写明资源配额及公开站的并发负载。[Docker Compose 项目隔离说明](https://docs.docker.com/compose/how-tos/project-name/)用于确认容器、网络和卷的命名边界。
 

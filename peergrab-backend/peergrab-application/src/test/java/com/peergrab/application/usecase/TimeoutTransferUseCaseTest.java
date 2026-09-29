@@ -4,10 +4,8 @@ import com.peergrab.domain.credit.ports.CreditRepository;
 import com.peergrab.domain.errand.model.Errand;
 import com.peergrab.domain.errand.model.ErrandStatus;
 import com.peergrab.domain.errand.model.ErrandType;
-import com.peergrab.domain.errand.ports.DelayMessagePort;
 import com.peergrab.domain.errand.ports.ErrandQueryPort;
 import com.peergrab.domain.errand.ports.ErrandRepository;
-import com.peergrab.domain.errand.ports.LocalMessageRepository;
 import com.peergrab.domain.grab.ports.CandidateQueuePort;
 import com.peergrab.domain.grab.ports.GrabSlotPort;
 import com.peergrab.shared.Money;
@@ -112,6 +110,20 @@ class TimeoutTransferUseCaseTest {
         verify(fixture.slot, never()).rollback(anyLong(), anyLong(), anyString());
     }
 
+    @Test
+    void firstTimeoutIsCommittedBeforeBackgroundDispatch() {
+        var fixture = new Fixture();
+        var send = new TimeoutTransferStep.PendingSend("errand-confirm-timeout",
+                "timeout:10001:0", "{}", Instant.now().plusSeconds(300));
+        when(fixture.step.enqueueTimeout(10001L, 0, 2L)).thenReturn(send);
+
+        fixture.useCase.scheduleFirstTimeout(10001L, 0, 2L);
+
+        var order = inOrder(fixture.step, fixture.dispatcher);
+        order.verify(fixture.step).enqueueTimeout(10001L, 0, 2L);
+        order.verify(fixture.dispatcher).dispatch(send);
+    }
+
     private static final class Fixture {
         final Errand errand = Errand.rehydrate(10001L, 1L, 1001L, ErrandType.DELIVERY,
                 "测试任务", Money.ofCents(100), 1, 2001L, ErrandStatus.LOCKED,
@@ -120,6 +132,7 @@ class TimeoutTransferUseCaseTest {
         final CandidateQueuePort queue = mock(CandidateQueuePort.class);
         final GrabSlotPort slot = mock(GrabSlotPort.class);
         final TimeoutTransferStep step = mock(TimeoutTransferStep.class);
+        final TimeoutMessageDispatcher dispatcher = mock(TimeoutMessageDispatcher.class);
         final CreditRepository credit = mock(CreditRepository.class);
         final CacheEvictSupport cache = mock(CacheEvictSupport.class);
         final ErrandQueryPort queries = mock(ErrandQueryPort.class);
@@ -129,7 +142,7 @@ class TimeoutTransferUseCaseTest {
             when(errands.findById(10001L)).thenReturn(Optional.of(errand));
             when(errands.confirmTimeoutDue(10001L, 0)).thenReturn(true);
             useCase = new TimeoutTransferUseCase(errands, queue, slot,
-                    mock(DelayMessagePort.class), mock(LocalMessageRepository.class), step,
+                    dispatcher, step,
                     cache, credit, queries,
                     40, 5, 5);
         }

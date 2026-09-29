@@ -1,0 +1,21 @@
+# Maintenance-only overlay: benchmark the newly built candidate images in a
+# disposable project. Never point app/worker at peergrab-prod-*:latest.
+services:
+  app:
+    image: peergrab-codex-app:20260929
+    build: !reset null
+    restart: "no"
+    environment:
+      SPRING_DATA_REDIS_TIMEOUT: ${PEERGRAB_BENCH_REDIS_TIMEOUT:-2000ms}
+  worker:
+    image: peergrab-codex-worker:20260929
+    build: !reset null
+    restart: "no"
+    environment:
+      SPRING_DATA_REDIS_TIMEOUT: ${PEERGRAB_BENCH_REDIS_TIMEOUT:-2000ms}
+  frontend:
+    image: peergrab-prod-frontend:latest
+    build: !reset null
+    ports: !override
+      - "127.0.0.1:${PEERGRAB_BENCH_WEB_PORT:-38242}:80"
+    restart: "no"

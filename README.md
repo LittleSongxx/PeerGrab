@@ -64,9 +64,9 @@ API 与 Worker 复用应用用例；领域层定义状态规则和端口，基�
 
 随后在同一业务镜像上完成[独立的 JMeter ECS 复测](peergrab-backend/bench/reports/peergrab-current/report-ecs-jmeter-20260928.md)：广场游标首屏经异机公网 HTTPS，在 **500 目标 RPS × 180 秒 × 3 轮**中实际启动 **269,608 次，全部通过 HTTP 和业务断言**，最差轮 P99 **255 ms**；600 目标 RPS 长档第二轮出现 **1 次连接超时**，按门禁停止第三轮。2,000 个 JMeter 用户线程同单抢 1 名额恰好 1 人成功、0 超卖，但实际请求开始横跨 2.228 秒、P99 **8.735 秒**；共享钱包热点结算 200 单／32 线程短批次为 **34.72 持久化 TPS**，资金校验通过。不同工具的连接复用与到达模型不同，不能用两份报告直接计算优化收益或全站容量。
 
-[JMeter 校招／实习简历指标卡](peergrab-backend/docs/校招实习简历性能指标-JMeter-20260928.md)给出新轮次的可追溯表述。[原工具指标卡](peergrab-backend/docs/校招实习简历性能指标-20260928.md)、[2026-09-27 简历专项复测](peergrab-backend/bench/reports/peergrab-current/report-resume-metrics-20260927.md)与[旧版指标卡](peergrab-backend/docs/校招实习简历性能指标-20260927.md)保留为历史基线；代码、路径、工具和负载窗口不同，不能直接计算优化增益。这些有限窗口实验不是全站容量或生产 SLA 承诺。
+所有指标均按镜像、工具、请求路径、负载窗口和错误分母分开记录；这些有限窗口实验不是全站容量或生产 SLA 承诺。
 
-当前 HTTP 发压入口是 [JMeter 5.6.3 场景计划](peergrab-backend/bench/jmeter/README.md)；S5 的 Worker 定时事件仍由专用探针测量。[可观测性现状评估](peergrab-backend/docs/可观测性现状评估-20260928.md)区分了已有 Micrometer 指标与尚未部署的持续看板、告警和链路追踪。
+当前 HTTP 发压入口是 [JMeter 5.6.3 场景计划](peergrab-backend/bench/jmeter/README.md)；S5 的 Worker 定时事件仍由专用探针测量。API 与 Worker 已暴露 Micrometer/Prometheus 指标，生产尚未部署持续看板、告警或分布式追踪。
 
 ## 快速开始
 
@@ -78,4 +78,4 @@ cp -n .env.example .env
 docker compose -f docker-compose.yaml -f docker-compose.full.yaml --env-file .env up -d --build
 ```
 
-打开 `http://127.0.0.1:25173`。演示身份：发单人 `1001 / demo1001`、跑腿 `2001 / demo2001` 或 `2002 / demo2002`、仲裁员 `9001 / demo9001`。开发与测试命令见[后端](peergrab-backend/README.md)和[前端](peergrab-frontend/README.md)文档；已有旧版 Docker 数据请先看[迁移说明](peergrab-backend/docker/UPGRADE.md)。
+打开 `http://127.0.0.1:25173`。演示身份：发单人 `1001 / demo1001`、跑腿 `2001 / demo2001` 或 `2002 / demo2002`、仲裁员 `9001 / demo9001`。开发与测试命令见[后端](peergrab-backend/README.md)和[前端](peergrab-frontend/README.md)文档；已有 `peergrab-local` 数据卷请先按[本机卷升级步骤](peergrab-backend/README.md#已有本机-peergrab-数据卷升级)迁移。原 `campus-dash-local` 栈的[迁移记录](peergrab-backend/docker/UPGRADE.md)仅供查阅。

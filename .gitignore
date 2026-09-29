@@ -9,3 +9,8 @@
 !**/.env.example
 !**/.env.prod.example
 peergrab-backend/bench/runs/
+
+# Personal interview, recruiting, and resume materials; keep outside the repository.
+docs/面经/
+peergrab-backend/docs/
+peergrab-backend/bench/reports/peergrab-current/report-resume-*

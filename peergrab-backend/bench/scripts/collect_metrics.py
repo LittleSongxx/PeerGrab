@@ -23,6 +23,7 @@ TUNING_KEYS = {
     "SERVER_TOMCAT_THREADS_MAX", "PEERGRAB_TIMEOUT_CONFIRM_SECONDS",
     "PEERGRAB_TIMEOUT_SCAN_ENABLED",
     "PEERGRAB_TIMEOUT_SCAN_INTERVAL_MS", "PEERGRAB_SETTLE_SCAN_INTERVAL_MS",
+    "SPRING_DATA_REDIS_TIMEOUT",
 }
 
 
@@ -136,6 +137,7 @@ def main() -> None:
     parser.add_argument("--duration", required=True, type=float, help="seconds to sample")
     parser.add_argument("--interval", type=float, default=2.0, help="sample interval in seconds")
     parser.add_argument("--output", required=True, type=Path, help="new JSONL file")
+    parser.add_argument("--source-id", help="candidate image/JAR digest for an archived checkout")
     parser.add_argument("--interface", help="host network interface; default: route interface")
     parser.add_argument("--disk", help="host block device; default: root device")
     args = parser.parse_args()
@@ -148,7 +150,9 @@ def main() -> None:
     metadata = container_metadata(ids, args.project)
     interface = args.interface or default_interface()
     disk = args.disk or default_disk()
-    git_sha = command("git", "-C", str(REPO_ROOT), "rev-parse", "HEAD")
+    if args.source_id is not None and not re.fullmatch(r"[A-Za-z0-9:._-]{1,128}", args.source_id):
+        parser.error("--source-id must be a short digest or image identifier")
+    git_sha = None if args.source_id else command("git", "-C", str(REPO_ROOT), "rev-parse", "HEAD")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     start = time.monotonic()
@@ -160,6 +164,7 @@ def main() -> None:
     with args.output.open("x", encoding="utf-8") as stream:
         stream.write(json.dumps({
             "kind": "metadata", "project": args.project, "gitSha": git_sha,
+            "candidateSourceId": args.source_id,
             "intervalSeconds": args.interval, "interface": interface, "disk": disk,
             "containers": metadata,
         }) + "\n")

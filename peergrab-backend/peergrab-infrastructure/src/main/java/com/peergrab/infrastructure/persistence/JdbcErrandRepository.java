@@ -74,6 +74,23 @@ public class JdbcErrandRepository implements ErrandRepository {
     }
 
     /**
+     * 详情缓存预热的批量读路径。ID 已由 application 层做正数校验和去重，
+     * 占位符由本方法按数量生成，不拼接任何用户输入，因此不会改变 SQL 注入边界。
+     */
+    @Override
+    public List<Errand> findByIds(List<Long> errandIds) {
+        if (errandIds == null || errandIds.isEmpty()) return List.of();
+        List<Long> ids = errandIds.stream()
+                .filter(id -> id != null && id > 0)
+                .distinct()
+                .toList();
+        if (ids.isEmpty()) return List.of();
+        String placeholders = String.join(",", java.util.Collections.nCopies(ids.size(), "?"));
+        return jdbc.query("SELECT * FROM errand WHERE id IN (" + placeholders + ") ORDER BY id",
+                MAPPER, ids.toArray());
+    }
+
+    /**
      * 抢单的核心 CAS。
      *
      * 三个条件缺一不可：

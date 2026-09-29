@@ -18,6 +18,22 @@ public interface ErrandRepository {
     Optional<Errand> findById(long errandId);
 
     /**
+     * 批量读取任务详情，供只读缓存预热使用。
+     *
+     * 默认实现保留旧适配器和测试替身的兼容性；JDBC 适配器会覆盖为一条
+     * 主键 IN 查询，避免预热时重新引入 N+1 回源。
+     */
+    default List<Errand> findByIds(List<Long> errandIds) {
+        if (errandIds == null || errandIds.isEmpty()) return List.of();
+        return errandIds.stream()
+                .filter(id -> id != null && id > 0)
+                .distinct()
+                .map(this::findById)
+                .flatMap(Optional::stream)
+                .toList();
+    }
+
+    /**
      * 抢单的核心 CAS：只有当前状态与版本号都匹配时才更新成功。
      *
      * @return 影响行数。0 表示状态已被别人改掉（抢单失败），1 表示抢中。

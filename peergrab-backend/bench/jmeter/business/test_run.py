@@ -1,5 +1,6 @@
 """Privacy and result-gate tests for the JMeter business runner."""
 import csv
+import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
 from pathlib import Path
@@ -41,6 +42,29 @@ class BusinessRunnerTest(unittest.TestCase):
         cycles = [item for item in root.findall(".//LoopController")
                   if item.get("testname") == "Repeated publish/read cycles"]
         self.assertEqual(1, len(cycles))
+
+    def test_distinct_grab_plan_consumes_private_csv_without_recycling(self):
+        root = ET.parse(Path(__file__).with_name("s1_distinct.jmx")).getroot()
+        samplers = root.findall(".//HTTPSamplerProxy")
+        self.assertEqual(["S1 distinct grab"], [item.get("testname") for item in samplers])
+        csv = root.find(".//CSVDataSet")
+        properties = {item.get("name"): item.text for item in csv}
+        self.assertEqual("false", properties["recycle"])
+        self.assertEqual("true", properties["stopThread"])
+
+    def test_distinct_grab_tps_requires_database_success(self):
+        rows = [dict(timeStamp="1790000000000", elapsed="100", label="S1 distinct grab",
+                     responseCode="200", success="true", responseMessage="GRABBED"),
+                dict(timeStamp="1790000000100", elapsed="100", label="S1 distinct grab",
+                     responseCode="200", success="true", responseMessage="GRABBED")]
+        manifest = {"runId": "20260929-010101", "tasks": 2}
+        with patch.object(run, "scalar", side_effect=[2, 2]):
+            result = run.verify("s1-distinct", rows, manifest, "bench-mysql", "http://127.0.0.1:8080", None)
+        self.assertEqual(2, result["durableGrabbed"])
+        self.assertEqual(10.0, result["durableGrabTps"])
+        with patch.object(run, "scalar", side_effect=[2, 1]):
+            with self.assertRaisesRegex(RuntimeError, "durable grab"):
+                run.verify("s1-distinct", rows, manifest, "bench-mysql", "http://127.0.0.1:8080", None)
 
     def test_cache_counters_accept_json_decimal_strings_only(self):
         self.assertEqual(run.json_count("4", "requests"), 4)
@@ -101,6 +125,24 @@ class BusinessRunnerTest(unittest.TestCase):
         self.assertNotIn("PEERGRAB_AUTH_JWT_SECRET", env)
         self.assertNotIn("PEERGRAB_BENCH_TOKEN", env)
         self.assertNotIn("HTTP_PROXY", env)
+
+    def test_preheat_fixture_deduplicates_ids_and_writes_aggregate_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            with (output / "s3_read.csv").open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=("errand_id", "token"))
+                writer.writeheader()
+                writer.writerows(({"errand_id": "42", "token": "private"},
+                                  {"errand_id": "42", "token": "private"},
+                                  {"errand_id": "43", "token": "private"}))
+            result = {"requested": 2, "distinct": 2, "found": 2, "written": 2,
+                      "missing": 0, "elapsedMs": 1, "cacheHealthy": True}
+            with patch.object(run.prewarm_cache, "run", return_value=result) as warm:
+                actual = run.prewarm_fixture("http://127.0.0.1:8080", output)
+            warm.assert_called_once_with("http://127.0.0.1:8080", [42, 43])
+            self.assertEqual(2, actual["written"])
+            evidence = json.loads((output / "prewarm.json").read_text(encoding="utf-8"))
+            self.assertEqual(2, evidence["distinct"])
 
 
 if __name__ == "__main__":

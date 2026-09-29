@@ -8,8 +8,25 @@ import com.peergrab.shared.Money;
 
 import java.util.Optional;
 import java.util.Map;
+import java.util.List;
 
 public interface WalletRepository {
+
+    /** Owner lookup batch used by settlement to avoid one round trip per account. */
+    record OwnerRef(long ownerId, AccountType type) {}
+
+    /**
+     * A balance transition prepared after the participating rows have been locked.
+     *
+     * The expected values are included in the write predicate as a final guard
+     * against a stale in-memory batch.  A batch must aggregate all legs for one
+     * account into one transition; the version therefore advances by the number
+     * of ledger rows that the batch will append for that account.
+     */
+    record AccountUpdate(long accountId, long expectedAvailableCents, long availableCents,
+                         long expectedVersion, long version) {}
+
+    Map<OwnerRef, WalletAccount> findByOwners(List<OwnerRef> owners);
 
     Optional<WalletAccount> findByOwner(long ownerId, AccountType type);
 
@@ -36,8 +53,14 @@ public interface WalletRepository {
     /** 贷记到目标账户（托管账户收款 / 跑腿收款 / 佣金入账） */
     int casCredit(long accountId, Money amount);
 
+    /** Apply all locked account transitions in one JDBC batch. */
+    void applyAccountUpdates(List<AccountUpdate> updates);
+
     /** 写流水。bizNo + direction + account 唯一索引冲突时抛异常，代表重复请求 */
     void insertLedger(LedgerEntry entry);
+
+    /** Insert a balanced batch of ledger facts in one JDBC batch. */
+    void insertLedgerBatch(List<LedgerEntry> entries);
 
     void insertEscrow(EscrowOrder order);
 

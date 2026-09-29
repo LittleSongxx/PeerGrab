@@ -12,11 +12,16 @@ spring:
     redis:
       host: 127.0.0.1
       port: 6380
+      timeout: 500ms
 
 peergrab:
   scheduler:
     fast-pool-size: 3          # 超时/结算扫描与消息重发
     maintenance-pool-size: 3   # 对账、信用/缓存投影重建
+  settle:
+    scan-interval-ms: 5000
+    scan-max-batches: 5         # 同一轮连续处理最多 5 页，每页 200 条
+    scan-max-run-ms: 30000      # 一次尽量排空到期页；其它 fast scheduler 仍有独立线程
   ws:
     # worker 进程不持有 WebSocket 连接，推送由 app 进程负责；
     # 这里显式关闭以装配 NoopRealtimeNotifier（用例依赖该端口）

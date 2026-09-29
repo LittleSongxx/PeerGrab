@@ -28,6 +28,21 @@ python3 bench/scripts/run_s6_fault_smoke.py \
   --execute --confirm-project "$PEERGRAB_BENCH_PROJECT"
 ```
 
+### ECS Broker 暂停抢单专项
+
+本专项在 ECS 维护窗口使用**另一套全新隔离栈和独立数据卷**，只发起一笔发布和一笔抢单。先只读预检，再设置 ECS 维护声明执行；环境声明用于防误操作，不代替对宿主机身份和停站窗口的人工核验。
+
+```bash
+python3 bench/scripts/run_s6_grab_broker_smoke.py \
+  --project "$PEERGRAB_BENCH_PROJECT"
+export PEERGRAB_BENCH_ECS_MAINTENANCE=YES
+python3 bench/scripts/run_s6_grab_broker_smoke.py \
+  --project "$PEERGRAB_BENCH_PROJECT" \
+  --execute --confirm-project "$PEERGRAB_BENCH_PROJECT"
+```
+
+脚本复用相同的生产停站门禁、隔离栈容器／卷／回环端口核验及精确容器 ID 的暂停看门狗；应用和 Worker 必须开启 MQ 与超时扫描、使用 JWT 且关闭直传身份，确认超时须覆盖暂停与恢复观察窗口。抢单请求超时上限 8 秒。暂停期间必须核实任务 `LOCKED`、名额 1/1、抢中记录仅 1 条、托管仍 `HELD`、托管流水两条，且 `local_message` 的 `timeout:{errandId}:0` 为 `PENDING`；解冻后它必须转为 `SENT`，资金与名额不变量仍成立。客户端超时即使数据库已提交，该轮仍判失败，但会继续观察并保存恢复结果。结果写入忽略提交的 `bench/runs/s6-grab-*.json`，不含口令、令牌或响应体。该专项不测吞吐、故障期间的持续可用率或跨机切换。
+
 故障窗口上限默认 30 秒，可选 `--fault-seconds 20..30`；正常路径提前约 3 秒解冻，给独立看门狗留出余量。恢复观察最多 180 秒，可选 `--recovery-seconds 30..600`。只有一个已核对完整 ID 的 Redis 或 Broker 容器被 `docker pause`；脚本不使用 `docker stop`、`compose down`、`-v`、网络规则、生产路由或公网请求。故障内的业务写请求设置 8 秒超时，JMeter 详情读连接／响应超时各 3 秒；JMeter 启动和结果排空占用故障窗口，因此默认 30 秒暂停时其随机到达读负载只持续 18 秒。独立看门狗会在上限前尝试解冻，超时恢复的轮次标为失败。故障期间的工作负载异常会触发立即解冻；正常流量完成后维持剩余故障窗口。`SIGTERM`/`Ctrl-C` 通过清理路径解冻；`SIGKILL`、宿主机断电或 Docker daemon 故障无法被进程内 `finally` 捕获。旧版均匀固定间隔 Python 探针可用 `--detail-generator python` 单独复现，不与 JMeter 随机到达轮直接算提升。
 
 ## 记录和通过条件

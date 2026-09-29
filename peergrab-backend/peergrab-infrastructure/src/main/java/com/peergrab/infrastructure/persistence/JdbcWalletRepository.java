@@ -14,6 +14,7 @@ import org.springframework.stereotype.Repository;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.Duration;
+import java.sql.Statement;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -26,6 +27,7 @@ public class JdbcWalletRepository implements WalletRepository {
 
     private final JdbcTemplate jdbc;
     private final Timer accountLockTimer;
+    private final Timer ownerLookupTimer;
 
     public JdbcWalletRepository(JdbcTemplate jdbc, MeterRegistry registry) {
         this.jdbc = jdbc;
@@ -36,6 +38,10 @@ public class JdbcWalletRepository implements WalletRepository {
                         Duration.ofMillis(100), Duration.ofMillis(250), Duration.ofMillis(500),
                         Duration.ofSeconds(1))
                 .register(registry);
+        this.ownerLookupTimer = Timer.builder("peergrab.wallet.owner.lookup")
+                .description("Time to batch-resolve settlement wallet owners")
+                .publishPercentileHistogram()
+                .register(registry);
     }
 
     private static final RowMapper<WalletAccount> MAPPER = (rs, n) -> new WalletAccount(
@@ -45,6 +51,32 @@ public class JdbcWalletRepository implements WalletRepository {
             Money.ofCents(rs.getLong("available")),
             Money.ofCents(rs.getLong("frozen")),
             rs.getLong("version"));
+
+    @Override
+    public Map<WalletRepository.OwnerRef, WalletAccount> findByOwners(List<WalletRepository.OwnerRef> owners) {
+        if (owners == null || owners.isEmpty()) return Map.of();
+        long started = System.nanoTime();
+        try {
+            // Each OR arm is an equality probe on uk_owner(owner_id, owner_type);
+            // settlement needs the IDs only so the subsequent lock query can use PKs.
+            List<WalletRepository.OwnerRef> distinct = owners.stream().distinct().toList();
+            String predicates = String.join(" OR ",
+                    java.util.Collections.nCopies(distinct.size(), "(owner_id = ? AND owner_type = ?)"));
+            Object[] args = new Object[distinct.size() * 2];
+            for (int i = 0; i < distinct.size(); i++) {
+                args[i * 2] = distinct.get(i).ownerId();
+                args[i * 2 + 1] = distinct.get(i).type().name();
+            }
+            Map<WalletRepository.OwnerRef, WalletAccount> result = new LinkedHashMap<>();
+            for (WalletAccount account : jdbc.query("SELECT * FROM wallet_account WHERE " + predicates
+                            + " ORDER BY id", MAPPER, args)) {
+                result.put(new WalletRepository.OwnerRef(account.ownerId(), account.type()), account);
+            }
+            return result;
+        } finally {
+            ownerLookupTimer.record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
+        }
+    }
 
     @Override
     public Optional<WalletAccount> findByOwner(long ownerId, AccountType type) {
@@ -61,12 +93,20 @@ public class JdbcWalletRepository implements WalletRepository {
         }
         long started = System.nanoTime();
         try {
+            long[] ordered = Arrays.stream(accountIds).distinct().sorted().toArray();
             Map<Long, WalletAccount> locked = new LinkedHashMap<>();
-            Arrays.stream(accountIds).distinct().sorted().forEach(id -> {
-                List<WalletAccount> rows = jdbc.query(
-                        "SELECT * FROM wallet_account WHERE id = ? FOR UPDATE", MAPPER, id);
-                if (!rows.isEmpty()) locked.put(id, rows.get(0));
-            });
+            if (ordered.length == 0) return locked;
+
+            // One indexed SELECT locks every account in a deterministic order. The old
+            // implementation issued one round trip per account (three for settlement),
+            // extending the time that the shared escrow/commission rows stayed locked.
+            String placeholders = String.join(",", java.util.Collections.nCopies(ordered.length, "?"));
+            String sql = "SELECT * FROM wallet_account WHERE id IN (" + placeholders + ")"
+                    + " ORDER BY id FOR UPDATE";
+            Object[] args = Arrays.stream(ordered).boxed().toArray();
+            for (WalletAccount account : jdbc.query(sql, MAPPER, args)) {
+                locked.put(account.id(), account);
+            }
             return locked;
         } finally {
             accountLockTimer.record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
@@ -104,6 +144,33 @@ public class JdbcWalletRepository implements WalletRepository {
     }
 
     @Override
+    public void applyAccountUpdates(List<WalletRepository.AccountUpdate> updates) {
+        if (updates == null || updates.isEmpty()) return;
+        int[][] counts = jdbc.batchUpdate("""
+                UPDATE wallet_account
+                   SET available = ?, version = ?
+                 WHERE id = ? AND available = ? AND version = ?
+                """, updates, updates.size(), (ps, update) -> {
+            ps.setLong(1, update.availableCents());
+            ps.setLong(2, update.version());
+            ps.setLong(3, update.accountId());
+            ps.setLong(4, update.expectedAvailableCents());
+            ps.setLong(5, update.expectedVersion());
+        });
+        for (int[] batch : counts) {
+            for (int count : batch) {
+                // Connector/J may report SUCCESS_NO_INFO (-2) when
+                // rewriteBatchedStatements is enabled; the DB still executed
+                // every element of the batch.  A zero count remains a guard
+                // failure because all rows were locked and should match.
+                if (count != 1 && count != Statement.SUCCESS_NO_INFO) {
+                    throw new IllegalStateException("wallet account batch update lost its lock or version");
+                }
+            }
+        }
+    }
+
+    @Override
     public void insertLedger(LedgerEntry entry) {
         jdbc.update("""
                 INSERT INTO wallet_ledger (id, biz_no, account_id, user_id, direction,
@@ -113,6 +180,34 @@ public class JdbcWalletRepository implements WalletRepository {
                 entry.id(), entry.bizNo(), entry.accountId(), entry.userId(),
                 entry.direction().name(), entry.amount().cents(), entry.balanceAfter().cents(),
                 entry.accountVersion(), entry.refType().name(), entry.refId());
+    }
+
+    @Override
+    public void insertLedgerBatch(List<LedgerEntry> entries) {
+        if (entries == null || entries.isEmpty()) return;
+        int[][] counts = jdbc.batchUpdate("""
+                INSERT INTO wallet_ledger (id, biz_no, account_id, user_id, direction,
+                                           amount, balance_after, account_version, ref_type, ref_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, entries, entries.size(), (ps, entry) -> {
+            ps.setLong(1, entry.id());
+            ps.setString(2, entry.bizNo());
+            ps.setLong(3, entry.accountId());
+            ps.setLong(4, entry.userId());
+            ps.setString(5, entry.direction().name());
+            ps.setLong(6, entry.amount().cents());
+            ps.setLong(7, entry.balanceAfter().cents());
+            ps.setLong(8, entry.accountVersion());
+            ps.setString(9, entry.refType().name());
+            ps.setLong(10, entry.refId());
+        });
+        for (int[] batch : counts) {
+            for (int count : batch) {
+                if (count != 1 && count != Statement.SUCCESS_NO_INFO) {
+                    throw new IllegalStateException("wallet ledger batch insert affected unexpected rows");
+                }
+            }
+        }
     }
 
     @Override

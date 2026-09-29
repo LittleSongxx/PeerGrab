@@ -78,6 +78,47 @@ class WalletPostingTest {
         verify(wallets, never()).casDebit(anyLong(), any());
     }
 
+    @Test
+    void batchPostingLocksSharedAccountsOnceAndAdvancesVersionsAcrossTransfers() {
+        when(wallets.lockAccountsInOrder(any(long[].class))).thenReturn(Map.of(
+                1L, account(1, -1, AccountType.ESCROW, 5_000, 8),
+                30L, account(30, 2001, AccountType.USER, 0, 2),
+                31L, account(31, 2002, AccountType.USER, 0, 4),
+                40L, account(40, -2, AccountType.COMMISSION, 10, 6)));
+
+        WalletPosting.postBatch(wallets, ids, List.of(
+                new WalletPosting.BatchTransfer("settle:77", LedgerEntry.RefType.SETTLE, 77,
+                        List.of(WalletPosting.Leg.debit(1, 1001, Money.ofCents(900)),
+                                WalletPosting.Leg.credit(30, 2001, Money.ofCents(855)),
+                                WalletPosting.Leg.credit(40, -2, Money.ofCents(45)))),
+                new WalletPosting.BatchTransfer("settle:78", LedgerEntry.RefType.SETTLE, 78,
+                        List.of(WalletPosting.Leg.debit(1, 1001, Money.ofCents(900)),
+                                WalletPosting.Leg.credit(31, 2002, Money.ofCents(855)),
+                                WalletPosting.Leg.credit(40, -2, Money.ofCents(45))))));
+
+        verify(wallets).lockAccountsInOrder(1, 30, 40, 1, 31, 40);
+        ArgumentCaptor<List<WalletRepository.AccountUpdate>> updates = ArgumentCaptor.forClass(List.class);
+        verify(wallets).applyAccountUpdates(updates.capture());
+        assertEquals(4, updates.getValue().size());
+        var escrow = updates.getValue().stream().filter(v -> v.accountId() == 1).findFirst().orElseThrow();
+        assertEquals(3_200, escrow.availableCents());
+        assertEquals(10, escrow.version());
+        var commission = updates.getValue().stream().filter(v -> v.accountId() == 40).findFirst().orElseThrow();
+        assertEquals(100, commission.availableCents());
+        assertEquals(8, commission.version());
+
+        ArgumentCaptor<List<LedgerEntry>> entries = ArgumentCaptor.forClass(List.class);
+        verify(wallets).insertLedgerBatch(entries.capture());
+        assertEquals(6, entries.getValue().size());
+        assertEquals(9, entries.getValue().get(0).accountVersion());
+        assertEquals(3, entries.getValue().get(1).accountVersion());
+        assertEquals(7, entries.getValue().get(2).accountVersion());
+        assertEquals(10, entries.getValue().get(3).accountVersion());
+        assertEquals(8, entries.getValue().get(5).accountVersion());
+        verify(wallets, never()).casDebit(anyLong(), any());
+        verify(wallets, never()).casCredit(anyLong(), any());
+    }
+
     private static WalletAccount account(long id, long ownerId, AccountType type,
                                          long available, long version) {
         return new WalletAccount(id, ownerId, type, Money.ofCents(available), Money.ZERO, version);

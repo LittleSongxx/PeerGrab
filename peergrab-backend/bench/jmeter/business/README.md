@@ -13,14 +13,19 @@ export PEERGRAB_TEST_DB_PORT="$PEERGRAB_MYSQL_PORT"
 export PEERGRAB_TEST_DB_PASSWORD="$PEERGRAB_MYSQL_PASSWORD"
 export PEERGRAB_TEST_MQ_PORT="$PEERGRAB_RMQ_PROXY_PORT"
 export JMETER_BIN=/path/to/apache-jmeter-5.6.3/bin/jmeter
+export PEERGRAB_MAINTENANCE_APPROVED=YES
 python3 bench/scripts/preflight.py
 ```
+
+`run.py` 在启动 JMeter 前再次检查 `peergrab-prod` 无运行容器；ECS 与生产同机时必须在已授权停站窗口执行，并全程采集宿主机与容器资源。
 
 每次运行使用新的输出目录。S3 读计划必须先在全新栈执行一次 `python3 bench/scripts/seed_bench.py s3`，它会生成 100 个任务并重建 Bloom。缓存关、开分别使用不同新栈；热 Key 在缓存开启且已预热的独立轮次运行。以下是可执行入口示例：
 
 ```bash
 python3 bench/jmeter/business/run.py s1 --users 2000 \
   --output bench/runs/jmeter-s1-round1
+python3 bench/jmeter/business/run.py s1-distinct --tasks 500 --threads 64 \
+  --output bench/runs/jmeter-s1-distinct
 python3 bench/jmeter/business/run.py s3-read --threads 50 --iterations 100 \
   --distribution uniform --cache-enabled false --output bench/runs/jmeter-s3-off
 python3 bench/jmeter/business/run.py s3-read --threads 50 --iterations 100 \
@@ -30,14 +35,18 @@ python3 bench/jmeter/business/run.py s3-read --threads 50 --iterations 100 \
 python3 bench/jmeter/business/run.py s3-mixed --threads 50 --iterations 10 \
   --output bench/runs/jmeter-s3-mixed
 python3 bench/jmeter/business/run.py s4 --tasks 200 --threads 32 --same-attempts 8 \
-  --output bench/runs/jmeter-s4
+  --runner-wallets shared --output bench/runs/jmeter-s4-shared
+python3 bench/jmeter/business/run.py s4 --tasks 200 --threads 32 --same-attempts 8 \
+  --runner-wallets distributed --output bench/runs/jmeter-s4-distributed
 ```
 
 S1 先通过 30 个不计时任务预热应用发布/抢单路径，再给每个压测线程不同跑腿用户 JWT 和 request ID，等待 Synchronizing Timer 后抢同一个名额；结果要求恰好 1 次成功且数据库 `slot_taken=grabbed_rows=1`。JMeter 的线程释放无法保证真正同时到达，JMeter 连接也没有预建；尤其是 2,000 线程时须同时记录发压端 CPU、内存、线程数和网络，不能把 `2000 / 批次耗时` 称作稳态 QPS。
 
+`s1-distinct` 用真实 HTTP 提前发布最多 500 个独立任务，为每个任务分配不同跑腿用户和 request ID，再以指定线程数完成一次有限抢单批次。必须全部返回 `GRABBED`，且逐轮数据库中的锁定任务数与成功抢单记录数相等。`durableGrabTps` 使用首个请求开始到最后一个请求完成的批次时长计算，表示**有效成功抢单的短批次完成速率**；它不等于持续稳态 TPS，也不能与“2,000 人争一单”的业务拒绝混算。两种 S1 场景使用不同的新隔离栈。
+
 S3 读计划以固定请求数封闭循环读取预置 ID，`hot90` 精确生成约 90% 的同一任务 ID；S3 混合计划每轮先发布再读同一 ID 九次。响应检查 HTTP 200、`code=OK`、任务 ID 和混合场景状态；跑完核对详情缓存计数，并对混合场景执行抽样缓存检查。`dbLoads` 只计详情回源，并非全站 MySQL 查询数。冷热态和缓存配置不可在同一污染栈中混为同质对照。
 
-S4 在计时前通过真实 HTTP 路径完成发布、抢单、确认、取件、送达，然后由 JMeter 结算不同任务，再对同一任务并发重复结算。JTL 断言要求不同任务全部返回 `SETTLED`、重复任务恰好一次 `SETTLED`，其余只接受幂等/冲突拒绝。`run.py` 复核持久化状态、托管释放、全局钱包守恒、借贷平衡和 `verify_fund.sql` 五条不变量。此处的完成速率是短批次结果，不能称为长期稳定 TPS。
+S4 在计时前通过真实 HTTP 路径完成发布、抢单、确认、取件、送达，然后由 JMeter 结算不同任务，再对同一任务并发重复结算。JTL 断言要求不同任务全部返回 `SETTLED`、重复任务恰好一次 `SETTLED`，其余只接受幂等/冲突拒绝。`run.py` 复核持久化状态、托管释放、全局钱包守恒、借贷平衡和 `verify_fund.sql` 五条不变量。`shared` 让所有任务由同一跑腿钱包收款；`distributed` 让每单使用不同的跑腿钱包，专门观察接收方钱包行竞争。发单钱包、托管系统户和佣金户在两组中仍然共享，因此此对照不能证明系统整体已消除资金热点。两种模式必须分别在**新的独立栈**上运行，使用相同任务数、并发、镜像、数据库配置、机器规格和资源采样窗口。此处的完成速率是短批次结果，不能称为长期稳定 TPS。
 
 输出含 `manifest.json`、`results.jtl`、`jmeter.log`、`jmeter-console.txt` 和 `summary.json`。JTL 只保留时间、HTTP 状态及脚本生成的有限业务结果枚举，不保存 URL、Bearer 头、响应正文或任意错误信息；解析器拒绝多余列。`summary.json` 只在 HTTP、业务断言及数据库核对全部通过后写入；失败时 `bench_run` 标记 FAIL。`generate_plans.py` 可重新生成四个 JMX。**这些是新压测计划，之前 ECS 上通过 Vegeta/Java 客户端测得的数据不能改标成 JMeter 结果；必须真正运行后才能记录 JMeter 实测值。**
 

@@ -10,9 +10,11 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import java.time.Duration;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTimeout;
 
 /** Money must commit with its outbox record even when the configured broker cannot be reached. */
 @SpringBootTest(properties = {
@@ -46,7 +48,10 @@ class FundOutboxWithoutBrokerIT {
                  WHERE id = ?
                 """, runner, errandId);
 
-        assertEquals(SettleErrandUseCase.Result.SETTLED, settle.settle(errandId, publisher));
+        // The durable fund event is committed in MySQL; an unavailable Broker must not
+        // delay the already-committed use-case result through best-effort cache double deletion.
+        assertTimeout(Duration.ofSeconds(5), () ->
+                assertEquals(SettleErrandUseCase.Result.SETTLED, settle.settle(errandId, publisher)));
         assertEquals("PENDING", jdbc.queryForObject(
                 "SELECT status FROM fund_event_outbox WHERE biz_no = ?", String.class,
                 "settle:" + errandId));

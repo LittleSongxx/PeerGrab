@@ -120,4 +120,18 @@ class GetErrandDetailUseCaseTest {
         verify(cache, never()).put(eq(42L), anyString());
         verify(repository).findById(42);
     }
+
+    @Test
+    void degraded_redis_uses_a_fresh_local_copy_without_hitting_database() {
+        ErrandRepository repository = mock(ErrandRepository.class);
+        ErrandCachePort cache = mock(ErrandCachePort.class);
+        String payload = "{\"id\":\"42\",\"status\":\"PUBLISHED\"}";
+        when(cache.get(42)).thenReturn(Optional.of(new ErrandCachePort.CachedErrand(
+                payload, System.currentTimeMillis() + 10_000, false)));
+        when(cache.isDegraded()).thenReturn(true);
+
+        assertEquals(payload, new GetErrandDetailUseCase(repository, cache)
+                .detailJson(42).orElseThrow());
+        verify(repository, never()).findById(42);
+    }
 }

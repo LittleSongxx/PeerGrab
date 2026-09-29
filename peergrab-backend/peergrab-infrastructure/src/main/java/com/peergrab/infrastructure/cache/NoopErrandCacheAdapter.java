@@ -18,6 +18,11 @@ import java.util.Optional;
 public class NoopErrandCacheAdapter implements ErrandCachePort {
 
     @Override
+    public boolean isEnabled() {
+        return false;
+    }
+
+    @Override
     public Optional<CachedErrand> get(long errandId) {
         return Optional.empty();
     }

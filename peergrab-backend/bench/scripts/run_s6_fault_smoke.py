@@ -293,7 +293,7 @@ def percentile(values, p):
 
 
 def detail_phase(base_url, token, errand_id, seconds, phase):
-    """Open-arrival 10/s probe with bounded in-flight and explicit local rejection."""
+    """Open-arrival probe with bounded in-flight and explicit local rejection."""
     offered = seconds * DETAIL_RATE
     phase_start = time.monotonic()
     started_at = utc_now()
@@ -425,7 +425,8 @@ def jmeter_detail_phase(base_url, token, errand_id, seconds, phase, jmeter_bin):
     if returncode:
         raise Refused(f"JMeter {phase} phase exited unsuccessfully; private log preserved")
     try:
-        rows = jtl_summary.read_jtl(jtl, expected_labels={"S6-detail"}, max_rows=1_000)
+        rows = jtl_summary.read_jtl(jtl, expected_labels={"S6-detail"},
+                                    max_rows=max(1_000, DETAIL_RATE * seconds * 2))
         measured = jtl_summary.summarize_rows(rows, duration_seconds=seconds)
     except (OSError, ValueError) as exc:
         raise Refused(f"JMeter {phase} returned invalid JTL") from exc
@@ -640,10 +641,11 @@ def execute(args, mark):
                     raise Refused("No detail request succeeded while Redis was paused")
                 if (during_reads.get("grossUnderproduction", False)
                         or during_reads.get("grossOverproduction", False)
+                        or during_reads["ok"] != during_reads["completed"]
                         or (during_reads["localRejected"] is not None
                             and (during_reads["localRejected"] != 0
                                  or during_reads["schedulerMissed"] != 0))):
-                    raise Refused("Redis-outage 10 RPS phase was not fully offered to the API")
+                    raise Refused(f"Redis-outage {DETAIL_RATE} RPS phase had missing or failed requests")
             else:
                 result = api(base, "POST", f"/api/errands/{errand_id}/settle", publisher, {})
                 if result.get("result") != "SETTLED":
@@ -715,6 +717,7 @@ def execute(args, mark):
 
 
 def main():
+    global DETAIL_RATE
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
     parser = argparse.ArgumentParser(description=__doc__)
@@ -724,12 +727,17 @@ def main():
     parser.add_argument("--confirm-project", help="repeat the exact disposable project for --execute")
     parser.add_argument("--fault-seconds", type=int, default=30)
     parser.add_argument("--recovery-seconds", type=int, default=180)
+    parser.add_argument("--detail-rate", type=int, default=10,
+                        help="Redis fault read target requests per second; actual starts are reported")
     parser.add_argument("--detail-generator", choices=("jmeter", "python"), default="jmeter",
                         help="JMeter is the current HTTP load generator; python reproduces older rounds")
     parser.add_argument("--jmeter-bin", default=os.getenv("PEERGRAB_JMETER_BIN") or shutil.which("jmeter"))
     args = parser.parse_args()
     if not 20 <= args.fault_seconds <= 30 or not 30 <= args.recovery_seconds <= 600:
         parser.error("fault-seconds must be 20..30; recovery-seconds must be 30..600")
+    if not 1 <= args.detail_rate <= 500:
+        parser.error("detail-rate must be 1..500 requests per second")
+    DETAIL_RATE = args.detail_rate
     if not preflight.PROJECT_RE.fullmatch(args.project):
         parser.error("project must be a peergrab-bench-* name")
     if os.getenv("PEERGRAB_BENCH_PROJECT") != args.project or os.getenv("COMPOSE_PROJECT_NAME") != args.project:
@@ -737,6 +745,7 @@ def main():
     manifest = {"scenario": "S6-" + args.fault, "project": args.project,
                 "status": "RUNNING" if args.execute else "DRY_RUN", "faultSeconds": args.fault_seconds,
                 "recoverySeconds": args.recovery_seconds,
+                "detailRate": DETAIL_RATE if args.fault == "redis" else None,
                 "detailGenerator": args.detail_generator if args.fault == "redis" else "none", "events": []}
     run_name = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:6]
     output = RUNS / f"s6-{args.project}-{run_name}.json"

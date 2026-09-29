@@ -29,6 +29,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.Optional;
 import java.util.Map;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -145,6 +146,68 @@ class FundWorkflowUseCaseTest {
         verify(credits, times(1)).scoreOf(2001);
         verify(ranking).update(1, 2001, 62);
         verify(notifier).creditChanged(2001, 62, 2, "完成结算");
+    }
+
+    @Test
+    void autoSettlementBatchCommitsAllTransfersWithOneWalletBatch() {
+        Errand first = errand(56, ErrandStatus.DELIVERED);
+        Errand second = Errand.rehydrate(57, 1, 1001, ErrandType.DELIVERY,
+                "task", Money.ofCents(1000), 1, 2002L, ErrandStatus.DELIVERED,
+                1, 0, 3, null);
+        when(wallets.findEscrowByErrandId(1, 56)).thenReturn(Optional.of(escrow(56)));
+        when(wallets.findEscrowByErrandId(1, 57)).thenReturn(Optional.of(escrow(57)));
+        when(errands.casAutoSettle(56, 3)).thenReturn(1);
+        when(errands.casAutoSettle(57, 3)).thenReturn(1);
+        when(wallets.casEscrowStatus(eq(1L), anyLong(), any(), any())).thenReturn(1);
+        when(wallets.findByOwners(anyList())).thenReturn(Map.of(
+                new WalletRepository.OwnerRef(-1, AccountType.ESCROW),
+                account(10, -1, AccountType.ESCROW, 2_000),
+                new WalletRepository.OwnerRef(-2, AccountType.COMMISSION),
+                account(40, -2, AccountType.COMMISSION, 0),
+                new WalletRepository.OwnerRef(2001, AccountType.USER),
+                account(30, 2001, AccountType.USER, 0),
+                new WalletRepository.OwnerRef(2002, AccountType.USER),
+                account(31, 2002, AccountType.USER, 0)));
+        when(wallets.lockAccountsInOrder(any(long[].class))).thenReturn(Map.of(
+                10L, account(10, -1, AccountType.ESCROW, 2_000),
+                30L, account(30, 2001, AccountType.USER, 0),
+                31L, account(31, 2002, AccountType.USER, 0),
+                40L, account(40, -2, AccountType.COMMISSION, 0)));
+
+        SettleErrandUseCase.BatchResult result = settle.settleAutoBatch(List.of(first, second));
+
+        assertEquals(new SettleErrandUseCase.BatchResult(2, 0), result);
+        assertEquals(1, txManager.commits);
+        assertEquals(0, txManager.rollbacks);
+        verify(wallets).applyAccountUpdates(anyList());
+        verify(wallets).insertLedgerBatch(anyList());
+        verify(events, times(2)).append(any());
+        verify(wallets, never()).casDebit(anyLong(), any());
+        verify(wallets, never()).casCredit(anyLong(), any());
+    }
+
+    @Test
+    void autoSettlementBatchRollsBackWholePageOnEscrowRace() {
+        Errand first = errand(58, ErrandStatus.DELIVERED);
+        Errand second = Errand.rehydrate(59, 1, 1001, ErrandType.DELIVERY,
+                "task", Money.ofCents(1000), 1, 2002L, ErrandStatus.DELIVERED,
+                1, 0, 3, null);
+        when(wallets.findEscrowByErrandId(1, 58)).thenReturn(Optional.of(escrow(58)));
+        when(wallets.findEscrowByErrandId(1, 59)).thenReturn(Optional.of(escrow(59)));
+        when(errands.casAutoSettle(58, 3)).thenReturn(1);
+        when(errands.casAutoSettle(59, 3)).thenReturn(1);
+        when(wallets.casEscrowStatus(1, 58, EscrowOrder.EscrowStatus.HELD,
+                EscrowOrder.EscrowStatus.RELEASED)).thenReturn(1);
+        when(wallets.casEscrowStatus(1, 59, EscrowOrder.EscrowStatus.HELD,
+                EscrowOrder.EscrowStatus.RELEASED)).thenReturn(0);
+
+        assertThrows(RuntimeException.class, () -> settle.settleAutoBatch(List.of(first, second)));
+
+        assertEquals(0, txManager.commits);
+        assertEquals(1, txManager.rollbacks);
+        verify(wallets, never()).applyAccountUpdates(anyList());
+        verify(wallets, never()).insertLedgerBatch(anyList());
+        verifyNoInteractions(events);
     }
 
     @Test

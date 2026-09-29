@@ -1,5 +1,7 @@
 # 从已有本机栈迁移到 PeerGrab
 
+> 历史归档：本机 `campus-dash-local` 容器、网络、卷、业务镜像和旧 `campus-dash-backend` 目录已于 2026-09-28 清理。本指南仅记录此前从旧栈迁移的过程，不是当前 PeerGrab 的启动步骤，也不能在已清理的本机环境直接执行。当前本机栈使用 `peergrab-local`；部署与启动请参阅项目 README 和本目录的 Compose 文件。
+
 本指南只适用于原 Compose 项目 campus-dash-local。新项目使用 peergrab-local、数据库 peer_grab 和独立命名卷。旧数据库 campus_dash、旧容器和旧卷不会被原地改名。业务 Topic errand-* 保持原名；新消费组必须继承旧组的位点。迁移期间暂停对外服务。
 
 以下命令在 peergrab-backend/docker 运行。开始前保存完整工作区和旧 Git 历史到仓库外，并确认磁盘足够容纳 MySQL、Redis、RocketMQ 三个卷及 SQL 转储。备份含用户数据和口令，请保持私有。**不要运行 docker compose down -v，也不要删除旧卷。**

@@ -1,6 +1,6 @@
 # PeerGrab 压测运行手册
 
-当前 HTTP 发压使用 [Apache JMeter 5.6.3 场景计划](jmeter/README.md)；[ECS JMeter 实测](reports/peergrab-current/report-ecs-jmeter-20260928.md)与[旧工具报告](reports/peergrab-current/README.md)分开归档。S5 测量的是 Worker 到期事件，仍由专用探针造数和核验。预检、SQL 资金核对和故障解冻脚本不属于 HTTP 发压器，继续保留。旧 Vegeta／Java／Python 发压命令集中在[历史运行手册](LEGACY_RUNBOOK.md)，不得把旧数字重标为 JMeter 结果。
+现有 HTTP 场景主要使用 [Apache JMeter 5.6.3 计划](jmeter/README.md)；持续的[读+发布混合负载](MIXED_WORKLOAD.md)使用新 Java 固定到达率客户端。两种工具的到达分布、连接模型和结果必须分别标注。[ECS JMeter 实测](reports/peergrab-current/report-ecs-jmeter-20260928.md)与[旧工具报告](reports/peergrab-current/README.md)分开归档。S5 测量的是 Worker 到期事件，仍由专用探针造数和核验。预检、SQL 资金核对和故障解冻脚本不属于 HTTP 发压器，继续保留。旧 Vegeta／Java／Python 发压命令集中在[历史运行手册](LEGACY_RUNBOOK.md)，不得把旧数字重标为 JMeter 结果。
 
 压测只允许使用**全新、可销毁的 `peergrab-bench-*` Compose 项目和独立数据卷**。`run_id` 用于追溯，不提供数据隔离；[`cleanup.sh`](scripts/cleanup.sh)仅删除重新核验身份的整套测试栈，不按轮次删业务行。正式 ECS 加压安排停站维护窗口或同规格独立目标机，禁止对演示库或生产数据发压。
 
@@ -39,9 +39,11 @@ python3 peergrab-backend/bench/scripts/preflight.py
 
 | 场景 | 当前入口 | 结果必须核验的事实 |
 | --- | --- | --- |
-| S1 同单抢单 | [JMeter 业务计划](jmeter/business/README.md) `run.py s1` | 不同用户令牌、业务拒绝分类、数据库名额和唯一成功；线程数不是瞬时到达率 |
+| S1 抢单 | [JMeter 业务计划](jmeter/business/README.md) `run.py s1`／`s1-distinct` | 同单竞争验证零超卖；独立任务批次验证有效成功数和短批次 TPS，不能互相混算 |
+| S1 独立任务固定到达率 | [受保护的固定到达率入口](S1_DISTINCT_FIXED.md) | 计划／实际发出／窗口内完成率、零本地漏发、客户端 P99 和每单数据库唯一抢中 |
 | S2 广场列表 | [异机 JMeter HTTPS 计划](jmeter/s2/README.md) | 真实游标首屏、目标／实际开始率、全部失败、发压端与 ECS 资源；临时路由仅限维护窗口 |
 | S3 缓存 | [JMeter 业务计划](jmeter/business/README.md) `s3-read`／`s3-mixed` | 读对照先用 `python3 bench/scripts/seed_bench.py s3` 造 100 个 ID；混合轮在新栈自行发布，冷热态、详情回源与 MySQL 总查询分别计数 |
+| 持续读写混合 | [多用户固定到达率客户端](MIXED_WORKLOAD.md) | 全新栈先造至少 2,500 条 S2 数据；32 读用户、16 发单用户，首屏/多层游标/详情/发布分别统计，核对持久发布与资金守恒 |
 | S4 结算 | [JMeter 业务计划](jmeter/business/README.md) `run.py s4` | HTTP 履约准备不计入结算批次；按数据库持久成功数算短批次 TPS，并核对复式流水、托管与重复结算 |
 | S5 到期事件 | [专用时间轴探针](S5_TIMELINE.md) | MQ 与扫描各用新栈，测到期至事务内状态日志；JMeter 的 HTTP P99 不能替代 Worker 到期延迟 |
 | S6 故障 | [受限故障冒烟](S6_FAULT_SMOKE.md) | Redis 详情 HTTP 读负载用 JMeter；暂停／解冻、单笔业务与资金核对由有 watchdog 的脚本控制 |

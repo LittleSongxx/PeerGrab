@@ -24,6 +24,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 
 /**
  * 结算用例：DELIVERED -> SETTLED，资金从托管账户分配给跑腿与佣金账户。
@@ -83,6 +85,20 @@ public class SettleErrandUseCase {
     }
 
     public enum Result { SETTLED, ALREADY_SETTLED, CONFLICT }
+
+    /** Result of one bounded automatic-settlement batch. */
+    public record BatchResult(int settled, int skipped) {}
+
+    private record AutoSettlement(Errand errand, EscrowOrder escrow,
+                                  Money runnerAmount, Money commissionAmount,
+                                  String bizNo, FundEvent event) {}
+
+    /** Signals a concurrent manual settlement; the enclosing batch must roll back. */
+    private static final class BatchConflictException extends RuntimeException {
+        private BatchConflictException(long errandId) {
+            super("automatic settlement batch conflicted on errandId=" + errandId);
+        }
+    }
 
     /**
      * @param operatorId 发单人确认时传发单人 ID；自动结算时传 Errand.SYSTEM_OPERATOR
@@ -159,6 +175,121 @@ public class SettleErrandUseCase {
     }
 
     /**
+     * Settles a bounded page of due errands in one transaction.  Every errand
+     * still passes the same errand/escrow CAS gates as the single-item path.  A
+     * concurrent escrow race aborts the whole page so the worker can replay the
+     * page through the original idempotent single-item method; this prevents a
+     * partially applied batch from ever being reported as successful.
+     */
+    public BatchResult settleAutoBatch(List<Errand> dueErrands) {
+        if (dueErrands == null || dueErrands.isEmpty()) return new BatchResult(0, 0);
+
+        List<AutoSettlement> candidates = new ArrayList<>(dueErrands.size());
+        int skipped = 0;
+        for (Errand errand : dueErrands) {
+            if (errand == null || errand.status() != ErrandStatus.DELIVERED) {
+                skipped++;
+                continue;
+            }
+            if (errand.grabberId() == null) {
+                throw new IllegalStateException("delivered errand has no grabberId errandId=" + errand.id());
+            }
+            EscrowOrder escrow = walletRepository.findEscrowByErrandId(errand.campusId(), errand.id())
+                    .orElseThrow(() -> new BizException(ErrorCode.ESCROW_NOT_FOUND,
+                            "errandId=" + errand.id()));
+            long totalCents = escrow.amount().cents();
+            long commissionCents = (long) Math.floor(totalCents * commissionRate);
+            long runnerCents = totalCents - commissionCents;
+            String bizNo = LedgerEntry.settleBizNo(errand.id());
+            candidates.add(new AutoSettlement(errand, escrow, Money.ofCents(runnerCents),
+                    Money.ofCents(commissionCents), bizNo,
+                    new FundEvent(bizNo, "SETTLED", errand.id(), errand.publisherId(),
+                            errand.grabberId(), runnerCents, commissionCents)));
+        }
+        if (candidates.isEmpty()) return new BatchResult(0, skipped);
+
+        List<AutoSettlement> committed = new ArrayList<>(candidates.size());
+        final int initialSkipped = skipped;
+        BatchResult transactionResult = WalletDeadlockRetry.execute(() ->
+                transactionTemplate.execute(status -> {
+                    committed.clear();
+                    List<AutoSettlement> applied = new ArrayList<>(candidates.size());
+                    int transactionSkipped = initialSkipped;
+                    for (AutoSettlement item : candidates) {
+                        Errand errand = item.errand();
+                        if (errandRepository.casAutoSettle(errand.id(), errand.version()) == 0) {
+                            transactionSkipped++;
+                            continue;
+                        }
+                        if (walletRepository.casEscrowStatus(errand.campusId(), errand.id(),
+                                EscrowOrder.EscrowStatus.HELD, EscrowOrder.EscrowStatus.RELEASED) == 0) {
+                            throw new BatchConflictException(errand.id());
+                        }
+                        errandRepository.appendStatusLog(errand.id(), ErrandStatus.DELIVERED,
+                                ErrandStatus.SETTLED, errand.round(), Errand.SYSTEM_OPERATOR);
+                        applied.add(item);
+                    }
+                    if (applied.isEmpty()) return new BatchResult(0, transactionSkipped);
+
+                    List<WalletRepository.OwnerRef> refs = new ArrayList<>(applied.size() + 2);
+                    refs.add(new WalletRepository.OwnerRef(ESCROW_ACCOUNT_OWNER, AccountType.ESCROW));
+                    refs.add(new WalletRepository.OwnerRef(COMMISSION_ACCOUNT_OWNER, AccountType.COMMISSION));
+                    for (AutoSettlement item : applied) {
+                        refs.add(new WalletRepository.OwnerRef(item.errand().grabberId(), AccountType.USER));
+                    }
+                    Map<WalletRepository.OwnerRef, WalletAccount> accounts = walletRepository.findByOwners(refs);
+                    List<WalletPosting.BatchTransfer> transfers = new ArrayList<>(applied.size());
+                    for (AutoSettlement item : applied) {
+                        Errand errand = item.errand();
+                        WalletAccount escrowAccount = accountOrFallback(accounts,
+                                new WalletRepository.OwnerRef(ESCROW_ACCOUNT_OWNER, AccountType.ESCROW));
+                        WalletAccount runnerAccount = accountOrFallback(accounts,
+                                new WalletRepository.OwnerRef(errand.grabberId(), AccountType.USER));
+                        WalletAccount commissionAccount = accountOrFallback(accounts,
+                                new WalletRepository.OwnerRef(COMMISSION_ACCOUNT_OWNER, AccountType.COMMISSION));
+                        List<WalletPosting.Leg> legs = new ArrayList<>();
+                        legs.add(WalletPosting.Leg.debit(escrowAccount.id(), errand.publisherId(), item.escrow().amount()));
+                        legs.add(WalletPosting.Leg.credit(runnerAccount.id(), errand.grabberId(), item.runnerAmount()));
+                        if (item.commissionAmount().cents() > 0) {
+                            legs.add(WalletPosting.Leg.credit(commissionAccount.id(),
+                                    COMMISSION_ACCOUNT_OWNER, item.commissionAmount()));
+                        }
+                        transfers.add(new WalletPosting.BatchTransfer(item.bizNo(), LedgerEntry.RefType.SETTLE,
+                                errand.id(), legs));
+                    }
+                    WalletPosting.postBatch(walletRepository, idGenerator, transfers);
+                    for (AutoSettlement item : applied) {
+                        Errand errand = item.errand();
+                        creditRepository.applyEvent(new CreditEvent(
+                                idGenerator.nextId(), CreditEvent.settleBizNo(errand.id()), errand.grabberId(),
+                                CreditEventType.SETTLE, CreditEventType.SETTLE.delta(), "ERRAND", errand.id(),
+                                java.time.Instant.now()));
+                        fundEventPort.append(item.event());
+                    }
+                    committed.addAll(applied);
+                    return new BatchResult(applied.size(), transactionSkipped);
+                }));
+
+        // Preserve the single-item post-commit side effects.  They are deliberately
+        // outside the long account-locking transaction and may be retried by the
+        // normal cache/ranking/audit reconciliation paths if an external system is down.
+        for (AutoSettlement item : committed) {
+            Errand errand = item.errand();
+            cacheEvict.evictAfterCommit(errand.id());
+            Integer runnerScore = creditRepository.scoreOf(errand.grabberId());
+            creditRankingPort.update(errand.campusId(), errand.grabberId(), runnerScore);
+            auditPort.record(item.bizNo(), "SETTLE", errand.id(), Errand.SYSTEM_OPERATOR,
+                    String.format("{\"runner\":%d,\"commission\":%d}",
+                            item.runnerAmount().cents(), item.commissionAmount().cents()), true, null);
+            notifier.errandStatusChanged(errand.id(), errand.publisherId(), errand.grabberId(),
+                    ErrandStatus.SETTLED.name(), errand.round());
+            notifier.creditChanged(errand.grabberId(), runnerScore,
+                    CreditEventType.SETTLE.delta(), "完成结算");
+        }
+        return transactionResult;
+    }
+
+    /**
      * 结算的事务体。由 TransactionTemplate 包裹执行（见 settle 里的注释），
      * 不依赖 @Transactional 代理——lambda 自调用场景下代理不可靠。
      */
@@ -184,12 +315,16 @@ public class SettleErrandUseCase {
                 errand.round(), operatorId);
 
         // 资金转移：托管账户 -> 跑腿 + 佣金
-        WalletAccount escrowAccount = walletRepository.findByOwner(ESCROW_ACCOUNT_OWNER, AccountType.ESCROW)
-                .orElseThrow();
-        WalletAccount runnerAccount = walletRepository.findByOwner(errand.grabberId(), AccountType.USER)
-                .orElseThrow();
-        WalletAccount commissionAccount = walletRepository.findByOwner(COMMISSION_ACCOUNT_OWNER, AccountType.COMMISSION)
-                .orElseThrow();
+        var escrowRef = new WalletRepository.OwnerRef(ESCROW_ACCOUNT_OWNER, AccountType.ESCROW);
+        var runnerRef = new WalletRepository.OwnerRef(errand.grabberId(), AccountType.USER);
+        var commissionRef = new WalletRepository.OwnerRef(COMMISSION_ACCOUNT_OWNER, AccountType.COMMISSION);
+        Map<WalletRepository.OwnerRef, WalletAccount> accounts = walletRepository.findByOwners(
+                List.of(escrowRef, runnerRef, commissionRef));
+        // Keep the legacy lookups as a compatibility fallback for alternate adapters and
+        // older test doubles; JdbcWalletRepository uses one indexed query for all three.
+        WalletAccount escrowAccount = accountOrFallback(accounts, escrowRef);
+        WalletAccount runnerAccount = accountOrFallback(accounts, runnerRef);
+        WalletAccount commissionAccount = accountOrFallback(accounts, commissionRef);
 
         var legs = new ArrayList<WalletPosting.Leg>();
         legs.add(WalletPosting.Leg.debit(escrowAccount.id(), errand.publisherId(), escrow.amount()));
@@ -208,5 +343,12 @@ public class SettleErrandUseCase {
                 CreditEventType.SETTLE, CreditEventType.SETTLE.delta(), "ERRAND", errandId,
                 java.time.Instant.now()));
         return true;
+    }
+
+    private WalletAccount accountOrFallback(Map<WalletRepository.OwnerRef, WalletAccount> accounts,
+                                            WalletRepository.OwnerRef ref) {
+        WalletAccount account = accounts == null ? null : accounts.get(ref);
+        if (account != null) return account;
+        return walletRepository.findByOwner(ref.ownerId(), ref.type()).orElseThrow();
     }
 }

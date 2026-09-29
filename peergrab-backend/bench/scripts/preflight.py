@@ -48,6 +48,14 @@ def require(ok, reason):
         raise Refused(reason)
 
 
+def require_maintenance_window():
+    """Gate load generation on a shared ECS host; read-only preflight stays usable."""
+    require(os.getenv("PEERGRAB_MAINTENANCE_APPROVED") == "YES",
+            "Load generation requires PEERGRAB_MAINTENANCE_APPROVED=YES")
+    running = docker("ps", "-q", "--filter", "label=com.docker.compose.project=peergrab-prod")
+    require(not running, "Production containers are running; benchmark load is refused")
+
+
 def mapped_port(container, internal):
     bindings = container["NetworkSettings"]["Ports"].get(internal)
     require(bindings is not None and len(bindings) == 1, f"Expected one published {internal} port")

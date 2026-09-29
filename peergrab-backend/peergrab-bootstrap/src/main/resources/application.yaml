@@ -27,7 +27,7 @@ spring:
           max-active: 64
           max-idle: 32
           min-idle: 8
-      timeout: 2000ms
+      timeout: 500ms      # Redis 单节点故障时快速回源；ECS 隔离对照已验证 100 RPS 读负载
 
 peergrab:
   ws:
@@ -58,6 +58,8 @@ peergrab:
   timeout:
     confirm-seconds: 300
     max-transfer-rounds: 5      # 防无限流转：超过则回退让所有人重新抢          # 生产 5 分钟；测试用 @TestPropertySource 压到 2 秒
+    dispatch-sender-threads: 4   # 超时消息已持久化，后台即时发送失败由 worker 重发
+    dispatch-queue-capacity: 2048
 
   grab:
     limit:
@@ -80,8 +82,12 @@ peergrab:
     empty-ttl-seconds: 60     # 空值缓存 TTL，防穿透
     double-delete-ms: 500     # 延迟双删间隔
     double-delete-enabled: true
+    double-delete-sender-threads: 2  # MQ 发送在有界后台池执行，避免 Broker 故障阻塞已提交写请求
+    double-delete-queue-capacity: 2048
     bloom-enabled: false       # negative 仍要查 MySQL；默认关闭避免冷 miss 多次 Redis 访问
     redisson-pool-size: 16    # 与 Lettuce 池分开，避免叠加打满 Redis
+    local-fallback-ttl-millis: 1000 # Redis 故障时仅短暂复用本进程已验证详情
+    local-fallback-max-entries: 10000
   web:
     cors-origins: http://localhost:5173,http://127.0.0.1:5173
 

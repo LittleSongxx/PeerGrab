@@ -25,6 +25,40 @@ final class BenchSafety {
         runPreflight(baseUrl, null, null, null);
     }
 
+    /** High-load clients additionally require a deliberate shared-host maintenance window. */
+    static void requireMaintenanceWindow() {
+        if (!"YES".equals(System.getenv("PEERGRAB_MAINTENANCE_APPROVED"))) {
+            throw new IllegalStateException("Load generation requires PEERGRAB_MAINTENANCE_APPROVED=YES");
+        }
+        if ("container".equals(System.getenv("PEERGRAB_BENCH_RUNNER_CONTEXT"))) {
+            if (!"YES".equals(System.getenv("PEERGRAB_BENCH_PRODUCTION_STOPPED"))) {
+                throw new IllegalStateException("MQ runner lacks host-verified production-stop marker");
+            }
+            return;
+        }
+        try {
+            Process process = new ProcessBuilder("docker", "ps", "-q", "--filter",
+                    "label=com.docker.compose.project=peergrab-prod")
+                    .redirectErrorStream(true).start();
+            if (!process.waitFor(10, TimeUnit.SECONDS)) {
+                process.destroyForcibly();
+                throw new IllegalStateException("Production-container check timed out");
+            }
+            String running = new String(process.getInputStream().readAllBytes());
+            if (process.exitValue() != 0) {
+                throw new IllegalStateException("Production-container check failed");
+            }
+            if (!running.isBlank()) {
+                throw new IllegalStateException("Production containers are running; benchmark load refused");
+            }
+        } catch (IOException e) {
+            throw new IllegalStateException("Cannot inspect production containers", e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Production-container check interrupted", e);
+        }
+    }
+
     static void requireBenchmarkMqMode(boolean enabled) {
         runPreflight(System.getenv("PEERGRAB_BENCH_BASE_URL"), enabled, null, null);
     }

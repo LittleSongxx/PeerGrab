@@ -54,6 +54,15 @@ class MqRunnerSafetyTest(unittest.TestCase):
                                                         confirm_seconds=5, timeout_seconds=30))
             command.assert_not_called()
 
+    def test_candidate_mode_requires_signing_secret_before_container_creation(self):
+        with patch.dict(os.environ, {"PEERGRAB_AUTH_JWT_SECRET": ""}), \
+             patch.object(run_mq_probe, "command") as command:
+            with self.assertRaisesRegex(preflight.Refused, "AUTH_JWT_SECRET"):
+                run_mq_probe.run("s5", SimpleNamespace(count=1, lead_seconds=30,
+                                                        confirm_seconds=60, timeout_seconds=20,
+                                                        candidate=True))
+            command.assert_not_called()
+
     def test_broker_on_different_network_rejected_before_container_creation(self):
         containers = {"app": service(), "worker": service(),
                       "rmqbroker": service(network_name="wrong-network")}

@@ -6,6 +6,7 @@ load generation, use an SSH tunnel to this verified loopback binding and retain
 the same JMX/CSV, then run equivalent host-side postchecks before reporting.
 """
 import argparse
+import csv
 from collections import Counter
 import csv
 import json
@@ -23,6 +24,9 @@ HERE = Path(__file__).resolve().parent
 BACKEND = HERE.parents[2]
 RUNS = HERE.parents[1] / "runs"
 PREFLIGHT = BACKEND / "bench" / "scripts" / "preflight.py"
+sys.path.insert(0, str(BACKEND / "bench" / "scripts"))
+import preflight  # noqa: E402 - benchmark safety gate resolved from this checkout
+import prewarm_cache  # noqa: E402 - bounded cache warm-up shares the same gate
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -157,6 +161,28 @@ def read_token(output):
     return rows[0]["token"]
 
 
+def prewarm_fixture(base_url, output):
+    """Warm unique S3 IDs and persist only aggregate evidence."""
+    with (output / "s3_read.csv").open(newline="", encoding="utf-8") as handle:
+        ids = []
+        seen = set()
+        for row in csv.DictReader(handle):
+            raw = row.get("errand_id", "")
+            if raw.isdecimal() and int(raw) not in seen:
+                seen.add(int(raw))
+                ids.append(int(raw))
+    if not ids:
+        raise RuntimeError("S3 fixture contains no task IDs for prewarm")
+    if len(ids) > prewarm_cache.MAX_IDS:
+        raise RuntimeError("S3 fixture has too many unique IDs for one prewarm batch")
+    result = prewarm_cache.run(base_url, ids)
+    (output / "prewarm.json").write_text(
+        json.dumps({k: result[k] for k in
+                    ("requested", "distinct", "found", "written", "missing", "elapsedMs")},
+                   indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return result
+
+
 def parse_jtl(output):
     with (output / "results.jtl").open(newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
@@ -169,7 +195,7 @@ def parse_jtl(output):
                     "DETAIL_OK", "PUBLISHED", "READ_AFTER_WRITE_OK", "SETTLED", "DUPLICATE",
                     "UNCLASSIFIED", "INVALID_JSON", "HTTP_OR_SHAPE_ERROR", "UNEXPECTED",
                     "DETAIL_MISMATCH", "PUBLISH_MISMATCH", "READ_AFTER_WRITE_MISMATCH"}
-        labels = {"S1 grab", "S3 detail", "S3 publish", "S3 read after write",
+        labels = {"S1 grab", "S1 distinct grab", "S3 detail", "S3 publish", "S3 read after write",
                   "S4 distinct settle", "S4 same-task settle"}
         for row in reader:
             if len(rows) >= 100_000 or None in row or row["label"] not in labels \
@@ -220,6 +246,7 @@ def verify(mode, rows, manifest, mysql_id, base, output):
     run_id = manifest["runId"]
     expected_total = {
         "s1": manifest.get("users"),
+        "s1-distinct": manifest.get("tasks"),
         "s3-read": manifest.get("requests"),
         "s3-mixed": manifest.get("writes", 0) + manifest.get("reads", 0),
         "s4": manifest.get("tasks", 0) + manifest.get("sameTaskAttempts", 0),
@@ -249,6 +276,25 @@ def verify(mode, rows, manifest, mysql_id, base, output):
                        "batchCompletionMs": batch_duration_ms(samples),
                        "positiveConnectTimeSamples": sum(int(r.get("Connect") or 0) > 0
                                                          for r in samples)})
+    elif mode == "s1-distinct":
+        tasks = manifest["tasks"]
+        samples = by_label(rows, "S1 distinct grab", tasks)
+        if any(r["responseMessage"] != "GRABBED" for r in samples):
+            raise RuntimeError("S1 distinct business result mismatch")
+        locked = scalar(mysql_id, "SELECT COUNT(*) FROM bench_run_item i JOIN errand e "
+                        "ON e.id=i.entity_id WHERE i.run_id='" + run_id + "' "
+                        "AND e.status='LOCKED' AND e.slot_total=1 AND e.slot_taken=1;")
+        grabbed = scalar(mysql_id, "SELECT COUNT(*) FROM bench_run_item i JOIN grab_record g "
+                         "ON g.errand_id=i.entity_id WHERE i.run_id='" + run_id + "' "
+                         "AND g.result='GRABBED';")
+        if locked != tasks or grabbed != tasks:
+            raise RuntimeError("S1 distinct durable grab/slot invariant failed")
+        duration = batch_duration_ms(samples)
+        result.update({"durableGrabbed": grabbed, "lockedTasks": locked,
+                       "batchCompletionMs": duration,
+                       "durableGrabTps": round(grabbed * 1000 / duration, 2),
+                       "samplerStartSpanMs": batch_start_span_ms(samples)})
+        result.update(percentiles(samples))
     elif mode == "s3-read":
         expected = manifest["requests"]
         samples = by_label(rows, "S3 detail", expected)
@@ -294,6 +340,7 @@ def verify(mode, rows, manifest, mysql_id, base, output):
         if "FAIL" in fund_output or fund_output.count("PASS") < 5:
             raise RuntimeError("S4 verify_fund.sql failed")
         result.update({"durableSettled": durable, "escrowReleased": released,
+                       "runnerWallets": manifest.get("runnerWallets", "shared"),
                        "walletTotalDelta": total - manifest["walletTotalBefore"],
                        "globalDebitCreditDiff": debits,
                        "distinctBatchSeconds": round(batch_duration_ms(distinct) / 1000, 3),
@@ -320,7 +367,7 @@ def verify(mode, rows, manifest, mysql_id, base, output):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("scenario", choices=("s1", "s3-read", "s3-mixed", "s4"))
+    parser.add_argument("scenario", choices=("s1", "s1-distinct", "s3-read", "s3-mixed", "s4"))
     parser.add_argument("--base-url", default=os.getenv("PEERGRAB_BENCH_BASE_URL"))
     parser.add_argument("--jmeter", default=os.getenv("JMETER_BIN", "jmeter"))
     parser.add_argument("--output", required=True, type=Path, help="New directory under bench/runs")
@@ -330,8 +377,12 @@ def main():
     parser.add_argument("--distribution", choices=("uniform", "hot90"), default="uniform")
     parser.add_argument("--tasks", type=int, default=200)
     parser.add_argument("--same-attempts", type=int, default=8)
+    parser.add_argument("--runner-wallets", choices=("shared", "distributed"), default="shared",
+                        help="S4 runner wallet topology; system escrow/commission wallets remain shared")
     parser.add_argument("--cache-enabled", choices=("true", "false"),
                         help="Required S3 read app setting; validates container env")
+    parser.add_argument("--prewarm", action="store_true",
+                        help="For S3 read, batch-prewarm fixture IDs before JMeter")
     args = parser.parse_args()
     output = args.output.resolve()
     if output.parent != RUNS.resolve() or output.exists():
@@ -342,6 +393,7 @@ def main():
     db_host = os.getenv("PEERGRAB_TEST_DB_HOST")
     db_port = os.getenv("PEERGRAB_TEST_DB_PORT")
     try:
+        preflight.require_maintenance_window()
         verified = check_stack(project, args.base_url, db_host, db_port)
         if args.scenario in ("s3-read", "s3-mixed"):
             if args.scenario == "s3-read" and args.cache_enabled is None:
@@ -360,9 +412,11 @@ def main():
                 raise RuntimeError("S3 cache mode differs from the inspected app container")
         fixture_args = {
             "s1": [str(args.users)],
+            "s1-distinct": [str(args.tasks), str(args.threads)],
             "s3-read": [str(args.threads), str(args.iterations), args.distribution],
             "s3-mixed": [str(args.threads), str(args.iterations)],
-            "s4": [str(args.tasks), str(args.threads), str(args.same_attempts)],
+            "s4": [str(args.tasks), str(args.threads), str(args.same_attempts),
+                   args.runner_wallets],
         }[args.scenario]
         subprocess.run(["mvn", "-q", "-ntp", "-pl", "peergrab-bench", "-am", "install", "-DskipTests"],
                        cwd=BACKEND, check=True, timeout=300)
@@ -371,8 +425,15 @@ def main():
                         "-Dexec.args=" + " ".join([args.scenario, args.base_url, str(output), *fixture_args])],
                        cwd=BACKEND, check=True, timeout=600)
         manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+        if args.scenario == "s4" and manifest.get("runnerWallets") != args.runner_wallets:
+            raise RuntimeError("S4 fixture runner wallet mode differs from requested mode")
+        prewarm_result = None
+        if args.prewarm:
+            if args.scenario != "s3-read" or args.cache_enabled != "true":
+                raise RuntimeError("--prewarm requires s3-read with --cache-enabled=true")
+            prewarm_result = prewarm_fixture(args.base_url, output)
         parsed = urlsplit(args.base_url)
-        plan = {"s1": "s1.jmx", "s3-read": "s3_read.jmx",
+        plan = {"s1": "s1.jmx", "s1-distinct": "s1_distinct.jmx", "s3-read": "s3_read.jmx",
                 "s3-mixed": "s3_mixed.jmx", "s4": "s4.jmx"}[args.scenario]
         cmd = [args.jmeter, "-n", "-t", str(HERE / plan), "-l", str(output / "results.jtl"),
                "-j", str(output / "jmeter.log"), "-q", str(HERE / "results.properties"),
@@ -381,6 +442,9 @@ def main():
         if args.scenario == "s1":
             cmd += ["-Jusers=" + str(args.users), "-Jerrand_id=" + str(manifest["errandId"]),
                     "-Js1_csv=" + str(output / "s1.csv")]
+        elif args.scenario == "s1-distinct":
+            cmd += ["-Jthreads=" + str(args.threads),
+                    "-Js1_distinct_csv=" + str(output / "s1_distinct.csv")]
         elif args.scenario == "s3-read":
             cmd += ["-Jthreads=" + str(args.threads), "-Jiterations=" + str(args.iterations),
                     "-Js3_read_csv=" + str(output / "s3_read.csv")]
@@ -395,6 +459,9 @@ def main():
         run_jmeter(cmd, output, args.base_url, project, db_host, db_port, args.jmeter)
         rows = parse_jtl(output)
         summary = verify(args.scenario, rows, manifest, verified["mysql_container_id"], args.base_url, output)
+        if prewarm_result is not None:
+            summary["prewarm"] = {k: prewarm_result[k] for k in
+                                  ("requested", "distinct", "found", "written", "missing", "elapsedMs")}
         mysql(verified["mysql_container_id"], "UPDATE bench_run SET status='PASS', finished_at=NOW(3), "
               "summary=CAST('" + json.dumps(summary, ensure_ascii=True, separators=(",", ":"))
               + "' AS JSON) WHERE run_id='" + manifest["runId"] + "';")

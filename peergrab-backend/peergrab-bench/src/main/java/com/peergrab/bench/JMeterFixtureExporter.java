@@ -35,6 +35,7 @@ public final class JMeterFixtureExporter {
     private static final int S3_SEED_COUNT = 100;
     private static final long S3_RANDOM_SEED = 20260928L;
     private static final int REWARD_CENTS = 100;
+    private static final long S4_DISTRIBUTED_RUNNER_BASE = 60_000L;
 
     private JMeterFixtureExporter() { }
 
@@ -60,6 +61,7 @@ public final class JMeterFixtureExporter {
             BenchJwtTokens tokens = new BenchJwtTokens(requiredEnv("PEERGRAB_AUTH_JWT_SECRET"), db);
             Fixture fixture = switch (scenario) {
                 case "s1" -> s1(args, baseUrl, http, tokens, recorder);
+                case "s1-distinct" -> s1Distinct(args, baseUrl, db, http, tokens, recorder);
                 case "s3-read" -> s3Read(args, baseUrl, db, http, tokens, recorder);
                 case "s3-mixed" -> s3Mixed(args, baseUrl, http, tokens, recorder);
                 case "s4" -> s4(args, baseUrl, db, http, tokens, recorder);
@@ -118,6 +120,37 @@ public final class JMeterFixtureExporter {
             return new Fixture(runId, Map.of("s1.csv", lines),
                     Map.of("users", users, "errandId", id, "slotTotal", 1,
                             "applicationWarmupTasks", 30));
+        } catch (Exception e) {
+            recorder.finishRun(runId, "FAIL", "{\"reason\":\"fixture_setup_failed\"}");
+            throw e;
+        }
+    }
+
+    private static Fixture s1Distinct(String[] args, String base, Connection db, HttpClient http,
+                                      BenchJwtTokens tokens, BenchRunRecorder recorder) throws Exception {
+        if (args.length != 5) throw new IllegalArgumentException(usage());
+        int tasks = bounded(args[3], 1, 900, "S1 distinct tasks");
+        int threads = bounded(args[4], 1, 128, "S1 distinct threads");
+        try (PreparedStatement balance = db.prepareStatement(
+                "SELECT available FROM wallet_account WHERE owner_type='USER' AND owner_id=1001");
+             ResultSet rows = balance.executeQuery()) {
+            if (!rows.next() || rows.getLong(1) < (long) tasks * REWARD_CENTS) {
+                throw new IllegalStateException("S1 distinct publisher balance too low");
+            }
+        }
+        String runId = recorder.startRun("BENCH", "JM-S1-DISTINCT", threads,
+                "Independent task/runner grab batch; setup excluded from timed phase");
+        try {
+            String publisher = tokens.issue(1001);
+            List<String> csv = new ArrayList<>(tasks + 1);
+            csv.add("errand_id,token,request_id");
+            for (int i = 0; i < tasks; i++) {
+                long id = publish(http, base, publisher, runId, "distinct_grab_" + i, 1);
+                recorder.trackErrand(runId, id);
+                csv.add(id + "," + tokens.issue(2001L + i) + "," + UUID.randomUUID());
+            }
+            return new Fixture(runId, Map.of("s1_distinct.csv", csv),
+                    Map.of("tasks", tasks, "threads", threads));
         } catch (Exception e) {
             recorder.finishRun(runId, "FAIL", "{\"reason\":\"fixture_setup_failed\"}");
             throw e;
@@ -201,10 +234,14 @@ public final class JMeterFixtureExporter {
 
     private static Fixture s4(String[] args, String base, Connection db, HttpClient http,
                               BenchJwtTokens tokens, BenchRunRecorder recorder) throws Exception {
-        if (args.length != 6) throw new IllegalArgumentException(usage());
+        if (args.length != 6 && args.length != 7) throw new IllegalArgumentException(usage());
         int count = bounded(args[3], 1, 500, "S4 distinct tasks");
         int threads = bounded(args[4], 1, 64, "S4 threads");
         int duplicates = bounded(args[5], 2, 200, "S4 same-task attempts");
+        String runnerWallets = args.length == 7 ? args[6] : "shared";
+        if (!List.of("shared", "distributed").contains(runnerWallets)) {
+            throw new IllegalArgumentException("S4 runner wallets must be shared or distributed");
+        }
         try (PreparedStatement statement = db.prepareStatement(
                 "SELECT available+frozen FROM wallet_account WHERE owner_type='USER' AND owner_id=1001")) {
             try (ResultSet rows = statement.executeQuery()) {
@@ -214,8 +251,12 @@ public final class JMeterFixtureExporter {
             }
         }
         String runId = recorder.startRun("BENCH", "JM-S4", threads,
-                "JMeter distinct and same-task settle; lifecycle setup excluded from timed phase");
+                "JMeter distinct and same-task settle; runner wallets=" + runnerWallets
+                        + "; lifecycle setup excluded from timed phase");
         try {
+            if (runnerWallets.equals("distributed")) {
+                seedS4RunnerWallets(db, count + 1);
+            }
             long walletTotalBefore;
             try (PreparedStatement statement = db.prepareStatement(
                     "SELECT COALESCE(SUM(available+frozen),0) FROM wallet_account");
@@ -224,17 +265,21 @@ public final class JMeterFixtureExporter {
                 walletTotalBefore = rows.getLong(1);
             }
             String publisher = tokens.issue(1001);
-            String runner = tokens.issue(2001);
+            String sharedRunner = tokens.issue(2001);
             List<String> distinct = new ArrayList<>(count + 1);
             distinct.add("errand_id,token");
             List<Long> tracked = new ArrayList<>(count + 1);
             for (int i = 0; i < count; i++) {
+                String runner = runnerWallets.equals("distributed")
+                        ? tokens.issue(S4_DISTRIBUTED_RUNNER_BASE + i) : sharedRunner;
                 long id = prepareDelivered(http, base, publisher, runner, runId, "distinct_" + i);
                 recorder.trackErrand(runId, id);
                 tracked.add(id);
                 distinct.add(id + "," + publisher);
             }
-            long sameId = prepareDelivered(http, base, publisher, runner, runId, "same");
+            String sameRunner = runnerWallets.equals("distributed")
+                    ? tokens.issue(S4_DISTRIBUTED_RUNNER_BASE + count) : sharedRunner;
+            long sameId = prepareDelivered(http, base, publisher, sameRunner, runId, "same");
             recorder.trackErrand(runId, sameId);
             tracked.add(sameId);
             List<String> same = new ArrayList<>(duplicates + 1);
@@ -243,10 +288,37 @@ public final class JMeterFixtureExporter {
             return new Fixture(runId, Map.of("s4_distinct.csv", distinct, "s4_same.csv", same),
                     Map.of("tasks", count, "threads", threads, "sameTaskAttempts", duplicates,
                             "sameTaskId", sameId, "allErrandIds", tracked,
-                            "walletTotalBefore", walletTotalBefore));
+                            "walletTotalBefore", walletTotalBefore, "runnerWallets", runnerWallets));
         } catch (Exception e) {
             recorder.finishRun(runId, "FAIL", "{\"reason\":\"fixture_setup_failed\"}");
             throw e;
+        }
+    }
+
+    private static void seedS4RunnerWallets(Connection db, int users) throws Exception {
+        try (PreparedStatement check = db.prepareStatement("""
+                SELECT COUNT(*) FROM wallet_account WHERE owner_type='USER'
+                  AND owner_id >= ? AND owner_id < ?
+                """)) {
+            check.setLong(1, S4_DISTRIBUTED_RUNNER_BASE);
+            check.setLong(2, S4_DISTRIBUTED_RUNNER_BASE + users);
+            try (ResultSet rows = check.executeQuery()) {
+                rows.next();
+                if (rows.getLong(1) != 0) {
+                    throw new IllegalStateException("Distributed runner wallets already exist; use a fresh stack");
+                }
+            }
+        }
+        try (PreparedStatement insert = db.prepareStatement("""
+                INSERT INTO wallet_account (id, owner_id, owner_type, available, frozen, version)
+                VALUES (?, ?, 'USER', 0, 0, 0)
+                """)) {
+            for (int i = 0; i < users; i++) {
+                insert.setLong(1, S4_DISTRIBUTED_RUNNER_BASE + i);
+                insert.setLong(2, S4_DISTRIBUTED_RUNNER_BASE + i);
+                insert.addBatch();
+            }
+            insert.executeBatch();
         }
     }
 
@@ -305,8 +377,10 @@ public final class JMeterFixtureExporter {
 
     private static String usage() {
         return "JMeterFixtureExporter s1 <localBaseUrl> <newOutputDir> <users> | "
+                + "s1-distinct <localBaseUrl> <newOutputDir> <tasks> <threads> | "
                 + "s3-read <localBaseUrl> <newOutputDir> <threads> <iterations> <uniform|hot90> | "
                 + "s3-mixed <localBaseUrl> <newOutputDir> <threads> <iterations> | "
-                + "s4 <localBaseUrl> <newOutputDir> <distinctTasks> <threads> <sameTaskAttempts>";
+                + "s4 <localBaseUrl> <newOutputDir> <distinctTasks> <threads> <sameTaskAttempts> "
+                + "[shared|distributed]";
     }
 }

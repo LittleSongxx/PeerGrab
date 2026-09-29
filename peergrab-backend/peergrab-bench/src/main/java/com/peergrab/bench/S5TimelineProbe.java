@@ -1,5 +1,7 @@
 package com.peergrab.bench;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.peergrab.shared.MessagePayloadCodec;
 import org.apache.rocketmq.client.apis.ClientConfiguration;
 import org.apache.rocketmq.client.apis.ClientServiceProvider;
@@ -8,6 +10,10 @@ import org.apache.rocketmq.client.apis.producer.Producer;
 
 import java.nio.charset.StandardCharsets;
 import java.io.IOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
@@ -18,6 +24,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -35,17 +42,21 @@ import java.util.concurrent.TimeUnit;
 public final class S5TimelineProbe {
     private static final String TOPIC = "errand-confirm-timeout";
     private static final long ID_PREFIX = 900_100_000_000_000_000L;
+    private static final long CANDIDATE_BASE = 50_000L;
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     private S5TimelineProbe() {}
 
     public static void main(String[] args) throws Exception {
         if (args.length < 4 || args.length > 6) {
-            throw new IllegalArgumentException("Usage: S5TimelineProbe <mq|fallback> <count 1..10000> "
+            throw new IllegalArgumentException("Usage: S5TimelineProbe <mq|fallback|mq-candidate|fallback-candidate> <count 1..10000> "
                     + "<leadSeconds >=15> <confirmSeconds >=1> [timeoutAfterDueSeconds >=10] [mqEndpoint]");
         }
         String mode = args[0];
-        if (!mode.equals("mq") && !mode.equals("fallback")) {
-            throw new IllegalArgumentException("mode must be mq or fallback");
+        boolean candidateMode = mode.endsWith("-candidate");
+        boolean mqMode = mode.equals("mq") || mode.equals("mq-candidate");
+        if (!mqMode && !mode.equals("fallback") && !mode.equals("fallback-candidate")) {
+            throw new IllegalArgumentException("Unsupported S5 mode");
         }
         int count = Integer.parseInt(args[1]);
         long leadSeconds = Long.parseLong(args[2]);
@@ -57,12 +68,16 @@ public final class S5TimelineProbe {
                 || timeoutSeconds < 10 || leadSeconds > 86_000) {
             throw new IllegalArgumentException("Invalid count, lead, confirmation timeout, or observation timeout");
         }
+        if (candidateMode && confirmSeconds <= timeoutSeconds + 5) {
+            throw new IllegalArgumentException("Candidate observation must end before the next confirmation deadline");
+        }
 
         BenchSafety.requireDisposableStack();
-        BenchSafety.requireBenchmarkMqMode(mode.equals("mq"));
-        BenchSafety.requireTimeoutScanMode(mode.equals("fallback"));
+        BenchSafety.requireMaintenanceWindow();
+        BenchSafety.requireBenchmarkMqMode(mqMode);
+        BenchSafety.requireTimeoutScanMode(!mqMode);
         BenchSafety.requireConfirmSeconds(confirmSeconds);
-        if (mode.equals("mq")) {
+        if (mqMode) {
             BenchSafety.requireBenchmarkMqEndpoint(mqEndpoint);
         }
         String host = System.getenv("PEERGRAB_TEST_DB_HOST");
@@ -87,7 +102,10 @@ public final class S5TimelineProbe {
                     "natural expiry; worker mode=" + mode + "; source=DB status_log; no HTTP/outbox");
             try {
                 seed(db, runId, firstId, count, dueMs, confirmSeconds);
-                if (mode.equals("mq")) {
+                if (candidateMode) {
+                    enqueueCandidates(db, firstId, count, dueMs);
+                }
+                if (mqMode) {
                     sendMessages(mqEndpoint, firstId, count, dueMs);
                 }
                 if (System.currentTimeMillis() >= dueMs - 5_000L) {
@@ -99,16 +117,17 @@ public final class S5TimelineProbe {
                 int peakBusinessBacklog = 0;
                 while (System.currentTimeMillis() < deadlineMs) {
                     long nowMs = databaseNowMs(db);
-                    int locked = lockedCount(db, runId);
+                    int pending = pendingCount(db, runId, candidateMode);
                     if (nowMs >= dueMs) {
-                        peakBusinessBacklog = Math.max(peakBusinessBacklog, locked);
-                        System.out.printf("S5 progress t=%+dms locked=%d completed=%d%n",
-                                nowMs - dueMs, locked, count - locked);
-                        if (locked == 0) break;
+                        peakBusinessBacklog = Math.max(peakBusinessBacklog, pending);
+                        System.out.printf("S5 progress t=%+dms pending=%d completed=%d%n",
+                                nowMs - dueMs, pending, count - pending);
+                        if (pending == 0) break;
                     }
                     Thread.sleep(1_000);
                 }
-                Result result = collect(db, runId, count, dueMs, peakBusinessBacklog);
+                Result result = collect(db, runId, count, dueMs, peakBusinessBacklog, candidateMode,
+                        firstId);
                 recorder.finishRun(runId, result.pass() ? "PASS" : "FAIL", result.json(metadata));
                 System.out.println(result.json(metadata));
                 System.out.printf("S5 business backlog peak=%d (not RocketMQ consumer lag)%n", peakBusinessBacklog);
@@ -245,11 +264,53 @@ public final class S5TimelineProbe {
         }
     }
 
-    private static int lockedCount(Connection db, String runId) throws SQLException {
-        try (PreparedStatement ps = db.prepareStatement("""
+    /** Enqueue through the public grab path so Redis scoring and eligibility match real traffic. */
+    private static void enqueueCandidates(Connection db, long firstId, int count, long dueMs)
+            throws Exception {
+        String base = System.getenv("PEERGRAB_BENCH_BASE_URL");
+        String secret = System.getenv("PEERGRAB_AUTH_JWT_SECRET");
+        if (secret == null || secret.isBlank()) {
+            throw new IllegalStateException("Candidate mode needs PEERGRAB_AUTH_JWT_SECRET");
+        }
+        BenchJwtTokens tokens = new BenchJwtTokens(secret, db);
+        HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5))
+                .followRedirects(HttpClient.Redirect.NEVER)
+                .version(HttpClient.Version.HTTP_1_1).build();
+        for (int n = 0; n < count; n++) {
+            if (System.currentTimeMillis() >= dueMs - 5_000L) {
+                throw new IllegalStateException("Candidate setup reached expiry after " + n
+                        + " tasks; increase leadSeconds and use a fresh stack");
+            }
+            long errandId = firstId + n;
+            String token = tokens.issue(CANDIDATE_BASE + n);
+            HttpRequest request = HttpRequest.newBuilder(URI.create(base + "/api/errands/" + errandId + "/grab"))
+                    .header("Authorization", "Bearer " + token)
+                    .header("Content-Type", "application/json")
+                    .header("X-Request-Id", UUID.randomUUID().toString())
+                    .timeout(Duration.ofSeconds(10))
+                    .POST(HttpRequest.BodyPublishers.ofString("{}", StandardCharsets.UTF_8)).build();
+            HttpResponse<String> response = http.send(request,
+                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            JsonNode root = JSON.readTree(response.body());
+            if (response.statusCode() != 200 || !"SLOT_FULL".equals(root.path("code").asText())
+                    || root.path("data").path("candidateRank").asLong(0) < 1) {
+                throw new IllegalStateException("Candidate was not enqueued through grab API: index=" + n
+                        + " HTTP=" + response.statusCode() + " code=" + root.path("code").asText());
+            }
+        }
+        System.out.printf("S5 candidate fixtures enqueued=%d via public grab API%n", count);
+    }
+
+    private static int pendingCount(Connection db, String runId, boolean candidateMode) throws SQLException {
+        String query = candidateMode ? """
+                SELECT COUNT(*) FROM bench_run_item i JOIN errand e ON e.id = i.entity_id
+                 WHERE i.run_id = ? AND i.entity_type = 'ERRAND'
+                   AND e.status = 'LOCKED' AND e.round = 0
+                """ : """
                 SELECT COUNT(*) FROM bench_run_item i JOIN errand e ON e.id = i.entity_id
                  WHERE i.run_id = ? AND i.entity_type = 'ERRAND' AND e.status = 'LOCKED'
-                """)) {
+                """;
+        try (PreparedStatement ps = db.prepareStatement(query)) {
             ps.setString(1, runId);
             try (ResultSet rs = ps.executeQuery()) {
                 rs.next();
@@ -259,17 +320,20 @@ public final class S5TimelineProbe {
     }
 
     private static Result collect(Connection db, String runId, int expected, long dueMs,
-                                  int peakBusinessBacklog) throws SQLException {
+                                  int peakBusinessBacklog, boolean candidateMode,
+                                  long firstId) throws SQLException {
         List<Long> latencyMs = new ArrayList<>();
         int rows = 0, unprocessed = 0, duplicate = 0, premature = 0, wrongState = 0;
         try (PreparedStatement ps = db.prepareStatement("""
-                SELECT e.status, e.slot_taken, e.round, COUNT(s.id) AS events,
-                       ROUND(UNIX_TIMESTAMP(MIN(s.created_at))*1000) AS first_event_ms
+                SELECT e.id, e.status, e.slot_taken, e.round, e.grabber_id,
+                       COUNT(s.id) AS events,
+                       ROUND(UNIX_TIMESTAMP(MIN(s.created_at))*1000) AS first_event_ms,
+                       MIN(s.to_status) AS transition_to, MIN(s.operator_id) AS operator_id
                   FROM bench_run_item i JOIN errand e ON e.id = i.entity_id
                   LEFT JOIN errand_status_log s ON s.errand_id = e.id
                          AND s.from_status = 'LOCKED' AND s.round = 1
                  WHERE i.run_id = ? AND i.entity_type = 'ERRAND'
-                 GROUP BY e.id, e.status, e.slot_taken, e.round
+                 GROUP BY e.id, e.status, e.slot_taken, e.round, e.grabber_id
                 """)) {
             ps.setString(1, runId);
             try (ResultSet rs = ps.executeQuery()) {
@@ -286,9 +350,17 @@ public final class S5TimelineProbe {
                         latencyMs.add(delta);
                         if (delta < 0) premature++;
                     }
-                    if (!"PUBLISHED".equals(rs.getString("status"))
-                            || rs.getInt("slot_taken") != 0 || rs.getInt("round") != 1
-                            || events != 1) wrongState++;
+                    long candidate = CANDIDATE_BASE + rs.getLong("id") - firstId;
+                    boolean stateMatches = candidateMode
+                            ? "LOCKED".equals(rs.getString("status"))
+                                && rs.getInt("slot_taken") == 1 && rs.getInt("round") == 1
+                                && rs.getLong("grabber_id") == candidate
+                                && "LOCKED".equals(rs.getString("transition_to"))
+                                && rs.getLong("operator_id") == candidate
+                            : "PUBLISHED".equals(rs.getString("status"))
+                                && rs.getInt("slot_taken") == 0 && rs.getInt("round") == 1
+                                && "PUBLISHED".equals(rs.getString("transition_to"));
+                    if (!stateMatches || events != 1) wrongState++;
                 }
             }
         }
