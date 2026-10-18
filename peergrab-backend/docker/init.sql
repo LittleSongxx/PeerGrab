@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS errand (
   slot_taken    INT          NOT NULL DEFAULT 0 COMMENT '已占名额',
   status        VARCHAR(16)  NOT NULL,
   round         INT          NOT NULL DEFAULT 0 COMMENT '流转轮次',
+  transfer_count INT         NOT NULL DEFAULT 0 COMMENT '本轮开放以来连续递补次数，回退后归零',
   version       BIGINT       NOT NULL DEFAULT 0 COMMENT '乐观锁版本号',
   locked_at     DATETIME(3)  NULL     COMMENT '本轮抢中时间，P2 超时扫描用',
   confirm_deadline_at DATETIME(3) NULL COMMENT '本轮确认截止时间，以数据库时钟写入',
@@ -46,7 +47,9 @@ CREATE TABLE IF NOT EXISTS publish_request (
   errand_id    BIGINT NULL,
   created_at   DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   PRIMARY KEY (publisher_id, request_id),
-  UNIQUE KEY uk_publish_errand (errand_id)
+  UNIQUE KEY uk_publish_errand (errand_id),
+  -- 发布请求保留期清理按 created_at 扫描
+  KEY idx_publish_created (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='发布请求幂等登记';
 
 -- JWT 模式的服务端会话真值；撤销整个 session_id 即可立即使 access/refresh 失效。
@@ -92,7 +95,7 @@ CREATE TABLE IF NOT EXISTS grab_record (
   request_id VARCHAR(128) NULL COMMENT '抢单请求幂等键；旧记录允许为空',
   seq        INT         NOT NULL COMMENT '第几个名额，从 1 开始；候选记录为 0',
   round      INT         NOT NULL DEFAULT 0,
-  result     VARCHAR(16) NOT NULL COMMENT 'GRABBED/CANDIDATE/EXPIRED',
+  result     VARCHAR(16) NOT NULL COMMENT '当前仅记录 GRABBED；候选队列在 Redis 中维护',
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   PRIMARY KEY (id),
   -- INV-1：同一轮内，同一名额只能被占一次（防超卖的最后一道防线）
@@ -104,7 +107,9 @@ CREATE TABLE IF NOT EXISTS grab_record (
   UNIQUE KEY uk_errand_round_user (errand_id, round, runner_id),
   UNIQUE KEY uk_errand_request (errand_id, request_id),
   KEY idx_campus_errand (campus_id, errand_id),
-  KEY idx_runner (runner_id, created_at)
+  KEY idx_runner (runner_id, created_at),
+  -- My tasks 列表按 runner 找 errand 的 EXISTS 查询
+  KEY idx_runner_errand (runner_id, errand_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='抢单记录';
 
 CREATE TABLE IF NOT EXISTS wallet_account (
@@ -167,7 +172,8 @@ ON DUPLICATE KEY UPDATE id = id;
 INSERT INTO wallet_account (id, owner_id, owner_type, available, frozen, version) VALUES
   (1001, 1001, 'USER', 100000, 0, 0),
   (2001, 2001, 'USER', 5000, 0, 0),
-  (2002, 2002, 'USER', 5000, 0, 0)
+  (2002, 2002, 'USER', 5000, 0, 0),
+  (9001, 9001, 'USER', 0, 0, 0)  -- 仲裁员也持有零余额账户：角色分离在应用层强制，这里只保证账户模型完整
 ON DUPLICATE KEY UPDATE id = id;
 
 -- ==================== P2 新增 ====================
@@ -191,7 +197,9 @@ CREATE TABLE IF NOT EXISTS local_message (
   PRIMARY KEY (id),
   -- 幂等：同一轮的超时消息只会被登记一次
   UNIQUE KEY uk_msg_key (msg_key),
-  KEY idx_scan (status, next_retry_at)
+  KEY idx_scan (status, next_retry_at),
+  -- 已发送消息保留期清理
+  KEY idx_status_updated (status, updated_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='本地消息表';
 
 -- 资金事务与事件登记同库提交。MQ 故障时保留 PENDING，worker 恢复后投递。
@@ -211,7 +219,9 @@ CREATE TABLE IF NOT EXISTS fund_event_outbox (
   created_at       DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   updated_at       DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
   PRIMARY KEY (biz_no),
-  KEY idx_fund_outbox_pending (status, next_retry_at)
+  KEY idx_fund_outbox_pending (status, next_retry_at),
+  -- 已发送资金事件保留期清理
+  KEY idx_outbox_status_updated (status, updated_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='资金事件持久投递箱';
 
 -- 多 app/worker 副本从 MySQL 原子领取雪花节点，旧时间段禁止复用。
@@ -288,7 +298,9 @@ CREATE TABLE IF NOT EXISTS notification (
   -- 消费端幂等：同一事件对同一用户只生成一条站内消息
   UNIQUE KEY uk_msg_user (msg_key, user_id),
   KEY idx_user (user_id, created_at),
-  KEY idx_user_unread (user_id, read_flag)
+  KEY idx_user_unread (user_id, read_flag),
+  -- 已读消息保留期清理
+  KEY idx_read_time (read_flag, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='站内消息';
 
 -- 对账差异：正常情况必须为空。

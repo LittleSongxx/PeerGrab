@@ -46,6 +46,6 @@ class QueryWalletUseCaseTest {
 
     private static WalletQueryPort.LedgerView row(long id, Instant time) {
         return new WalletQueryPort.LedgerView(id, time, "CREDIT", 100,
-                "SETTLE", id, "settle:" + id);
+                "SETTLE", id, "settle:" + id, "USER");
     }
 }

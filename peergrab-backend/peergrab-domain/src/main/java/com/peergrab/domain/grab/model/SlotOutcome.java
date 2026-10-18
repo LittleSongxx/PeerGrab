@@ -14,8 +14,6 @@ public enum SlotOutcome {
     ALREADY_GRABBED(-1),
     /** 同一跑腿重复提交同一 requestId；最终结果仍须以数据库记录为准 */
     DUPLICATE_REQUEST(-2),
-    /** 任务不可抢（不存在或状态不对） */
-    NOT_GRABBABLE(-3),
     /** Redis 名额键过期或丢失；由数据库 CAS 兜底 */
     SLOT_MISSING(-4),
     /** 同一 requestId 已被另一位跑腿占用 */

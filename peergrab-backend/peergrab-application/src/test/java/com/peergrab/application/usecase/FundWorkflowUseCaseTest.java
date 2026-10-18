@@ -3,6 +3,7 @@ package com.peergrab.application.usecase;
 import com.peergrab.domain.credit.ports.CreditRankingPort;
 import com.peergrab.domain.credit.ports.CreditRepository;
 import com.peergrab.domain.credit.model.CreditEvent;
+import com.peergrab.domain.errand.model.ArbitrationFavor;
 import com.peergrab.domain.errand.model.Errand;
 import com.peergrab.domain.errand.model.ErrandStatus;
 import com.peergrab.domain.errand.model.ErrandType;
@@ -305,7 +306,7 @@ class FundWorkflowUseCaseTest {
                 notifier, 9001);
 
         BizException ex = assertThrows(BizException.class,
-                () -> arbitrate.arbitrate(48, ArbitrateErrandUseCase.Favor.RUNNER, 1001));
+                () -> arbitrate.arbitrate(48, ArbitrationFavor.RUNNER, 1001));
 
         assertEquals(ErrorCode.UNAUTHORIZED, ex.code());
         verifyNoInteractions(errands);

@@ -16,6 +16,17 @@ final class MiddlewareAvailable {
     private MiddlewareAvailable() {
     }
 
+    /**
+     * IT 类只会在 -Dpeergrab.it=true 时执行；此时中间件不可用必须失败而不是静默跳过，
+     * 否则"本地全绿"会掩盖集成测试从未真正运行的事实。
+     */
+    static void require() {
+        if (!check()) {
+            throw new IllegalStateException("peergrab.it=true 但独立 MySQL/Redis 不可用；"
+                    + "请先启动隔离中间件（见 CI 或 bench 运行手册）");
+        }
+    }
+
     static boolean check() {
         return portOpen(System.getenv().getOrDefault("PEERGRAB_TEST_DB_HOST", "127.0.0.1"),
                 Integer.parseInt(System.getenv().getOrDefault("PEERGRAB_TEST_DB_PORT", "3307")))

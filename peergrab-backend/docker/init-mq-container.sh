@@ -34,6 +34,7 @@ admin updateTopic -n "$NAMESRV" -c "$CLUSTER" -t errand-auto-settle -a +message.
 admin updateTopic -n "$NAMESRV" -c "$CLUSTER" -t errand-fund-event-v2 -a +message.type=NORMAL
 admin updateTopic -n "$NAMESRV" -c "$CLUSTER" -t errand-cache-evict -a +message.type=DELAY
 
-for group in peergrab-timeout-consumer peergrab-autosettle-consumer peergrab-fund-event-consumer peergrab-cache-evict-consumer peergrab-fund-event-push; do
+# 资金事件实时推送并入 worker 落库消费者，不再需要独立的 push 消费组。
+for group in peergrab-timeout-consumer peergrab-autosettle-consumer peergrab-fund-event-consumer peergrab-cache-evict-consumer; do
     admin updateSubGroup -n "$NAMESRV" -c "$CLUSTER" -g "$group"
 done

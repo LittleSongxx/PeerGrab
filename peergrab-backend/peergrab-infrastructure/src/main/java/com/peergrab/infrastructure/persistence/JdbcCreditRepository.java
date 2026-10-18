@@ -131,16 +131,6 @@ public class JdbcCreditRepository implements CreditRepository {
     }
 
     @Override
-    public int windowDelta(long userId, int windowDays) {
-        Integer sum = jdbc.queryForObject("""
-                SELECT COALESCE(SUM(delta), 0) FROM credit_event
-                 WHERE user_id = ? AND created_at >= ?
-                """, Integer.class, userId,
-                Timestamp.from(Instant.now().minus(windowDays, ChronoUnit.DAYS)));
-        return sum == null ? 0 : sum;
-    }
-
-    @Override
     public int calibrateScores(int windowDays, int limit) {
         List<Long> users = jdbc.queryForList("""
                 SELECT user_id FROM credit_score

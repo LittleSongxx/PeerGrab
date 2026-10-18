@@ -1,0 +1,30 @@
+# PeerGrab 最小可观测性栈：Prometheus 抓取配置。
+# 由 docker-compose.observability.yaml 挂载到容器内 /etc/prometheus/prometheus.yml，
+# 必须叠加在 docker-compose.yaml + docker-compose.full.yaml 之上使用（见同目录 README.md）。
+global:
+  # 15s 与 WorkerOperationalMetrics 的后台采样周期一致，避免采样抖动被放大成假告警。
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  # app 进程：server.port=8080，management 端口复用该端口，
+  # 因此 /actuator/prometheus 就在 app:8080 上（容器网络内，未映射到宿主机）。
+  - job_name: peergrab-app
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["app:8080"]
+        labels:
+          service: peergrab-app
+
+  # worker 进程：server.port=8082。资金 outbox、延迟消息、对账差异这些积压 gauge
+  # 只由 worker 的 WorkerOperationalMetrics 注册。
+  - job_name: peergrab-worker
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["worker:8082"]
+        labels:
+          service: peergrab-worker

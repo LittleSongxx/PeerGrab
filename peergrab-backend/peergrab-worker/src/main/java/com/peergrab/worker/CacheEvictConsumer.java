@@ -38,17 +38,20 @@ public class CacheEvictConsumer {
     private final ClientConfiguration configuration;
     private final ErrandCachePort cache;
     private final String group;
+    private final String topic;
 
     private PushConsumer consumer;
 
     public CacheEvictConsumer(ClientServiceProvider provider,
                               ClientConfiguration configuration,
                               ErrandCachePort cache,
-                              @Value("${peergrab.mq.group.cache-evict:peergrab-cache-evict-consumer}") String group) {
+                              @Value("${peergrab.mq.group.cache-evict:peergrab-cache-evict-consumer}") String group,
+                              @Value("${peergrab.mq.topic.cache-evict:errand-cache-evict}") String topic) {
         this.provider = provider;
         this.configuration = configuration;
         this.cache = cache;
         this.group = group;
+        this.topic = topic;
     }
 
     @Scheduled(fixedDelayString = "${peergrab.mq.consumer-reconnect-ms:10000}", scheduler = "mqConsumerScheduler")
@@ -66,7 +69,7 @@ public class CacheEvictConsumer {
                 .setClientConfiguration(configuration)
                 .setConsumerGroup(group)
                 .setSubscriptionExpressions(Collections.singletonMap(
-                        CacheEvictDelayPort.TOPIC_CACHE_EVICT,
+                        topic,
                         new FilterExpression("*", FilterExpressionType.TAG)))
                 .setMessageListener(msg -> {
                     String body = StandardCharsets.UTF_8.decode(msg.getBody()).toString();

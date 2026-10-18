@@ -1,0 +1,60 @@
+# PeerGrab 最小可观测性栈（Prometheus + Grafana）—— 叠加文件，不能单独使用。
+#
+# 本文件只新增 prometheus / grafana 两个服务，且都带 profiles: [observability]；
+# app / worker 的定义完全不动：它们本来就在同一个 compose 默认网络里，
+# 因此 Prometheus 可以直接抓 app:8080 与 worker:8082 的 /actuator/prometheus。
+# 不加 --profile observability 时，这两个服务不会被创建，基础栈行为保持不变。
+#
+# 启动（三个文件必须一起给，否则 app/worker 不存在，抓取目标会一直是 down）：
+#   docker compose -p peergrab-local --env-file .env \
+#     -f docker-compose.yaml -f docker-compose.full.yaml -f docker-compose.observability.yaml \
+#     --profile observability up -d
+# 使用说明与指标/告警覆盖范围见 observability/README.md。
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.13.2
+    profiles: [observability]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # 本地开发栈只保留 7 天，避免 TSDB 无限增长；要更长周期请另接远端存储。
+      - --storage.tsdb.retention.time=7d
+      - --web.listen-address=0.0.0.0:9090
+    ports:
+      # 与基础栈一致，只监听回环地址；宿主机端口可用 .env 覆盖。
+      - "127.0.0.1:${PEERGRAB_PROMETHEUS_PORT:-29090}:9090"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - peergrab-prometheus-data:/prometheus
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:13.1.3
+    profiles: [observability]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${PEERGRAB_GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${PEERGRAB_GRAFANA_ADMIN_PASSWORD:-peergrab-local-grafana}
+      # Grafana 端口只绑 127.0.0.1，本机演示允许匿名只读；
+      # 换到共享或远程环境时请把它设为 false，并设置强口令。
+      GF_AUTH_ANONYMOUS_ENABLED: ${PEERGRAB_GRAFANA_ANONYMOUS_ENABLED:-true}
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/peergrab.json
+    ports:
+      - "127.0.0.1:${PEERGRAB_GRAFANA_PORT:-23000}:3000"
+    volumes:
+      # 数据源 + dashboard provider 都走 provisioning，重建容器不需要手点。
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - peergrab-grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  peergrab-prometheus-data:
+  peergrab-grafana-data:

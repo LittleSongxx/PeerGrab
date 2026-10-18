@@ -28,9 +28,6 @@ public interface CreditRepository {
     /** 最近 N 天的事件（信用分页展示用） */
     List<CreditEvent> recentEvents(long userId, int days, int limit);
 
-    /** 窗口内事件的分值总和（每日校准 job 用） */
-    int windowDelta(long userId, int windowDays);
-
     /**
      * 按最近 windowDays 的事件重算信用分快照。
      *

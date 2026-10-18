@@ -32,7 +32,9 @@ services:
     image: redis:7.4-alpine
     ports:
       - "127.0.0.1:${PEERGRAB_REDIS_PORT:-6380}:6379"
-    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "noeviction"]
+    # 缓存/名额/布隆/榜单都允许丢失并从 MySQL 重建，因此用 allkeys-lru 防止内存打满后
+    # 写命令报 OOM；槽位丢失会走数据库 CAS 兜底，会话模式本机重登即可。
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru", "--maxmemory-samples", "10"]
     volumes:
       - peergrab-redis-data:/data
     healthcheck:

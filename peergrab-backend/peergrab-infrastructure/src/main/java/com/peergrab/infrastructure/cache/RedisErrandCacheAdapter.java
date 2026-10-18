@@ -109,7 +109,7 @@ public class RedisErrandCacheAdapter implements ErrandCachePort {
                                    @Value("${peergrab.cache.ttl-seconds:600}") long ttlSeconds,
                                    @Value("${peergrab.cache.jitter-seconds:120}") long jitterSeconds,
                                    @Value("${peergrab.cache.empty-ttl-seconds:60}") long emptyTtlSeconds,
-                                   @Value("${peergrab.cache.bloom-enabled:false}") boolean bloomEnabled,
+                                   @Value("${peergrab.cache.bloom-enabled:true}") boolean bloomEnabled,
                                    @Value("${peergrab.cache.local-fallback-ttl-millis:1000}") long localFallbackTtlMillis,
                                    @Value("${peergrab.cache.local-fallback-max-entries:10000}") int localFallbackMaxEntries) {
         this(redis, redisson, shards, ttlSeconds, jitterSeconds, emptyTtlSeconds, bloomEnabled,
@@ -381,8 +381,9 @@ public class RedisErrandCacheAdapter implements ErrandCachePort {
     /**
      * 布隆判存在。
      *
-     * Redis 与 MySQL 不共享事务，发布时布隆登记可能失败；过滤器被清空后也可能
-     * 先由新任务初始化为不完整状态。因此 false 只是提示，调用方仍需向 DB 核实。
+     * 判否会被读路径短路为"不存在"，因此这里必须 fail-open：未启用、Redis 降级、
+     * 过滤器丢失或部分重建中一律返回 true，宁可放行一次 DB 查询也不误杀真实任务。
+     * 残余误杀（发布登记失败等）由读路径抽样审计与周期巡检补登记兜底。
      */
     @Override
     public boolean mightExist(long errandId) {

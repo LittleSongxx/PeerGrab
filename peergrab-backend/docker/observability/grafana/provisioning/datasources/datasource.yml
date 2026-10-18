@@ -1,0 +1,17 @@
+# Grafana 数据源自动配置：Grafana 与 Prometheus 同处 compose 默认网络，
+# 因此可以用服务名 prometheus:9090 直连（不经过宿主机端口映射）。
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    # 固定 uid，dashboard JSON 里的 panel 直接引用它，避免部署后出现 "datasource not found"。
+    uid: peergrab-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      # 与 prometheus.yml 的 scrape_interval 对齐，Grafana 会用 15s 的步长做下采样。
+      timeInterval: 15s
+      httpMethod: POST

@@ -3,6 +3,8 @@ package com.peergrab.presentation.realtime;
 import com.peergrab.domain.auth.ports.AuthPort;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -10,6 +12,9 @@ import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
+
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * WebSocket 连接处理器：只管连接生命周期，消息内容全由服务端主动推。
@@ -29,10 +34,20 @@ public class WsHandler extends TextWebSocketHandler {
 
     private final WsSessionRegistry registry;
     private final AuthPort authPort;
+    private final int maxMessagesPerSecond;
+    /** sessionId -> 当前秒 + 计数；用于单连接消息频率限制。 */
+    private final ConcurrentHashMap<String, MessageWindow> messageWindows = new ConcurrentHashMap<>();
 
     public WsHandler(WsSessionRegistry registry, AuthPort authPort) {
+        this(registry, authPort, 5);
+    }
+
+    @Autowired
+    public WsHandler(WsSessionRegistry registry, AuthPort authPort,
+                     @Value("${peergrab.ws.max-messages-per-second:5}") int maxMessagesPerSecond) {
         this.registry = registry;
         this.authPort = authPort;
+        this.maxMessagesPerSecond = Math.max(1, maxMessagesPerSecond);
     }
 
     @Override
@@ -43,11 +58,15 @@ public class WsHandler extends TextWebSocketHandler {
             return;
         }
         if (!validateSession(userId, session)) return;
-        registry.add(userId, session);
+        if (!registry.add(userId, session)) {
+            // 单用户连接数超限：拒绝新连接，避免恶意/异常客户端耗尽服务端资源。
+            closeAndRemove(session, userId);
+        }
     }
 
     /** Logout and expiry must invalidate connections opened before the change. */
-    @Scheduled(fixedDelayString = "${peergrab.ws.auth-recheck-ms:60000}")
+    @Scheduled(fixedDelayString = "${peergrab.ws.auth-recheck-ms:60000}",
+            scheduler = "realtimeTaskScheduler")
     public void revalidateSessions() {
         registry.forEach((userId, session) -> {
             synchronized (session) {
@@ -89,6 +108,12 @@ public class WsHandler extends TextWebSocketHandler {
 
     @Override
     protected void handleTextMessage(WebSocketSession session, TextMessage message) throws Exception {
+        if (!allowClientMessage(session)) {
+            synchronized (session) {
+                session.close(CloseStatus.POLICY_VIOLATION);
+            }
+            return;
+        }
         if ("ping".equals(message.getPayload())) {
             synchronized (session) {
                 session.sendMessage(new TextMessage("pong"));
@@ -97,8 +122,30 @@ public class WsHandler extends TextWebSocketHandler {
         // 其他客户端消息一律忽略：本协议只有服务端 -> 客户端方向有业务语义
     }
 
+    /** 单连接消息频率限制：超过阈值的连接按策略违规关闭，防止刷心跳/刷消息。 */
+    private boolean allowClientMessage(WebSocketSession session) {
+        long second = System.currentTimeMillis() / 1000L;
+        MessageWindow window = messageWindows.compute(session.getId(), (id, existing) ->
+                existing == null || existing.second != second ? new MessageWindow(second) : existing);
+        if (window.count.incrementAndGet() > maxMessagesPerSecond) {
+            messageWindows.remove(session.getId(), window);
+            return false;
+        }
+        return true;
+    }
+
+    private static final class MessageWindow {
+        private final long second;
+        private final AtomicInteger count = new AtomicInteger();
+
+        private MessageWindow(long second) {
+            this.second = second;
+        }
+    }
+
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
+        messageWindows.remove(session.getId());
         Long userId = (Long) session.getAttributes().get(ATTR_USER_ID);
         if (userId != null) {
             registry.remove(userId, session);

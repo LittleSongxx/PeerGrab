@@ -11,10 +11,12 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
 import java.util.Optional;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.atomic.AtomicLong;
@@ -25,7 +27,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * ── 读路径 ──
  *   1. 读缓存命中且未逻辑过期 → 直接返回
  *   2. 命中但逻辑过期 → 抢重建权：抢到的回源重建，抢不到的返回旧值（防击穿）
- *   3. 未命中 → 抢重建权 → 回源 DB → 回填（查不到则写空值缓存）
+ *   3. 未命中 → 布隆判否短路返回不存在（防穿透）；判存则抢重建权 → 回源 DB → 回填
+ *      （查不到则写空值缓存，兜住布隆放行但确实不存在的 id）
  *
  * ── 为什么逻辑过期时"返回旧值"而不是"阻塞等重建" ──
  * 热点任务缓存到期瞬间会有几百个并发读。阻塞等待会把这几百个线程挂在锁上，
@@ -42,6 +45,7 @@ public class GetErrandDetailUseCase {
 
     private final ErrandRepository errandRepository;
     private final ErrandCachePort cache;
+    private final int bloomAuditDenominator;
     private final Timer cacheLookupTimer;
     private final Timer rebuildLockTimer;
     private final Timer databaseLoadTimer;
@@ -54,12 +58,16 @@ public class GetErrandDetailUseCase {
     private final AtomicLong staleReturnCount = new AtomicLong();
     private final AtomicLong degradedReadCount = new AtomicLong();
     private final AtomicLong degradedLocalHitCount = new AtomicLong();
+    /** 布隆判否短路计数（防穿透效果指标） */
+    private final AtomicLong bloomShortCircuitCount = new AtomicLong();
 
     @Autowired
     public GetErrandDetailUseCase(ErrandRepository errandRepository, ErrandCachePort cache,
-                                  MeterRegistry registry) {
+                                  MeterRegistry registry,
+                                  @Value("${peergrab.cache.bloom-audit-denominator:100}") int bloomAuditDenominator) {
         this.errandRepository = errandRepository;
         this.cache = cache;
+        this.bloomAuditDenominator = bloomAuditDenominator;
         this.cacheLookupTimer = timer(registry, "peergrab.cache.detail.lookup",
                 "Redis detail lookup, including a failed lookup before database fallback");
         this.rebuildLockTimer = timer(registry, "peergrab.cache.detail.rebuild.lock",
@@ -72,7 +80,13 @@ public class GetErrandDetailUseCase {
 
     /** Keeps lightweight use-case tests independent of Spring's metrics configuration. */
     public GetErrandDetailUseCase(ErrandRepository errandRepository, ErrandCachePort cache) {
-        this(errandRepository, cache, new SimpleMeterRegistry());
+        this(errandRepository, cache, new SimpleMeterRegistry(), 100);
+    }
+
+    /** 判否抽样审计：1/denominator 的判否仍回源核实，防索引遗漏把真实任务误判为 404。 */
+    private boolean sampledForBloomAudit() {
+        return bloomAuditDenominator <= 1
+                || ThreadLocalRandom.current().nextInt(bloomAuditDenominator) == 0;
     }
 
     private static Timer timer(MeterRegistry registry, String name, String description) {
@@ -169,12 +183,19 @@ public class GetErrandDetailUseCase {
             return Optional.of(c.payloadJson());
         }
 
-        // Bloom 与 MySQL 非同一事务，negative 必须向数据库核实，避免 Redis 丢失、
-        // 重建中的部分过滤器或发布后登记失败把真实任务误判为 404。
+        // 布隆判否短路为"不存在"（防穿透主手段）。敢短路依赖三道保障：
+        // ① 适配器 fail-open——未启用、降级、过滤器丢失或部分重建期 mightExist 恒真；
+        // ② 发布登记失败短退避重试 + 周期巡检补登记（CacheConsistencyCheckUseCase）
+        //    + BloomRebuildJob 每 30 分钟全量校准（重建期间撤销就绪标记、读路径 fail-open）；
+        // ③ 判否抽样审计——1/N 的请求仍回源核实，发现遗漏即告警并补登记。
         boolean bloomNegative = !cache.mightExist(errandId);
         if (cache.isDegraded()) {
             degradedReadCount.incrementAndGet();
             return reload(errandId, false);
+        }
+        if (bloomNegative && !sampledForBloomAudit()) {
+            bloomShortCircuitCount.incrementAndGet();
+            return Optional.empty();
         }
         if (acquireRebuild(errandId)) {
             try {
@@ -221,7 +242,7 @@ public class GetErrandDetailUseCase {
             return Optional.empty();
         }
         if (bloomNegative && !cache.isDegraded()) {
-            log.warn("布隆索引遗漏真实任务，已向 MySQL 核实并尝试补登记 errandId={}", errandId);
+            log.warn("抽样审计发现布隆索引遗漏真实任务，已核实并补登记 errandId={}", errandId);
             cache.registerExisting(errandId);
         }
         String json = toDetailJson(found.get());
@@ -252,6 +273,7 @@ public class GetErrandDetailUseCase {
     public long staleReturnCount() { return staleReturnCount.get(); }
     public long degradedReadCount() { return degradedReadCount.get(); }
     public long degradedLocalHitCount() { return degradedLocalHitCount.get(); }
+    public long bloomShortCircuitCount() { return bloomShortCircuitCount.get(); }
 
     /** 命中率：S3 压测报告要用 */
     public double hitRate() {
@@ -266,5 +288,6 @@ public class GetErrandDetailUseCase {
         staleReturnCount.set(0);
         degradedReadCount.set(0);
         degradedLocalHitCount.set(0);
+        bloomShortCircuitCount.set(0);
     }
 }

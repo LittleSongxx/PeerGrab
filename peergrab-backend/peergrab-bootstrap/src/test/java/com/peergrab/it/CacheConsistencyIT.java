@@ -21,13 +21,14 @@ import java.util.concurrent.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * 缓存一致性正向验证：读穿透回填、布隆判否核实、逻辑过期单线程重建、写后最终一致。
+ * 缓存一致性正向验证：读穿透回填、布隆判否短路防穿透、逻辑过期单线程重建、写后最终一致。
  *
  * 对照实验（证明错误实现真的会错）在另外两个类：
  *   - CacheEvictionOrderControlIT：先删缓存再更新 DB 的旧值残留
  *   - CacheDoubleDeleteControlIT：慢读回填窗口与双删接线验证
  */
-@SpringBootTest(properties = {"peergrab.mq.enabled=false", "peergrab.credit.max-ongoing=10000"})
+@SpringBootTest(properties = {"peergrab.mq.enabled=false", "peergrab.credit.max-ongoing=10000",
+        "peergrab.cache.bloom-enabled=true", "peergrab.cache.bloom-audit-denominator=1000000"})
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 @org.junit.jupiter.api.condition.EnabledIfSystemProperty(named = "peergrab.it", matches = "true")
 class CacheConsistencyIT {
@@ -42,7 +43,7 @@ class CacheConsistencyIT {
 
     @BeforeAll
     static void requireMiddleware() {
-        Assumptions.assumeTrue(MiddlewareAvailable.check(), "中间件未启动，跳过");
+        MiddlewareAvailable.require();
     }
 
     @BeforeEach
@@ -78,19 +79,26 @@ class CacheConsistencyIT {
 
     @Test
     @Order(2)
-    @DisplayName("布隆判否经 MySQL 核实，同一不存在 id 的空值缓存阻止重复回源")
-    void bloom_negative_is_verified_once_then_empty_cached() {
-        // 布隆是非事务性的辅助索引，判否不能直接返回 404。
+    @DisplayName("布隆就绪后判否短路：不存在的 id 不再打 DB")
+    void bloom_negative_short_circuits_once_index_ready() {
+        // 短路的前提是索引就绪（就绪标记由全量重建 job 设置，这里手工置位模拟）；
+        // 发布登记让真实任务进入过滤器，未登记的 id 判否短路、零回源。
         publish("cache_布隆初始化_" + UUID.randomUUID().toString().substring(0, 6));
+        redis.opsForValue().set("errand:bloom:ready", "1");
         detailUseCase.resetStats();
-
-        // 同一不存在 id 的第一次读向 DB 核实，之后由空值缓存拦下。
-        for (int i = 0; i < 1000; i++) {
-            var r = detailUseCase.detailJson(900_000_000_000_000L);
-            assertTrue(r.isEmpty(), "不存在的 id 应返回 empty");
+        try {
+            for (int i = 0; i < 1000; i++) {
+                var r = detailUseCase.detailJson(900_000_000_000_000L);
+                assertTrue(r.isEmpty(), "不存在的 id 应返回 empty");
+            }
+            assertEquals(1000, detailUseCase.bloomShortCircuitCount(),
+                    "1000 次判否全部短路");
+            assertEquals(0, detailUseCase.dbLoadCount(),
+                    "索引就绪后判否短路，不存在的 id 不应再打 DB");
+        } finally {
+            // 就绪标记是手工置位的，删掉避免影响共享中间件上的后续测试
+            redis.delete("errand:bloom:ready");
         }
-        assertEquals(1, detailUseCase.dbLoadCount(),
-                "同一个不存在 id 只应向 DB 核实一次");
     }
 
     @Test

@@ -6,6 +6,7 @@ import com.peergrab.domain.errand.model.ErrandType;
 import com.peergrab.domain.errand.ports.ErrandCachePort;
 import com.peergrab.domain.errand.ports.ErrandRepository;
 import com.peergrab.shared.Money;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
@@ -29,7 +30,25 @@ class GetErrandDetailUseCaseTest {
     }
 
     @Test
-    void bloom_negative_never_hides_a_real_task() {
+    void bloom_negative_short_circuits_without_touching_database() {
+        ErrandRepository repository = mock(ErrandRepository.class);
+        ErrandCachePort cache = mock(ErrandCachePort.class);
+        when(cache.get(42)).thenReturn(Optional.empty());
+        when(cache.mightExist(42)).thenReturn(false);
+
+        // denominator 取最大值 → 抽样审计恒不命中，判否直接短路
+        var useCase = new GetErrandDetailUseCase(repository, cache,
+                new SimpleMeterRegistry(), Integer.MAX_VALUE);
+        var detail = useCase.detailJson(42);
+
+        assertTrue(detail.isEmpty());
+        assertEquals(1, useCase.bloomShortCircuitCount());
+        verify(repository, never()).findById(42);
+        verify(cache, never()).tryAcquireRebuild(42);
+    }
+
+    @Test
+    void audited_bloom_negative_still_recovers_a_real_task() {
         ErrandRepository repository = mock(ErrandRepository.class);
         ErrandCachePort cache = mock(ErrandCachePort.class);
         when(cache.get(42)).thenReturn(Optional.empty());
@@ -37,7 +56,9 @@ class GetErrandDetailUseCaseTest {
         when(cache.tryAcquireRebuild(42)).thenReturn(true);
         when(repository.findById(42)).thenReturn(Optional.of(errand(42)));
 
-        var detail = new GetErrandDetailUseCase(repository, cache).detailJson(42);
+        // denominator = 1 → 每次判否都进审计，仍向 DB 核实并补登记
+        var detail = new GetErrandDetailUseCase(repository, cache,
+                new SimpleMeterRegistry(), 1).detailJson(42);
 
         assertTrue(detail.isPresent());
         assertTrue(detail.get().contains("\"id\":\"42\""));

@@ -2,7 +2,8 @@ import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api';
 
 const TYPE_TEXT: Record<string, string> = {
-  SETTLED: '结算完成', REFUNDED: '退款完成', ARBITRATED: '仲裁结果',
+  SETTLED: '结算完成', REFUNDED: '退款完成', TRANSFERRED: '递补通知',
+  REVERTED: '任务重新开放', ARBITRATED: '仲裁结果',
 };
 
 export default function Notifications() {

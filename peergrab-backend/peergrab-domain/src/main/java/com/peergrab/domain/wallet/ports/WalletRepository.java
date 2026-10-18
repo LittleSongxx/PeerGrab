@@ -30,6 +30,15 @@ public interface WalletRepository {
 
     Optional<WalletAccount> findByOwner(long ownerId, AccountType type);
 
+    /**
+     * 确保某个用户存在自己的 USER 钱包账户。
+     *
+     * <p>没有账户的身份一旦抢单成功，结算时找不到收款账户就会让任务永久卡在 DELIVERED。
+     * 因此抢单/结算/退款/仲裁在触碰用户账户前统一调用本方法幂等开通；
+     * 开通只写一条零余额账户行，不改变任何余额或流水。</p>
+     */
+    void ensureUserAccount(long userId);
+
     Optional<WalletAccount> findById(long accountId);
 
     /**

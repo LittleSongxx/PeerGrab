@@ -24,14 +24,18 @@ public interface LocalMessageRepository {
     void markSent(String msgKey);
 
     /** 扫描待重发消息（发送失败或应用崩溃遗留的 PENDING） */
-    List<PendingMessage> findPending(int limit);
-
     /** Claim rows atomically before sending; expired claims are recoverable by another worker. */
     List<ClaimedMessage> claimPending(int limit);
 
     boolean markClaimedSent(String msgKey, String claimToken);
 
     boolean markClaimedRetry(String msgKey, String claimToken, int maxRetry);
+
+    /**
+     * 释放尚未处理的领取租约（单轮时间预算耗尽时使用），
+     * 避免消息被空占 120 秒才重新可发送。
+     */
+    void releaseClaim(String msgKey, String claimToken);
 
     /** 重试失败：累加次数并按指数退避推迟下次重试；超过上限转 DEAD */
     void markRetry(String msgKey, int maxRetry);

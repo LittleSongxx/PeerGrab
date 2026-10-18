@@ -34,7 +34,7 @@ class WalletLedgerConcurrencyIT {
 
     @Test
     void concurrentPublishAndRefundKeepEveryAccountLedgerOrdered() throws Exception {
-        Assumptions.assumeTrue(MiddlewareAvailable.check(), "integration middleware unavailable");
+        MiddlewareAvailable.require();
         long userId = ThreadLocalRandom.current().nextLong(8_000_000_000L, 9_000_000_000L);
         long openingUser = 1_000_000L;
         long openingEscrow = balance(1);

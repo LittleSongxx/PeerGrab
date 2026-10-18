@@ -32,11 +32,22 @@ spring:
 peergrab:
   ws:
     enabled: true
+    auth-recheck-ms: 60000
+    max-sessions-per-user: 8      # 单用户最多 8 条长连接（多端+重连抖动余量）
+    max-messages-per-second: 5    # 单连接消息频率上限，防恶意刷心跳
   worker-id: 1
   auth:
     # 生产默认 false：只认 Bearer token。谁把这个开关开进生产，
     # 等于任何人带个 X-User-Id 就能冒充任何人。
     allow-header-identity: false
+    # 登录失败限速（进程内；单 API 实例部署有效，多实例时降级为每实例限速）。
+    login:
+      enabled: true
+      max-attempts: 5
+      window-seconds: 60
+      lock-seconds: 300
+    # JWT 每请求校验会话的本地正结果缓存；0=关闭。跨实例登出最坏延迟该值。
+    resolve-cache-ms: 1000
     arbitrator-id: 9001
     demo:
       enabled: ${PEERGRAB_AUTH_DEMO_ENABLED:false}
@@ -50,11 +61,17 @@ peergrab:
   settle:
     commission-rate: 0.05
     auto-settle-seconds: 86400
+    scan-batch-size: 100          # 单次批量结算上限；批量越大公共账户锁持有越久
+    scan-max-batches: 5
+    scan-max-run-ms: 30000
   mq:
     enabled: true                 # 关掉则退化为纯兜底扫描，应用仍可用
     endpoints: 127.0.0.1:8081     # RocketMQ 5.x gRPC proxy
     topic:
       confirm-timeout: errand-confirm-timeout
+      auto-settle: errand-auto-settle
+      cache-evict: errand-cache-evict
+      fund-event: errand-fund-event-v2
   timeout:
     confirm-seconds: 300
     max-transfer-rounds: 5      # 防无限流转：超过则回退让所有人重新抢          # 生产 5 分钟；测试用 @TestPropertySource 压到 2 秒
@@ -84,7 +101,9 @@ peergrab:
     double-delete-enabled: true
     double-delete-sender-threads: 2  # MQ 发送在有界后台池执行，避免 Broker 故障阻塞已提交写请求
     double-delete-queue-capacity: 2048
-    bloom-enabled: false       # negative 仍要查 MySQL；默认关闭避免冷 miss 多次 Redis 访问
+    bloom-enabled: true        # 判否短路防穿透；未就绪恒放行（fail-open），另有抽样审计与巡检补登记兜底
+    bloom-audit-denominator: 100  # 判否抽样审计 1/100 仍回源核实，防索引遗漏误杀真实任务
+    bloom-refresh-interval-ms: 1800000  # 每 30 分钟全量校准一次，修复"已就绪但漏登记"的 id
     redisson-pool-size: 16    # 与 Lettuce 池分开，避免叠加打满 Redis
     local-fallback-ttl-millis: 1000 # Redis 故障时仅短暂复用本进程已验证详情
     local-fallback-max-entries: 10000

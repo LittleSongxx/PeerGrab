@@ -49,7 +49,7 @@ admin "updateSubGroup -n $NAMESRV -c $CLUSTER -g $GROUP" | tail -1
 admin "updateSubGroup -n $NAMESRV -c $CLUSTER -g peergrab-autosettle-consumer" | tail -1
 admin "updateSubGroup -n $NAMESRV -c $CLUSTER -g peergrab-fund-event-consumer" | tail -1
 admin "updateSubGroup -n $NAMESRV -c $CLUSTER -g peergrab-cache-evict-consumer" | tail -1
-admin "updateSubGroup -n $NAMESRV -c $CLUSTER -g peergrab-fund-event-push" | tail -1
+# 资金事件实时推送已并入 worker 的落库消费者（经 Redis fanout 到 API），不再创建独立 push 组。
 
 echo "集群状态:"
 admin "clusterList -n $NAMESRV" | tail -3

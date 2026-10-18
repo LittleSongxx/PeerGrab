@@ -34,12 +34,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class AutoSettleScanJob {
 
     private static final Logger log = LoggerFactory.getLogger(AutoSettleScanJob.class);
-    private static final int BATCH_LIMIT = 200;
     private static final int RETRY_LIMIT = 50;
 
     private final ErrandRepository errandRepository;
     private final SettleErrandUseCase settleUseCase;
     private final ScanRetryQueue retryQueue;
+    private final int batchLimit;
     private final int maxBatches;
     private final long maxRunNanos;
     private final java.util.function.LongSupplier nanoTime;
@@ -62,10 +62,11 @@ public class AutoSettleScanJob {
                              SettleErrandUseCase settleUseCase,
                              ScanRetryQueue retryQueue,
                              MeterRegistry registry,
+                             @Value("${peergrab.settle.scan-batch-size:100}") int batchSize,
                              @Value("${peergrab.settle.scan-max-batches:5}") int maxBatches,
                              @Value("${peergrab.settle.scan-max-run-ms:30000}") long maxRunMs) {
         this(errandRepository, settleUseCase, retryQueue, registry,
-                maxBatches, maxRunMs, System::nanoTime);
+                batchSize, maxBatches, maxRunMs, System::nanoTime);
     }
 
     /** Lightweight constructor retained for unit tests and non-Spring callers. */
@@ -73,22 +74,24 @@ public class AutoSettleScanJob {
                       SettleErrandUseCase settleUseCase,
                       ScanRetryQueue retryQueue) {
         this(errandRepository, settleUseCase, retryQueue, new SimpleMeterRegistry(),
-                5, 30_000, System::nanoTime);
+                200, 5, 30_000, System::nanoTime);
     }
 
     AutoSettleScanJob(ErrandRepository errandRepository,
                       SettleErrandUseCase settleUseCase,
                       ScanRetryQueue retryQueue,
                       MeterRegistry registry,
+                      int batchSize,
                       int maxBatches,
                       long maxRunMs,
                       java.util.function.LongSupplier nanoTime) {
-        if (maxBatches < 1 || maxRunMs < 1) {
+        if (batchSize < 1 || maxBatches < 1 || maxRunMs < 1) {
             throw new IllegalArgumentException("auto-settle scan limits must be positive");
         }
         this.errandRepository = errandRepository;
         this.settleUseCase = settleUseCase;
         this.retryQueue = retryQueue;
+        this.batchLimit = batchSize;
         this.maxBatches = maxBatches;
         this.maxRunNanos = TimeUnit.MILLISECONDS.toNanos(maxRunMs);
         this.nanoTime = nanoTime;
@@ -147,14 +150,14 @@ public class AutoSettleScanJob {
             AtomicInteger failures = new AtomicInteger();
             boolean stop = false;
             while (batches < maxBatches && !timeBudgetExhausted(started)) {
-                List<Errand> due = errandRepository.findAutoSettleDueAfter(0, afterAt, afterId, BATCH_LIMIT);
+                List<Errand> due = errandRepository.findAutoSettleDueAfter(0, afterAt, afterId, batchLimit);
                 if (due.isEmpty() && afterAt != null) {
                     resetCursor();
                     // At the beginning of a run, revisit the oldest due page. This
                     // avoids starving rows inserted behind a previous cursor while
                     // keeping one invocation from scanning the same page twice.
                     if (batches == 0) {
-                        due = errandRepository.findAutoSettleDueAfter(0, null, 0, BATCH_LIMIT);
+                        due = errandRepository.findAutoSettleDueAfter(0, null, 0, batchLimit);
                     }
                 }
                 if (due.isEmpty()) break;
@@ -207,7 +210,7 @@ public class AutoSettleScanJob {
                     // it is safe to move the cursor without opening a new transaction.
                     for (Errand e : due) advance(e);
                 }
-                if (stop || due.size() < BATCH_LIMIT) break;
+                if (stop || due.size() < batchLimit) break;
             }
             if (fetched > 0) {
                 log.info("自动结算兜底扫描处理 批次={} 捞取={} 尝试={} 失败={}",

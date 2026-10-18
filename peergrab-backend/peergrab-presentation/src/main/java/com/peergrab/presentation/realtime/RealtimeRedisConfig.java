@@ -44,7 +44,7 @@ public class RealtimeRedisConfig {
             this.container = container;
         }
 
-        @Scheduled(initialDelay = 1000, fixedDelay = 10000)
+        @Scheduled(initialDelay = 1000, fixedDelay = 10000, scheduler = "realtimeTaskScheduler")
         public void reconnect() {
             if (container.isRunning()) return;
             try {

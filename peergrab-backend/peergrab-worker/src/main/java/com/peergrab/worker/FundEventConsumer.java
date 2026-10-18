@@ -1,6 +1,8 @@
 package com.peergrab.worker;
 
 import com.peergrab.domain.notify.ports.NotificationRepository;
+import com.peergrab.domain.notify.ports.RealtimeNotifier;
+import com.peergrab.shared.FundEventTexts;
 import com.peergrab.shared.SnowflakeIdGenerator;
 import com.peergrab.shared.MessagePayloadCodec;
 import jakarta.annotation.PreDestroy;
@@ -37,6 +39,7 @@ public class FundEventConsumer {
     private final ClientServiceProvider provider;
     private final ClientConfiguration configuration;
     private final NotificationRepository notificationRepository;
+    private final RealtimeNotifier notifier;
     private final SnowflakeIdGenerator idGenerator;
     private final String topic;
     private final String group;
@@ -46,12 +49,14 @@ public class FundEventConsumer {
     public FundEventConsumer(ClientServiceProvider provider,
                              ClientConfiguration configuration,
                              NotificationRepository notificationRepository,
+                             RealtimeNotifier notifier,
                              SnowflakeIdGenerator idGenerator,
                              @Value("${peergrab.mq.topic.fund-event:errand-fund-event-v2}") String topic,
                              @Value("${peergrab.mq.group.fund-event:peergrab-fund-event-consumer}") String group) {
         this.provider = provider;
         this.configuration = configuration;
         this.notificationRepository = notificationRepository;
+        this.notifier = notifier;
         this.idGenerator = idGenerator;
         this.topic = topic;
         this.group = group;
@@ -93,23 +98,25 @@ public class FundEventConsumer {
                         long publisherId = event.publisherId();
                         long runnerId = event.runnerId();
                         long amount = event.amountCents();
+                        long commission = event.commissionCents();
 
                         // 发单人视角与跑腿视角的文案不同——同一事件对双方语义不一样，
                         // 不能共用一句话（P4 浏览器验证时发现"你获得"出现在发单人侧）
-                        String pubContent = switch (tag) {
-                            case "SETTLED" -> String.format("任务已完成结算，跑腿获得 %d 分", amount);
-                            case "REFUNDED" -> String.format("任务已退款，%d 分已退回你的账户", amount);
-                            case "ARBITRATED" -> String.format("争议已裁决，涉及金额 %d 分", amount);
-                            default -> "任务 " + errandId + " 资金状态变动";
-                        };
-                        notificationRepository.insertIfAbsent(idGenerator.nextId(),
+                        String pubContent = FundEventTexts.publisherContent(tag, amount, commission);
+                        boolean publisherFresh = notificationRepository.insertIfAbsent(idGenerator.nextId(),
                                 msgKey + ":pub", publisherId, errandId, tag, pubContent);
+                        if (publisherFresh) {
+                            notifier.notificationArrived(publisherId, errandId, tag, pubContent);
+                        }
 
                         // 结算类事件同时通知跑腿
                         if (runnerId > 0 && ("SETTLED".equals(tag) || "ARBITRATED".equals(tag))) {
-                            String runnerContent = String.format("任务结算完成，你获得 %d 分", amount);
-                            notificationRepository.insertIfAbsent(idGenerator.nextId(),
+                            String runnerContent = FundEventTexts.runnerContent(tag, amount);
+                            boolean runnerFresh = notificationRepository.insertIfAbsent(idGenerator.nextId(),
                                     msgKey + ":runner", runnerId, errandId, tag, runnerContent);
+                            if (runnerFresh) {
+                                notifier.notificationArrived(runnerId, errandId, tag, runnerContent);
+                            }
                         }
                         log.info("资金事件已消费 msgKey={} tag={} errandId={}", msgKey, tag, errandId);
                         return ConsumeResult.SUCCESS;

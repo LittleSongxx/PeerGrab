@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, yuan } from '../api';
+import type { UserRole } from '../api';
 import { subscribeWs } from '../ws';
 import { IDENTITIES } from '../identity';
 import UiIcon, { type UiIconName } from './UiIcon';
@@ -8,6 +9,7 @@ interface Props {
   route: string;
   userId: number;
   onLogout: () => void;
+  role: UserRole | null;
 }
 
 const navigation: { href: string; label: string; icon: UiIconName; group: 'task' | 'account' }[] = [
@@ -19,10 +21,13 @@ const navigation: { href: string; label: string; icon: UiIconName; group: 'task'
   { href: '/notifications', label: '消息通知', icon: 'bell', group: 'account' },
 ];
 
-export default function TopBar({ route, userId, onLogout }: Props) {
+export default function TopBar({ route, userId, onLogout, role }: Props) {
   const [unread, setUnread] = useState(0);
   const [balance, setBalance] = useState<number | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  // 仲裁员不参与发布/抢单：隐藏发布入口，按钮集合仍由后端 availableActions 决定
+  const isArbitrator = role === 'ARBITRATOR';
+  const navItems = isArbitrator ? navigation.filter((item) => item.href !== '/publish') : navigation;
 
   useEffect(() => {
     api.unread().then((result) => setUnread(result.count)).catch(() => {});
@@ -63,9 +68,10 @@ export default function TopBar({ route, userId, onLogout }: Props) {
   const activeHref = route.startsWith('/detail/') || route === '/' ? '/square' : route;
   const activeSection = route.startsWith('/detail/')
     ? '任务详情'
-    : navigation.find((item) => item.href === activeHref)?.label ?? '任务广场';
+    : (navItems.find((item) => item.href === activeHref)
+        ?? navigation.find((item) => item.href === activeHref))?.label ?? '任务广场';
 
-  const renderNav = (group: 'task' | 'account') => navigation.filter((item) => item.group === group).map((item) => {
+  const renderNav = (group: 'task' | 'account') => navItems.filter((item) => item.group === group).map((item) => {
     const active = item.href === activeHref;
     return (
       <a key={item.href} className={`nav-item${active ? ' active' : ''}`} href={`#${item.href}`}
@@ -96,10 +102,19 @@ export default function TopBar({ route, userId, onLogout }: Props) {
 
         <div className="sidebar-bottom">
           <div className="sidebar-guide">
-            <span className="guide-icon"><UiIcon name="sparkles" size={18} /></span>
-            <strong>从一件小事开始</strong>
-            <p>发出需求，校园里的伙伴会及时响应。</p>
-            <a href="#/publish" onClick={() => setMenuOpen(false)}>发布一个任务 <UiIcon name="arrowRight" size={14} /></a>
+            <span className="guide-icon"><UiIcon name={isArbitrator ? 'shield' : 'sparkles'} size={18} /></span>
+            {isArbitrator ? (
+              <>
+                <strong>仲裁工作台</strong>
+                <p>在争议任务里核对事实，决定托管资金的去向。</p>
+              </>
+            ) : (
+              <>
+                <strong>从一件小事开始</strong>
+                <p>发出需求，校园里的伙伴会及时响应。</p>
+                <a href="#/publish" onClick={() => setMenuOpen(false)}>发布一个任务 <UiIcon name="arrowRight" size={14} /></a>
+              </>
+            )}
           </div>
           <div className="sidebar-profile">
             <span className="profile-avatar">{current?.initials ?? '我'}</span>

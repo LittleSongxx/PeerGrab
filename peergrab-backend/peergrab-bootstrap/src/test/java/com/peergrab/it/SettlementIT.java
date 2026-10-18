@@ -45,7 +45,7 @@ class SettlementIT {
 
     @BeforeAll
     static void requireMiddleware() {
-        Assumptions.assumeTrue(MiddlewareAvailable.check(), "中间件未启动，跳过");
+        MiddlewareAvailable.require();
     }
 
     @BeforeEach
@@ -158,7 +158,8 @@ class SettlementIT {
         pickUpUseCase.pickUp(errandId, 2001L);
         deliverUseCase.deliver(errandId, 2001L);
 
-        assertEquals(SettleErrandUseCase.Result.CONFLICT,
+        // 截止时间未到的自动结算早到消息返回 NOT_DUE：消费者 ACK、扫描兜底，不记为并发冲突。
+        assertEquals(SettleErrandUseCase.Result.NOT_DUE,
                 settleUseCase.settle(errandId, Errand.SYSTEM_OPERATOR));
         Integer held = jdbc.queryForObject("SELECT COUNT(*) FROM escrow_order WHERE errand_id = ? AND status = 'HELD'",
                 Integer.class, errandId);

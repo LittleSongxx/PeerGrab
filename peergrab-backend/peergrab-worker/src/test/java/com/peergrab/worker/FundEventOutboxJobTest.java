@@ -55,6 +55,26 @@ class FundEventOutboxJobTest {
     }
 
     @Test
+    void budget_exhaustion_releases_unprocessed_claims() throws Exception {
+        var first = new JdbcFundEventOutboxRepository.ClaimedEvent(
+                new JdbcFundEventOutboxRepository.PendingEvent(
+                        "settle:1", "SETTLED", 1, 1001, 2001, 950, 50, 0), "claim-1");
+        var second = new JdbcFundEventOutboxRepository.ClaimedEvent(
+                new JdbcFundEventOutboxRepository.PendingEvent(
+                        "settle:2", "SETTLED", 2, 1001, 2001, 950, 50, 0), "claim-2");
+        when(outbox.claimPending(100)).thenReturn(List.of(first, second));
+        java.util.concurrent.atomic.AtomicInteger clockReads = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.function.LongSupplier clock = () ->
+                clockReads.getAndIncrement() == 0 ? 0L : 20_000_000L;
+
+        new FundEventOutboxJob(outbox, provider, producer, "errand-fund-event", 10, clock).dispatch();
+
+        verify(producer, never()).send(any(Message.class));
+        verify(outbox).releaseClaim("settle:1", "claim-1");
+        verify(outbox).releaseClaim("settle:2", "claim-2");
+    }
+
+    @Test
     void brokerFailureKeepsEventRetryable() throws Exception {
         when(producer.send(message)).thenThrow(new IllegalStateException("broker unavailable"));
 

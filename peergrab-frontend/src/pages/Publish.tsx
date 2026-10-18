@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
-import { api, BizError, getUserId, yuan } from '../api';
+import { api, BizError, getRole, getUserId, yuan } from '../api';
 
 const PENDING_PUBLISH_KEY = 'peergrab_pending_publish';
 
@@ -30,13 +30,15 @@ export default function Publish() {
   const [type, setType] = useState('DELIVERY');
   const [result, setResult] = useState<{ kind: 'success' | 'error'; text: string; id?: string } | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  // 仲裁员身份不参与交易；后端也会返回 ROLE_NOT_ALLOWED，这里提前禁用入口
+  const isArbitrator = getRole() === 'ARBITRATOR';
 
   const parsedReward = Number(reward);
   const rewardCents = Number.isFinite(parsedReward) && parsedReward > 0 ? Math.round(parsedReward * 100) : 0;
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (submitting) return;
+    if (submitting || isArbitrator) return;
     setSubmitting(true);
     setResult(null);
     try {
@@ -70,6 +72,11 @@ export default function Publish() {
 
       <div className="publish-layout">
         <form className="section-card publish-form" onSubmit={(event) => void submit(event)}>
+          {isArbitrator && (
+            <div className="banner warn" role="alert">
+              当前为仲裁员身份，仲裁员不参与发布任务。如需发布，请切换为普通用户身份。
+            </div>
+          )}
           <div className="section-heading">
             <div>
               <span className="section-kicker">任务信息</span>
@@ -120,7 +127,7 @@ export default function Publish() {
 
           <div className="publish-form-footer">
             <p>点击发布即确认将悬赏金额用于任务托管。</p>
-            <button className="btn btn-primary publish-submit" type="submit" disabled={submitting}>
+            <button className="btn btn-primary publish-submit" type="submit" disabled={submitting || isArbitrator}>
               {submitting ? '发布中…' : '发布并托管'} <span aria-hidden="true">↗</span>
             </button>
           </div>

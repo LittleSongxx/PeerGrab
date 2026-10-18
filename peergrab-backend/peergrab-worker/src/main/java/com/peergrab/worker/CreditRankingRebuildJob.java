@@ -19,6 +19,9 @@ public class CreditRankingRebuildJob {
 
     private final JdbcTemplate jdbc;
     private final CreditRankingPort ranking;
+    /** 校区列表变化很慢；每分钟全表 DISTINCT 在大表上不划算，缓存 5 分钟。 */
+    private volatile List<Long> cachedCampuses = List.of();
+    private volatile long cachedAtMillis;
 
     public CreditRankingRebuildJob(JdbcTemplate jdbc, CreditRankingPort ranking) {
         this.jdbc = jdbc;
@@ -30,12 +33,21 @@ public class CreditRankingRebuildJob {
         rebuild();
     }
 
+    private List<Long> campuses() {
+        long now = System.currentTimeMillis();
+        if (now - cachedAtMillis > 300_000L) {
+            List<Long> loaded = jdbc.queryForList("SELECT DISTINCT campus_id FROM errand", Long.class);
+            cachedCampuses = List.copyOf(loaded);
+            cachedAtMillis = now;
+        }
+        return cachedCampuses;
+    }
+
     @Scheduled(fixedDelayString = "${peergrab.credit.ranking-rebuild-interval-ms:60000}", scheduler = "maintenanceTaskScheduler")
     public void rebuild() {
         try {
             // 包含当前没有结算事件的校区，才能把历史残留榜单清空。
-            List<Long> campuses = jdbc.queryForList(
-                    "SELECT DISTINCT campus_id FROM errand", Long.class);
+            List<Long> campuses = campuses();
             for (Long campusId : campuses) {
                 try {
                     List<CreditRankingPort.Entry> entries = jdbc.query("""

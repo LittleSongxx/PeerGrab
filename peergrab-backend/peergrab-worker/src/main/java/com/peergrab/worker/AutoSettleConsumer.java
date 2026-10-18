@@ -80,6 +80,11 @@ public class AutoSettleConsumer {
                     }
                     try {
                         var result = settleUseCase.settle(errandId, Errand.SYSTEM_OPERATOR);
+                        if (result == SettleErrandUseCase.Result.NOT_DUE) {
+                            // 消息早于数据库截止时间：不重试（避免重试风暴），到期扫描会在截止后处理。
+                            log.info("自动结算消息早到，交由到期扫描处理 errandId={}", errandId);
+                            return ConsumeResult.SUCCESS;
+                        }
                         log.info("自动结算消息处理 errandId={} result={}", errandId, result);
                         // ALREADY_SETTLED / CONFLICT 也是幂等生效的正常结果，都要 ACK
                         return ConsumeResult.SUCCESS;

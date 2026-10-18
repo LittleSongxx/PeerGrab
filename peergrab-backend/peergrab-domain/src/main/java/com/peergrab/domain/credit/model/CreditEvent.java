@@ -14,10 +14,6 @@ public record CreditEvent(long id, String bizNo, long userId, CreditEventType ty
         return "revert:" + errandId + ":" + round;
     }
 
-    public static String cancelAfterGrabBizNo(long errandId) {
-        return "cancelgrab:" + errandId;
-    }
-
     public static String disputeLoseBizNo(long errandId, long loserId) {
         return "disputelose:" + errandId + ":" + loserId;
     }

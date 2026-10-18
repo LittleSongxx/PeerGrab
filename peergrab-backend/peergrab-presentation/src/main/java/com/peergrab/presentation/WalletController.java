@@ -44,6 +44,6 @@ public class WalletController {
                 "id", String.valueOf(v.id()), "time", v.time().toString(),
                 "direction", v.direction(), "amountCents", v.amountCents(),
                 "refType", v.refType(), "refId", String.valueOf(v.refId()),
-                "bizNo", v.bizNo());
+                "bizNo", v.bizNo(), "accountType", v.accountType());
     }
 }

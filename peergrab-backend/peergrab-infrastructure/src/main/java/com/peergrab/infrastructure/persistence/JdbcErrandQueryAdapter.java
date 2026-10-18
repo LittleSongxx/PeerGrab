@@ -23,7 +23,8 @@ public class JdbcErrandQueryAdapter implements ErrandQueryPort {
             com.peergrab.domain.errand.model.ErrandStatus.valueOf(rs.getString("status")),
             rs.getInt("slot_taken"), rs.getInt("round"), rs.getLong("version"),
             rs.getTimestamp("locked_at") == null ? null : rs.getTimestamp("locked_at").toInstant(),
-            rs.getTimestamp("delivered_at") == null ? null : rs.getTimestamp("delivered_at").toInstant());
+            rs.getTimestamp("delivered_at") == null ? null : rs.getTimestamp("delivered_at").toInstant(),
+            null, null, rs.getInt("transfer_count"));
 
     private final JdbcTemplate jdbc;
 
@@ -78,11 +79,11 @@ public class JdbcErrandQueryAdapter implements ErrandQueryPort {
 
     @Override
     public List<Errand> listByRunner(long runnerId, int page, int size) {
-        // 抢中过的任务：grab_record 里每一轮都有记录，用 DISTINCT 去重
+        // 抢中过的任务：EXISTS 走 idx_runner_errand(runner_id, errand_id)，避免 DISTINCT 派生表。
         return jdbc.query("""
                 SELECT e.* FROM errand e
-                  JOIN (SELECT DISTINCT errand_id FROM grab_record WHERE runner_id = ?) g
-                    ON g.errand_id = e.id
+                 WHERE EXISTS (SELECT 1 FROM grab_record g
+                                WHERE g.runner_id = ? AND g.errand_id = e.id)
                  ORDER BY e.created_at DESC
                  LIMIT ? OFFSET ?
                 """, MAPPER, runnerId, size, page * size);
@@ -101,9 +102,26 @@ public class JdbcErrandQueryAdapter implements ErrandQueryPort {
                         rs.getInt("round"), rs.getLong("operator_id")), campusId, errandId);
     }
 
+    /**
+     * 随机抽样：ORDER BY RAND() 会对全表排序；改为"在 min/max 之间随机起点 + 主键范围扫描"，
+     * 总量大时仍能保持近似均匀且成本可控（雪花 ID 有空洞不影响抽样目的）。
+     */
     @Override
     public List<Long> sampleIds(int limit) {
-        return jdbc.queryForList("SELECT id FROM errand ORDER BY RAND() LIMIT ?", Long.class, limit);
+        Long min = jdbc.queryForObject("SELECT MIN(id) FROM errand", Long.class);
+        Long max = jdbc.queryForObject("SELECT MAX(id) FROM errand", Long.class);
+        if (min == null || max == null) return List.of();
+        long span = max - min;
+        long start = span <= 0 ? min
+                : min + java.util.concurrent.ThreadLocalRandom.current().nextLong(span + 1);
+        List<Long> ids = new java.util.ArrayList<>(jdbc.queryForList(
+                "SELECT id FROM errand WHERE id >= ? ORDER BY id LIMIT ?", Long.class, start, limit));
+        if (ids.size() < limit) {
+            ids.addAll(jdbc.queryForList(
+                    "SELECT id FROM errand WHERE id < ? ORDER BY id LIMIT ?", Long.class,
+                    start, limit - ids.size()));
+        }
+        return ids;
     }
 
     @Override

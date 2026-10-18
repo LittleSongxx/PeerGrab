@@ -21,12 +21,8 @@ public record GrabRecord(long id, long campusId, long errandId, long runnerId, i
                 GrabResultType.GRABBED, requestId, Instant.now());
     }
 
-    public static GrabRecord candidate(long id, long campusId, long errandId, long runnerId, int round) {
-        return new GrabRecord(id, campusId, errandId, runnerId, 0, round,
-                GrabResultType.CANDIDATE, null, Instant.now());
-    }
-
+    /** 当前只记录成功抢中；候选队列在 Redis 中维护，失败尝试不落库。 */
     public enum GrabResultType {
-        GRABBED, CANDIDATE, EXPIRED
+        GRABBED
     }
 }

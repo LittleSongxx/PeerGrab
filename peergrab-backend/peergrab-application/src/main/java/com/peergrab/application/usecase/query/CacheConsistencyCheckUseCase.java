@@ -20,7 +20,8 @@ import java.util.List;
  * 缓存一致性校验 job（架构文档 9.6 的落地）。
  *
  * 每 5 分钟随机抽样 N 个任务，比对 MySQL 与 Redis 缓存的关键字段，
- * 不一致的落 sync_diff 表并主动删缓存修正。
+ * 不一致的落 sync_diff 表并主动删缓存修正；抽样中"DB 存在但布隆缺失"的任务
+ * 直接补登记——这是布隆判否短路的安全网（登记失败在发布后只留了 warn 日志）。
  *
  * ── 定位 ──
  * 这是兜底机制，不是主一致性手段。主链路是 afterCommit 删除 + 延迟双删 + TTL；
@@ -72,7 +73,29 @@ public class CacheConsistencyCheckUseCase {
                 log.warn("Redis 故障，本轮跳过缓存一致性校验 errandId={}", id);
                 break;
             }
-            if (cached.isEmpty() || cached.get().isEmpty()) {
+            // DB 存在但布隆缺失（发布后登记失败等）：补登记并落哨兵记录。
+            // mightExist 在未启用/降级/索引未就绪时恒真，不会误报。
+            if (!cache.mightExist(id)) {
+                boolean fixed = false;
+                try {
+                    fixed = cache.registerExisting(id);
+                } catch (RuntimeException e) {
+                    log.warn("布隆补登记失败 errandId={}", id, e);
+                }
+                syncDiffRepository.record(now, id, "bloom", "PRESENT", "MISSING", fixed);
+                diffs++;
+            }
+            if (cached.isEmpty()) {
+                continue;
+            }
+            if (cached.get().isEmpty()) {
+                // 负值缓存同样要核实：DB 里存在说明缓存把真实任务判成了"不存在"，
+                // 只等 60s TTL 会让用户在这段时间内看到 404。
+                if (errandRepository.findById(id).isPresent()) {
+                    boolean fixed = tryEvict(id);
+                    syncDiffRepository.record(now, id, "existence", "PRESENT", "ABSENT", fixed);
+                    diffs++;
+                }
                 continue;
             }
             Errand db = errandRepository.findById(id).orElse(null);

@@ -40,6 +40,8 @@ public enum ErrorCode {
     // 状态与权限
     NOT_PUBLISHER("你不是该任务的发单人"),
     NOT_ARBITRABLE("任务当前不可仲裁"),
+    ROLE_NOT_ALLOWED("当前身份不能参与交易"),
+    TOO_MANY_ATTEMPTS("尝试次数过多，请稍后再试"),
 
     // 通用
     UNAUTHORIZED("未登录或会话已过期"),

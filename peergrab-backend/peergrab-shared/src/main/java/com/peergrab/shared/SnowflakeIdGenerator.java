@@ -1,5 +1,7 @@
 package com.peergrab.shared;
 
+import java.util.function.LongSupplier;
+
 /**
  * 雪花 ID：趋势递增且全局唯一。
  * 不用自增 ID 是因为分库分表后会冲突；不用 UUID 是因为无序会导致 InnoDB 页分裂、写入变慢。
@@ -15,6 +17,9 @@ public class SnowflakeIdGenerator {
     private static final long WORKER_ID_SHIFT = SEQUENCE_BITS;
     private static final long TIMESTAMP_SHIFT = SEQUENCE_BITS + WORKER_ID_BITS;
 
+    /** 允许的时钟回拨窗口：NTP 小幅回拨时等待越过，超过则拒绝发号。 */
+    private final long maxBackwardMillis;
+    private final LongSupplier clock;
     private final long workerId;
     private long sequence = 0L;
     private long lastTimestamp = -1L;
@@ -23,10 +28,17 @@ public class SnowflakeIdGenerator {
     private long timestampCeilingMillis = Long.MAX_VALUE;
 
     public SnowflakeIdGenerator(long workerId) {
+        this(workerId, 100L, System::currentTimeMillis);
+    }
+
+    /** 测试可注入时钟；maxBackwardMillis 内的小幅回拨会等待时间追上而不是直接失败。 */
+    public SnowflakeIdGenerator(long workerId, long maxBackwardMillis, LongSupplier clock) {
         if (workerId < 0 || workerId > MAX_WORKER_ID) {
             throw new IllegalArgumentException("workerId 必须在 0.." + MAX_WORKER_ID + " 之间");
         }
         this.workerId = workerId;
+        this.maxBackwardMillis = Math.max(0, maxBackwardMillis);
+        this.clock = clock;
     }
 
     /** synchronized 足够：单机 ID 生成不是瓶颈，4096/ms 的容量远超单机写入能力 */
@@ -36,14 +48,18 @@ public class SnowflakeIdGenerator {
             revoked = true;
             throw new IllegalStateException("雪花节点租约已失效，拒绝生成 ID");
         }
-        long timestamp = System.currentTimeMillis();
+        long timestamp = clock.getAsLong();
         if (timestamp >= timestampCeilingMillis) {
             revoked = true;
             throw new IllegalStateException("雪花节点时间已达到持久租约上界，拒绝生成 ID");
         }
         if (timestamp < lastTimestamp) {
-            // 时钟回拨：一期直接抛异常暴露问题，而不是静默等待
-            throw new IllegalStateException("时钟回拨，拒绝生成 ID，差值(ms)=" + (lastTimestamp - timestamp));
+            long drift = lastTimestamp - timestamp;
+            if (drift > maxBackwardMillis) {
+                throw new IllegalStateException("时钟回拨超过容忍窗口，拒绝生成 ID，差值(ms)=" + drift);
+            }
+            // 小幅回拨：等待到上一毫秒之后，避免同一毫秒序列号回绕导致重复 ID。
+            timestamp = waitNextMillis(lastTimestamp);
         }
         if (timestamp == lastTimestamp) {
             sequence = (sequence + 1) & SEQUENCE_MASK;
@@ -78,18 +94,18 @@ public class SnowflakeIdGenerator {
         return !revoked
                 && (leaseDeadlineNanos == Long.MAX_VALUE
                     || System.nanoTime() - leaseDeadlineNanos < 0)
-                && System.currentTimeMillis() < timestampCeilingMillis
-                && System.currentTimeMillis() >= lastTimestamp;
+                && clock.getAsLong() < timestampCeilingMillis
+                && clock.getAsLong() >= lastTimestamp;
     }
 
     private long waitNextMillis(long lastTimestamp) {
-        long timestamp = System.currentTimeMillis();
+        long timestamp = clock.getAsLong();
         while (timestamp <= lastTimestamp) {
             if (leaseDeadlineNanos != Long.MAX_VALUE && System.nanoTime() - leaseDeadlineNanos >= 0) {
                 revoked = true;
                 throw new IllegalStateException("雪花节点租约已失效，拒绝生成 ID");
             }
-            timestamp = System.currentTimeMillis();
+            timestamp = clock.getAsLong();
         }
         return timestamp;
     }

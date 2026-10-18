@@ -23,6 +23,10 @@ public interface WalletQueryPort {
 
     record BalanceView(long availableCents, long frozenCents) {}
 
+    /**
+     * @param accountType 该笔流水所在账户的类型（USER/ESCROW/COMMISSION）；
+     *                    托管/佣金账户的流水也归到当事人名下，前端需要区分展示。
+     */
     record LedgerView(long id, Instant time, String direction, long amountCents,
-                      String refType, long refId, String bizNo) {}
+                      String refType, long refId, String bizNo, String accountType) {}
 }

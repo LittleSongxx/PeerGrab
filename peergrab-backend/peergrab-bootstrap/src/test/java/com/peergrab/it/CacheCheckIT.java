@@ -40,7 +40,7 @@ class CacheCheckIT {
 
     @BeforeAll
     static void requireMiddleware() {
-        Assumptions.assumeTrue(MiddlewareAvailable.check(), "中间件未启动，跳过");
+        MiddlewareAvailable.require();
     }
 
     @BeforeEach

@@ -41,7 +41,7 @@ class OversellControlExperimentIT {
 
     @BeforeAll
     static void requireMiddleware() {
-        Assumptions.assumeTrue(MiddlewareAvailable.check(), "中间件未启动，跳过");
+        MiddlewareAvailable.require();
         run = BenchRun.start("IT-OVERSELL");
     }
 

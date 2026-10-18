@@ -3,6 +3,7 @@ package com.peergrab.application.usecase;
 import com.peergrab.domain.credit.model.CreditEventType;
 import com.peergrab.domain.credit.ports.CreditRepository;
 import com.peergrab.domain.notify.ports.RealtimeNotifier;
+import com.peergrab.domain.errand.model.ArbitrationFavor;
 import com.peergrab.domain.errand.model.Errand;
 import com.peergrab.domain.errand.model.ErrandStatus;
 import com.peergrab.domain.errand.ports.ErrandRepository;
@@ -58,17 +59,19 @@ public class ArbitrateErrandUseCase {
         this.arbitratorId = arbitratorId;
     }
 
-    /** 仲裁裁决方向 */
-    public enum Favor { RUNNER, PUBLISHER }
-
     public enum Result { SETTLED_TO_RUNNER, REFUNDED_TO_PUBLISHER, ALREADY_DONE, CONFLICT }
 
-    public Result arbitrate(long errandId, Favor favor, long operatorId) {
+    public Result arbitrate(long errandId, ArbitrationFavor favor, long operatorId) {
         if (operatorId != arbitratorId) {
             throw new BizException(ErrorCode.UNAUTHORIZED, "仲裁员身份不匹配 actor=" + operatorId);
         }
         Errand errand = errandRepository.findById(errandId)
                 .orElseThrow(() -> new BizException(ErrorCode.ERRAND_NOT_FOUND, "id=" + errandId));
+        // 纵深防御：即使交易入口已拦截，也不允许仲裁员裁决与自己相关的争议。
+        if (errand.publisherId() == operatorId
+                || (errand.grabberId() != null && errand.grabberId() == operatorId)) {
+            throw new BizException(ErrorCode.ROLE_NOT_ALLOWED, "仲裁员不能裁决自己是当事人的争议");
+        }
         if (errand.status() != ErrandStatus.DISPUTED) {
             // 已经裁决过了（SETTLED/REFUNDED 都是终态）
             if (errand.status() == ErrandStatus.SETTLED || errand.status() == ErrandStatus.REFUNDED) {
@@ -77,7 +80,7 @@ public class ArbitrateErrandUseCase {
             throw new BizException(ErrorCode.NOT_ARBITRABLE, "status=" + errand.status());
         }
 
-        if (favor == Favor.PUBLISHER) {
+        if (favor == ArbitrationFavor.PUBLISHER) {
             var r = refundUseCase.arbitrateRefund(errandId, operatorId);
             if (r == RefundErrandUseCase.Result.REFUNDED) {
                 if (errand.grabberId() != null) {

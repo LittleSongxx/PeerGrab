@@ -26,6 +26,16 @@ public class WorkerSchedulers {
         return scheduler("peergrab-mq-connect-", 2);
     }
 
+    /**
+     * Broker 故障时同步 send 可能长时间阻塞；MQ 发送任务必须与超时/结算扫描分池，
+     * 否则"主通道故障"会连带拖垮兜底扫描。
+     */
+    @Bean("mqSendScheduler")
+    public ThreadPoolTaskScheduler mqSendScheduler(
+            @Value("${peergrab.scheduler.mq-send-pool-size:2}") int poolSize) {
+        return scheduler("peergrab-mq-send-", poolSize);
+    }
+
     private ThreadPoolTaskScheduler scheduler(String prefix, int poolSize) {
         ThreadPoolTaskScheduler scheduler = new ThreadPoolTaskScheduler();
         scheduler.setPoolSize(Math.max(1, poolSize));

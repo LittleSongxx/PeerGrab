@@ -19,7 +19,15 @@ peergrab-backend/
 
 发布时资金进入托管；一个任务目前只有一个名额。并发抢单以 Redis Lua 降低冲突、MySQL CAS 和唯一索引作最终裁决。确认、取货、送达后结算；取消走退款，争议由仲裁员处理。`availableActions` 从服务端按身份和状态计算，前端依此显示按钮。雪花 ID 在 JSON 中序列化为字符串，防止 JavaScript 精度损失。
 
-Worker 消费 RocketMQ 延迟及资金事件，并通过数据库扫描、本地消息表和资金事件 outbox 补偿；MQ 不可用时资金本地事务仍可提交。结算、退款和仲裁依赖同库事务、业务号唯一约束与资金对账。当前运行环境是**单 MySQL 数据源、单 ECS 部署**；ShardingSphere 规则和算法测试已隔离在 `peergrab-sharding-lab`，不进入线上分片链路。完整取舍见[架构设计](docs/架构设计与技术选型.md)及[生产部署及迁移](docker/ECS_DEPLOY.md)。
+Worker 消费 RocketMQ 延迟及资金事件，并通过数据库扫描、本地消息表和资金事件 outbox 补偿；MQ 不可用时资金本地事务仍可提交。结算、退款和仲裁依赖同库事务、业务号唯一约束与资金对账。当前运行环境是**单 MySQL 数据源、单 ECS 部署**；ShardingSphere 规则和算法测试已隔离在 `peergrab-sharding-lab`，不进入线上分片链路。完整取舍见[架构设计](../docs/architecture/架构设计与技术选型.md)及[生产部署及迁移](docker/ECS_DEPLOY.md)。
+
+## 身份与角色
+
+没有用户表：身份来自 token，仲裁员由配置 `peergrab.auth.arbitrator-id`（默认 `9001`）指定。`ActorRolePolicy` 禁止仲裁员发布任务或抢单，仲裁用例还会再校验一次"仲裁员不得是当事人"。仲裁方向由 `ArbitrationFavor.fromWire` 严格解析 `RUNNER`/`PUBLISHER`，空值、拼写错误一律返回 `INVALID_ARGUMENT`，不会默认判给任一方。登录响应带 `role`（`ARBITRATOR`/`USER`）；登录失败由 `LoginAttemptGuard` 在进程内按 IP+userId 限速（默认 5 次/60 秒窗口、锁 300 秒），多 API 实例时降级为每实例限速。演示口令与 `9001` 仲裁员仅供本机与公开演示，生产须关闭 demo 并接真实身份。
+
+## 可观测性
+
+API 与 Worker 都暴露 `/actuator/prometheus`，含 JVM、HTTP、Hikari、业务结果计数，以及资金 outbox、延迟消息、对账差异和缓存失效失败指标。仓库另提供叠加文件 [`docker/docker-compose.observability.yaml`](docker/docker-compose.observability.yaml)：与基础栈一起启动并加 `--profile observability`，即得到 Prometheus（`127.0.0.1:29090`）与 Grafana（`127.0.0.1:23000`），11 条告警规则覆盖进程存活、outbox 积压与老化、延迟消息 dead、对账差异、双删失败、API 非 OK 比例与 `INTERNAL_ERROR`。使用方法与指标口径见 [observability/README.md](docker/observability/README.md)；边界是暂无 tracing、日志聚合与 Alertmanager。
 
 ## 启动全栈演示
 

@@ -68,6 +68,15 @@ public class JdbcFundEventOutboxRepository {
                 """, bizNo, claimToken) == 1;
     }
 
+    /** 预算耗尽时释放未处理事件的领取租约，避免空占 120 秒。 */
+    public void releaseClaim(String bizNo, String claimToken) {
+        jdbc.update("""
+                UPDATE fund_event_outbox
+                   SET claim_token = NULL, claim_until = NULL
+                 WHERE biz_no = ? AND status = 'PENDING' AND claim_token = ?
+                """, bizNo, claimToken);
+    }
+
     public boolean markClaimedRetry(String bizNo, String claimToken) {
         return jdbc.update("""
                 UPDATE fund_event_outbox

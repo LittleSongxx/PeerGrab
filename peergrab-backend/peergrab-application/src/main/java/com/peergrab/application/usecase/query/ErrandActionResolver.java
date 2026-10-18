@@ -45,8 +45,8 @@ public class ErrandActionResolver {
         boolean isCurrentRunner = grabberId != null && grabberId == viewerId;
         boolean isArbitrator = viewerId == arbitratorId;
 
-        // 抢单：任何非发单人的跑腿都可以（发单人不能抢自己的任务）
-        if (status.grabbable() && !isPublisher) {
+        // 抢单：任何非发单人、非仲裁员的跑腿都可以（仲裁员不参与交易，避免自裁）
+        if (status.grabbable() && !isPublisher && !isArbitrator) {
             actions.add("GRAB");
         }
         // 确认接单：只有当前抢中者

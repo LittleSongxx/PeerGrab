@@ -6,6 +6,11 @@ const REF_TYPE_TEXT: Record<string, string> = {
   RECHARGE: '充值', WITHDRAW: '提现',
 };
 
+/** 流水所属账户：个人钱包 / 平台托管户 / 平台佣金户 */
+const ACCOUNT_TYPE_TEXT: Record<string, string> = {
+  USER: '用户钱包', ESCROW: '平台托管户', COMMISSION: '平台佣金户',
+};
+
 export default function Wallet() {
   const [balance, setBalance] = useState<{ availableCents: number; frozenCents: number } | null>(null);
   const [ledger, setLedger] = useState<Awaited<ReturnType<typeof api.ledger>>>([]);
@@ -120,18 +125,24 @@ export default function Wallet() {
           <div className="table-scroll">
             <table className="ledger-table">
               <thead>
-                <tr><th scope="col">时间</th><th scope="col">方向</th><th scope="col">金额</th><th scope="col">类型</th><th scope="col">关联任务</th></tr>
+                <tr><th scope="col">时间</th><th scope="col">方向</th><th scope="col">金额</th><th scope="col">账户</th><th scope="col">类型</th><th scope="col">关联任务</th></tr>
               </thead>
               <tbody>
                 {ledger.map((entry) => {
                   const incoming = entry.direction === 'CREDIT';
                   const hasErrand = ['ESCROW', 'SETTLE', 'REFUND'].includes(entry.refType);
+                  const accountType = entry.accountType;
                   return (
                     <tr key={entry.id}>
                       <td className="wallet-ledger-time">{new Date(entry.time).toLocaleString('zh-CN')}</td>
                       <td><span className={incoming ? 'wallet-direction is-credit' : 'wallet-direction is-debit'}>{incoming ? '入账' : '转出'}</span></td>
                       <td className={incoming ? 'wallet-amount credit' : 'wallet-amount debit'}>
                         {incoming ? '+' : '-'}{yuan(entry.amountCents)}
+                      </td>
+                      <td>
+                        <span className={`wallet-account${accountType ? ` is-${accountType.toLowerCase()}` : ''}`}>
+                          {ACCOUNT_TYPE_TEXT[accountType] ?? accountType ?? '—'}
+                        </span>
                       </td>
                       <td>{REF_TYPE_TEXT[entry.refType] ?? entry.refType}</td>
                       <td>{hasErrand ? <a href={`#/detail/${entry.refId}`}>#{String(entry.refId).slice(-8)}</a> : <span className="muted">—</span>}</td>
@@ -141,6 +152,11 @@ export default function Wallet() {
               </tbody>
             </table>
           </div>
+        )}
+        {!loading && ledger.length > 0 && (
+          <p className="wallet-ledger-note">
+            平台账户（平台托管户、平台佣金户）的资金动作只用于展示资金轨迹，不代表个人余额变动。
+          </p>
         )}
         {(nextCursor || moreError) && !loading && (
           <div className="mine-load-more">

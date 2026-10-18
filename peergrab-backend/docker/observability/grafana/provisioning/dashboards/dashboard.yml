@@ -1,0 +1,18 @@
+# Grafana dashboard 自动加载：容器内 /var/lib/grafana/dashboards 挂载到
+# docker/observability/grafana/dashboards（见 docker-compose.observability.yaml）。
+apiVersion: 1
+
+providers:
+  - name: peergrab
+    orgId: 1
+    # 放进独立文件夹，避免和手工建的 dashboard 混在一起。
+    folder: PeerGrab
+    folderUid: peergrab
+    type: file
+    disableDeletion: false
+    # 以文件为准：UI 里的修改不会落盘，改面板请直接改 peergrab.json，最多 30s 后自动重载。
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

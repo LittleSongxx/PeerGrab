@@ -4,6 +4,7 @@ import com.peergrab.application.usecase.*;
 import com.peergrab.application.usecase.query.ErrandActionResolver;
 import com.peergrab.application.usecase.query.GetErrandDetailUseCase;
 import com.peergrab.application.usecase.query.QueryErrandListUseCase;
+import com.peergrab.domain.errand.model.ArbitrationFavor;
 import com.peergrab.domain.errand.model.Errand;
 import com.peergrab.domain.errand.model.ErrandStatus;
 import com.peergrab.domain.errand.model.ErrandType;
@@ -246,12 +247,18 @@ public class ErrandController {
     @PostMapping("/{errandId}/settle")
     public Result<Map<String, Object>> settle(@PathVariable long errandId) {
         var r = settleUseCase.settle(errandId, CurrentUser.get());
+        if (r == SettleErrandUseCase.Result.CONFLICT) {
+            return Result.fail(ErrorCode.SETTLE_CONFLICT, Map.of("result", r.name()));
+        }
         return Result.ok(Map.of("result", r.name()));
     }
 
     @PostMapping("/{errandId}/cancel")
     public Result<Map<String, Object>> cancel(@PathVariable long errandId) {
         var r = refundUseCase.cancelAndRefund(errandId, CurrentUser.get());
+        if (r == RefundErrandUseCase.Result.CONFLICT) {
+            return Result.fail(ErrorCode.REFUND_CONFLICT, Map.of("result", r.name()));
+        }
         return Result.ok(Map.of("result", r.name()));
     }
 
@@ -266,10 +273,12 @@ public class ErrandController {
     @PostMapping("/{errandId}/arbitrate")
     public Result<Map<String, Object>> arbitrate(@PathVariable long errandId,
                                                  @RequestBody ArbitrateRequest req) {
-        var favor = "PUBLISHER".equalsIgnoreCase(req.favor())
-                ? ArbitrateErrandUseCase.Favor.PUBLISHER
-                : ArbitrateErrandUseCase.Favor.RUNNER;
+        // 资金裁决方向必须严格解析：非法/缺失 favor 直接拒绝，绝不默认判给任一方。
+        var favor = ArbitrationFavor.fromWire(req == null ? null : req.favor());
         var r = arbitrateUseCase.arbitrate(errandId, favor, CurrentUser.get());
+        if (r == ArbitrateErrandUseCase.Result.CONFLICT) {
+            return Result.fail(ErrorCode.SETTLE_CONFLICT, Map.of("result", r.name()));
+        }
         return Result.ok(Map.of("result", r.name()));
     }
 

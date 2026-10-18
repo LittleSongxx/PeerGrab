@@ -129,7 +129,7 @@ class AutoSettleScanJobTest {
 
         AtomicLong clock = new AtomicLong();
         AutoSettleScanJob job = new AutoSettleScanJob(repository, settle, retry, registry,
-                2, 10_000, clock::incrementAndGet);
+                200, 2, 10_000, clock::incrementAndGet);
         job.scan();
 
         verify(settle, times(201)).settle(anyLong(), eq(Errand.SYSTEM_OPERATOR));

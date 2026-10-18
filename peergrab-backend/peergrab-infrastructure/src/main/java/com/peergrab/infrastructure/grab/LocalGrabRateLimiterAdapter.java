@@ -8,6 +8,7 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * P7 本地热点限流实现。
@@ -21,6 +22,7 @@ public class LocalGrabRateLimiterAdapter implements GrabRateLimiterPort {
     private final boolean enabled;
     private final int permitsPerSecond;
     private final Map<Long, WindowCounter> counters = new ConcurrentHashMap<>();
+    private final AtomicLong lastPruneSecond = new AtomicLong();
 
     public LocalGrabRateLimiterAdapter(
             @Value("${peergrab.grab.limit.enabled:true}") boolean enabled,
@@ -42,7 +44,10 @@ public class LocalGrabRateLimiterAdapter implements GrabRateLimiterPort {
             return old;
         });
         boolean passed = counter.count.incrementAndGet() <= permitsPerSecond;
-        if ((currentSecond & 0x3f) == 0) {
+        // 按时间触发清理：原来的 second%64==0 只有请求恰好落在那一秒才会清理，
+        // 长期运行会让 counters 只增不减。
+        long lastPrune = lastPruneSecond.get();
+        if (currentSecond - lastPrune >= 60 && lastPruneSecond.compareAndSet(lastPrune, currentSecond)) {
             prune(currentSecond);
         }
         return passed;

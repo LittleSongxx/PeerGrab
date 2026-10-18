@@ -39,18 +39,22 @@ public class RocketMqCacheEvictAdapter implements CacheEvictDelayPort {
 
     private final Producer producer;
     private final ClientServiceProvider provider;
+    private final String topic;
     private final ThreadPoolExecutor sender;
     private final Counter sendFailures;
     private final Counter dropped;
     private final AtomicLong droppedCount = new AtomicLong();
 
+    @org.springframework.beans.factory.annotation.Autowired
     public RocketMqCacheEvictAdapter(Producer timeoutProducer,
                                     ClientServiceProvider provider,
                                     MeterRegistry registry,
+                                    @Value("${peergrab.mq.topic.cache-evict:errand-cache-evict}") String topic,
                                     @Value("${peergrab.cache.double-delete-sender-threads:2}") int threads,
                                     @Value("${peergrab.cache.double-delete-queue-capacity:2048}") int queueCapacity) {
         this.producer = timeoutProducer;
         this.provider = provider;
+        this.topic = topic;
         if (threads < 1 || queueCapacity < 1) {
             throw new IllegalArgumentException("double-delete sender threads and queue capacity must be positive");
         }
@@ -70,6 +74,16 @@ public class RocketMqCacheEvictAdapter implements CacheEvictDelayPort {
                         executor -> executor.getQueue().size())
                 .description("Delayed cache invalidations waiting for MQ send")
                 .register(registry);
+    }
+
+    /** 单测便捷构造：使用默认 topic。 */
+    public RocketMqCacheEvictAdapter(Producer timeoutProducer,
+                              ClientServiceProvider provider,
+                              MeterRegistry registry,
+                              int threads,
+                              int queueCapacity) {
+        this(timeoutProducer, provider, registry, CacheEvictDelayPort.TOPIC_CACHE_EVICT,
+                threads, queueCapacity);
     }
 
     @Override
@@ -94,7 +108,7 @@ public class RocketMqCacheEvictAdapter implements CacheEvictDelayPort {
             long deliveryTimestamp = deliverAt.toEpochMilli() > now + 100L
                     ? deliverAt.toEpochMilli() : now + 2_000L;
             Message msg = provider.newMessageBuilder()
-                    .setTopic(CacheEvictDelayPort.TOPIC_CACHE_EVICT)
+                    .setTopic(topic)
                     .setKeys("evict:" + errandId)
                     .setBody(MessagePayloadCodec.cacheEvict(errandId).getBytes(StandardCharsets.UTF_8))
                     .setDeliveryTimestamp(deliveryTimestamp)

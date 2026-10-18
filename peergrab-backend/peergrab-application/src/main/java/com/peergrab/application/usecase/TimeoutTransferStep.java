@@ -10,6 +10,7 @@ import com.peergrab.domain.errand.ports.LocalMessageRepository;
 import com.peergrab.domain.errand.ports.RunnerQuotaPort;
 import com.peergrab.domain.notify.ports.NotificationRepository;
 import com.peergrab.shared.SnowflakeIdGenerator;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -37,6 +38,7 @@ public class TimeoutTransferStep {
     private final CreditRepository creditRepository;
     private final NotificationRepository notificationRepository;
     private final int maxOngoing;
+    private final String confirmTimeoutTopic;
 
     public TimeoutTransferStep(ErrandRepository errandRepository,
                                LocalMessageRepository localMessageRepository,
@@ -44,7 +46,8 @@ public class TimeoutTransferStep {
                                RunnerQuotaPort runnerQuotaPort,
                                CreditRepository creditRepository,
                                NotificationRepository notificationRepository,
-                               @org.springframework.beans.factory.annotation.Value("${peergrab.credit.max-ongoing:5}") int maxOngoing) {
+                               @org.springframework.beans.factory.annotation.Value("${peergrab.credit.max-ongoing:5}") int maxOngoing,
+                               @Value("${peergrab.mq.topic.confirm-timeout:errand-confirm-timeout}") String confirmTimeoutTopic) {
         this.errandRepository = errandRepository;
         this.localMessageRepository = localMessageRepository;
         this.idGenerator = idGenerator;
@@ -52,6 +55,7 @@ public class TimeoutTransferStep {
         this.creditRepository = creditRepository;
         this.notificationRepository = notificationRepository;
         this.maxOngoing = maxOngoing;
+        this.confirmTimeoutTopic = confirmTimeoutTopic;
     }
 
     /** 事务执行结果：是否成功，以及事务提交后需要投递的消息（可能为空） */
@@ -136,7 +140,7 @@ public class TimeoutTransferStep {
 
         // 幂等第三件：msg_key 唯一索引，同一轮只登记一次
         boolean fresh = localMessageRepository.enqueue(
-                idGenerator.nextId(), msgKey, TimeoutPolicy.TOPIC_CONFIRM_TIMEOUT, payload, deliverAt);
-        return fresh ? new PendingSend(TimeoutPolicy.TOPIC_CONFIRM_TIMEOUT, msgKey, payload, deliverAt) : null;
+                idGenerator.nextId(), msgKey, confirmTimeoutTopic, payload, deliverAt);
+        return fresh ? new PendingSend(confirmTimeoutTopic, msgKey, payload, deliverAt) : null;
     }
 }

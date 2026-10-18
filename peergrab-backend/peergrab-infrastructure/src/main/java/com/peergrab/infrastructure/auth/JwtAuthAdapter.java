@@ -21,8 +21,10 @@ import java.util.Base64;
 import java.util.Date;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * JWT 鉴权真值存于 MySQL；Redis 故障不会阻断鉴权或令牌轮换。
@@ -38,11 +40,15 @@ public class JwtAuthAdapter implements RefreshTokenPort {
     private final JdbcTemplate jdbc;
     private final long accessTtlMinutes;
     private final long refreshTtlMinutes;
+    private final long resolveCacheMillis;
+    /** sid -> 已校验过的 userId + 本地缓存过期时间；只缓存"有效"结果，登出/轮换时主动清理。 */
+    private final Map<String, CachedSession> sessionCache = new ConcurrentHashMap<>();
 
     public JwtAuthAdapter(JdbcTemplate jdbc,
                           @Value("${peergrab.auth.jwt-secret:}") String secret,
                           @Value("${peergrab.auth.session-ttl-minutes:120}") long accessTtlMinutes,
-                          @Value("${peergrab.auth.refresh-ttl-minutes:10080}") long refreshTtlMinutes) {
+                          @Value("${peergrab.auth.refresh-ttl-minutes:10080}") long refreshTtlMinutes,
+                          @Value("${peergrab.auth.resolve-cache-ms:1000}") long resolveCacheMillis) {
         if (secret.getBytes(StandardCharsets.UTF_8).length < 32) {
             throw new IllegalArgumentException("JWT 模式须配置至少 32 字节的 peergrab.auth.jwt-secret");
         }
@@ -53,6 +59,7 @@ public class JwtAuthAdapter implements RefreshTokenPort {
         this.jdbc = jdbc;
         this.accessTtlMinutes = accessTtlMinutes;
         this.refreshTtlMinutes = refreshTtlMinutes;
+        this.resolveCacheMillis = Math.max(0, resolveCacheMillis);
     }
 
     @Override
@@ -91,6 +98,7 @@ public class JwtAuthAdapter implements RefreshTokenPort {
                    SET expires_at = DATE_ADD(NOW(3), INTERVAL ? SECOND)
                  WHERE session_id = ?
                 """, seconds(refreshTtlMinutes), sessionId);
+        clearResolveCache(sessionId);
         String replacement = insertRefreshToken(sessionId);
         return Optional.of(new TokenPair(issueAccessToken(session.userId(), sessionId), replacement));
     }
@@ -121,16 +129,34 @@ public class JwtAuthAdapter implements RefreshTokenPort {
             String sessionId = claims.get("sid", String.class);
             long userId = Long.parseLong(claims.getSubject());
             if (sessionId == null) return Optional.empty();
+            long now = System.currentTimeMillis();
+            CachedSession cached = sessionCache.get(sessionId);
+            if (cached != null && cached.userId == userId && cached.expiresAtMillis > now) {
+                return Optional.of(userId);
+            }
             Integer valid = jdbc.queryForObject("""
-                    SELECT COUNT(*) FROM auth_token_session s
+                    SELECT COUNT(1) FROM auth_token_session s
                      WHERE s.session_id = ? AND s.user_id = ?
                        AND s.revoked_at IS NULL AND s.expires_at > NOW(3)
                     """, Integer.class, sessionId, userId);
-            return valid != null && valid == 1 ? Optional.of(userId) : Optional.empty();
+            if (valid == null || valid != 1) {
+                sessionCache.remove(sessionId);
+                return Optional.empty();
+            }
+            if (resolveCacheMillis > 0) {
+                sessionCache.put(sessionId, new CachedSession(userId, now + resolveCacheMillis));
+            }
+            return Optional.of(userId);
         } catch (JwtException | IllegalArgumentException e) {
             return Optional.empty();
         }
     }
+
+    private void clearResolveCache(String sessionId) {
+        if (sessionId != null) sessionCache.remove(sessionId);
+    }
+
+    private record CachedSession(long userId, long expiresAtMillis) {}
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -146,6 +172,7 @@ public class JwtAuthAdapter implements RefreshTokenPort {
                      WHERE session_id = ? AND user_id = ?
                     """, sessionId, userId);
             jdbc.update("DELETE FROM auth_refresh_token WHERE session_id = ?", sessionId);
+            clearResolveCache(sessionId);
         } catch (JwtException | IllegalArgumentException ignored) {
             // 已过期、格式错误或签名无效的 token 无需撤销。
         }

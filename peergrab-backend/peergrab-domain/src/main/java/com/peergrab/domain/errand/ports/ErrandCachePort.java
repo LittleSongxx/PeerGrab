@@ -58,7 +58,11 @@ public interface ErrandCachePort {
 
     void releaseRebuild(long errandId);
 
-    /** 布隆过滤器的提示性判定。索引与数据库非同一事务，false 仍需回源核实。 */
+    /**
+     * 布隆过滤器的存在性判定，判否被读路径短路为"不存在"（防穿透）。
+     * 适配器必须 fail-open：未启用、Redis 降级、过滤器丢失或部分重建中一律返回 true；
+     * 残余误杀由判否抽样审计（读路径 1/N 回源核实）与周期巡检补登记兜底。
+     */
     boolean mightExist(long errandId);
 
     /** 任务发布后登记到布隆 */

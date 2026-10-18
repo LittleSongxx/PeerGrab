@@ -79,6 +79,7 @@ public class ArbitrateSettleStep {
 
         WalletAccount escrowAccount = walletRepository
                 .findByOwner(ESCROW_ACCOUNT_OWNER, AccountType.ESCROW).orElseThrow();
+        walletRepository.ensureUserAccount(errand.grabberId());
         WalletAccount runnerAccount = walletRepository
                 .findByOwner(errand.grabberId(), AccountType.USER).orElseThrow();
         WalletAccount commissionAccount = walletRepository

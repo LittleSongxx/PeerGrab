@@ -43,8 +43,7 @@ class GrabConcurrencyIT {
 
     @BeforeAll
     static void requireMiddleware() {
-        Assumptions.assumeTrue(MiddlewareAvailable.check(),
-                "MySQL(3307)/Redis(6380) 未启动，跳过集成测试。请先执行 docker compose -f docker/docker-compose.yaml up -d");
+        MiddlewareAvailable.require();
         run = BenchRun.start("IT-GRAB");
     }
 

@@ -17,6 +17,8 @@ import com.peergrab.shared.BizException;
 import com.peergrab.shared.ErrorCode;
 import com.peergrab.shared.Money;
 import com.peergrab.shared.SnowflakeIdGenerator;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -59,7 +61,10 @@ public class SettleErrandUseCase {
     private final CreditRankingPort creditRankingPort;
     private final TransactionTemplate transactionTemplate;
     private final RealtimeNotifier notifier;
+    /** 资金已提交但后置动作（缓存/榜单/审计/推送）失败次数。 */
+    private final Counter sideEffectFailures;
 
+    @org.springframework.beans.factory.annotation.Autowired
     public SettleErrandUseCase(ErrandRepository errandRepository,
                                WalletRepository walletRepository,
                                FundAuditPort auditPort,
@@ -70,6 +75,7 @@ public class SettleErrandUseCase {
                                CreditRankingPort creditRankingPort,
                                TransactionTemplate transactionTemplate,
                                RealtimeNotifier notifier,
+                               MeterRegistry meterRegistry,
                                @Value("${peergrab.settle.commission-rate:0.05}") double commissionRate) {
         this.errandRepository = errandRepository;
         this.walletRepository = walletRepository;
@@ -82,9 +88,29 @@ public class SettleErrandUseCase {
         this.transactionTemplate = transactionTemplate;
         this.notifier = notifier;
         this.commissionRate = commissionRate;
+        this.sideEffectFailures = Counter.builder("peergrab.settle.side_effect.failures")
+                .description("Committed settlements whose cache/ranking/audit/realtime side effect failed")
+                .register(meterRegistry);
     }
 
-    public enum Result { SETTLED, ALREADY_SETTLED, CONFLICT }
+    /** 单测便捷构造：后置动作计数用 SimpleMeterRegistry。 */
+    SettleErrandUseCase(ErrandRepository errandRepository,
+                        WalletRepository walletRepository,
+                        FundAuditPort auditPort,
+                        FundEventPort fundEventPort,
+                        SnowflakeIdGenerator idGenerator,
+                        CacheEvictSupport cacheEvict,
+                        CreditRepository creditRepository,
+                        CreditRankingPort creditRankingPort,
+                        TransactionTemplate transactionTemplate,
+                        RealtimeNotifier notifier,
+                        double commissionRate) {
+        this(errandRepository, walletRepository, auditPort, fundEventPort, idGenerator, cacheEvict,
+                creditRepository, creditRankingPort, transactionTemplate, notifier,
+                new io.micrometer.core.instrument.simple.SimpleMeterRegistry(), commissionRate);
+    }
+
+    public enum Result { SETTLED, ALREADY_SETTLED, NOT_DUE, CONFLICT }
 
     /** Result of one bounded automatic-settlement batch. */
     public record BatchResult(int settled, int skipped) {}
@@ -118,6 +144,13 @@ public class SettleErrandUseCase {
             throw new BizException(ErrorCode.ILLEGAL_STATE_TRANSITION,
                     "只有已送达任务可以结算，status=" + errand.status());
         }
+        // MQ 定时消息可能早于数据库截止时间到达：明确返回 NOT_DUE 让消费者 ACK，
+        // 由 5 秒一轮的到期扫描在截止后完成结算，避免把"早到"误记为并发冲突。
+        if (operatorId == Errand.SYSTEM_OPERATOR
+                && errand.autoSettleDeadlineAt() != null
+                && errand.autoSettleDeadlineAt().isAfter(java.time.Instant.now())) {
+            return Result.NOT_DUE;
+        }
 
         EscrowOrder escrow = walletRepository.findEscrowByErrandId(errand.campusId(), errandId)
                 .orElseThrow(() -> new BizException(ErrorCode.ESCROW_NOT_FOUND, "errandId=" + errandId));
@@ -147,28 +180,35 @@ public class SettleErrandUseCase {
                 })));
 
         if (committed) {
-            // 状态变为 SETTLED，详情缓存失效。这里事务已提交（TransactionTemplate 返回后），
-            // 所以 evictAfterCommit 会走"无事务上下文"分支立即删除
-            cacheEvict.evictAfterCommit(errandId);
-            // 排行榜是展示层：事务提交后更新，Redis 失败由每日校准 job 自愈
-            Integer runnerScore = errand.grabberId() == null
-                    ? null : creditRepository.scoreOf(errand.grabberId());
+            // 资金已提交：以下都是可降级副作用，逐项兜底，任何一项失败都不影响结算结果，
+            // 也绝不能中断后续项的审计/通知。
+            sideEffect("cache-evict", () -> cacheEvict.evictAfterCommit(errandId));
+            Integer runnerScore = null;
             if (errand.grabberId() != null) {
-                creditRankingPort.update(errand.campusId(), errand.grabberId(),
-                        runnerScore);
+                try {
+                    runnerScore = creditRepository.scoreOf(errand.grabberId());
+                } catch (RuntimeException e) {
+                    sideEffectFailures.increment();
+                    log.warn("结算已提交但信用分查询失败 errandId={}", errandId, e);
+                }
             }
-            auditPort.record(bizNo, "SETTLE", errandId, operatorId,
+            final Integer scoreSnapshot = runnerScore;
+            sideEffect("ranking", () -> {
+                if (errand.grabberId() != null) {
+                    creditRankingPort.update(errand.campusId(), errand.grabberId(), scoreSnapshot);
+                }
+            });
+            sideEffect("audit", () -> auditPort.record(bizNo, "SETTLE", errandId, operatorId,
                     String.format("{\"runner\":%d,\"commission\":%d}", runnerCents, commissionCents),
-                    true, null);
-            // 实时推送：状态变更 + 跑腿信用分变化
-            notifier.errandStatusChanged(errandId, errand.publisherId(), errand.grabberId(),
-                    com.peergrab.domain.errand.model.ErrandStatus.SETTLED.name(), errand.round());
-            if (errand.grabberId() != null) {
-                notifier.creditChanged(errand.grabberId(),
-                        runnerScore,
-                        com.peergrab.domain.credit.model.CreditEventType.SETTLE.delta(),
-                        "完成结算");
-            }
+                    true, null));
+            sideEffect("realtime", () -> {
+                notifier.errandStatusChanged(errandId, errand.publisherId(), errand.grabberId(),
+                        com.peergrab.domain.errand.model.ErrandStatus.SETTLED.name(), errand.round());
+                if (errand.grabberId() != null && scoreSnapshot != null) {
+                    notifier.creditChanged(errand.grabberId(), scoreSnapshot,
+                            com.peergrab.domain.credit.model.CreditEventType.SETTLE.delta(), "完成结算");
+                }
+            });
             return Result.SETTLED;
         }
         return Result.CONFLICT;
@@ -231,6 +271,10 @@ public class SettleErrandUseCase {
                     }
                     if (applied.isEmpty()) return new BatchResult(0, transactionSkipped);
 
+                    for (AutoSettlement item : applied) {
+                        // 兜底自愈：历史/异常数据可能缺少跑腿账户，结算前幂等开通。
+                        walletRepository.ensureUserAccount(item.errand().grabberId());
+                    }
                     List<WalletRepository.OwnerRef> refs = new ArrayList<>(applied.size() + 2);
                     refs.add(new WalletRepository.OwnerRef(ESCROW_ACCOUNT_OWNER, AccountType.ESCROW));
                     refs.add(new WalletRepository.OwnerRef(COMMISSION_ACCOUNT_OWNER, AccountType.COMMISSION));
@@ -275,16 +319,29 @@ public class SettleErrandUseCase {
         // normal cache/ranking/audit reconciliation paths if an external system is down.
         for (AutoSettlement item : committed) {
             Errand errand = item.errand();
-            cacheEvict.evictAfterCommit(errand.id());
-            Integer runnerScore = creditRepository.scoreOf(errand.grabberId());
-            creditRankingPort.update(errand.campusId(), errand.grabberId(), runnerScore);
-            auditPort.record(item.bizNo(), "SETTLE", errand.id(), Errand.SYSTEM_OPERATOR,
+            sideEffect("batch-cache-evict", () -> cacheEvict.evictAfterCommit(errand.id()));
+            Integer runnerScore = null;
+            try {
+                runnerScore = creditRepository.scoreOf(errand.grabberId());
+            } catch (RuntimeException e) {
+                sideEffectFailures.increment();
+                log.warn("批量结算已提交但信用分查询失败 errandId={}", errand.id(), e);
+            }
+            final Integer scoreSnapshot = runnerScore;
+            sideEffect("batch-ranking", () ->
+                    creditRankingPort.update(errand.campusId(), errand.grabberId(), scoreSnapshot));
+            sideEffect("batch-audit", () -> auditPort.record(item.bizNo(), "SETTLE", errand.id(),
+                    Errand.SYSTEM_OPERATOR,
                     String.format("{\"runner\":%d,\"commission\":%d}",
-                            item.runnerAmount().cents(), item.commissionAmount().cents()), true, null);
-            notifier.errandStatusChanged(errand.id(), errand.publisherId(), errand.grabberId(),
-                    ErrandStatus.SETTLED.name(), errand.round());
-            notifier.creditChanged(errand.grabberId(), runnerScore,
-                    CreditEventType.SETTLE.delta(), "完成结算");
+                            item.runnerAmount().cents(), item.commissionAmount().cents()), true, null));
+            sideEffect("batch-realtime", () -> {
+                notifier.errandStatusChanged(errand.id(), errand.publisherId(), errand.grabberId(),
+                        ErrandStatus.SETTLED.name(), errand.round());
+                if (scoreSnapshot != null) {
+                    notifier.creditChanged(errand.grabberId(), scoreSnapshot,
+                            CreditEventType.SETTLE.delta(), "完成结算");
+                }
+            });
         }
         return transactionResult;
     }
@@ -315,6 +372,7 @@ public class SettleErrandUseCase {
                 errand.round(), operatorId);
 
         // 资金转移：托管账户 -> 跑腿 + 佣金
+        walletRepository.ensureUserAccount(errand.grabberId());
         var escrowRef = new WalletRepository.OwnerRef(ESCROW_ACCOUNT_OWNER, AccountType.ESCROW);
         var runnerRef = new WalletRepository.OwnerRef(errand.grabberId(), AccountType.USER);
         var commissionRef = new WalletRepository.OwnerRef(COMMISSION_ACCOUNT_OWNER, AccountType.COMMISSION);
@@ -343,6 +401,16 @@ public class SettleErrandUseCase {
                 CreditEventType.SETTLE, CreditEventType.SETTLE.delta(), "ERRAND", errandId,
                 java.time.Instant.now()));
         return true;
+    }
+
+    /** 已提交资金的后置动作统一兜底：失败只告警计数，不回滚、不中断后续动作。 */
+    private void sideEffect(String name, Runnable action) {
+        try {
+            action.run();
+        } catch (RuntimeException e) {
+            sideEffectFailures.increment();
+            log.warn("结算已提交但后置动作失败 action={}，可通过对账/校准/重推恢复", name, e);
+        }
     }
 
     private WalletAccount accountOrFallback(Map<WalletRepository.OwnerRef, WalletAccount> accounts,

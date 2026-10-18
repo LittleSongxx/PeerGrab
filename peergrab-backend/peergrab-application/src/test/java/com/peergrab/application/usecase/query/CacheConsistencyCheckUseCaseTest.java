@@ -28,6 +28,7 @@ class CacheConsistencyCheckUseCaseTest {
         ErrandCachePort cache = mock(ErrandCachePort.class);
         SyncDiffRepository diffs = mock(SyncDiffRepository.class);
         when(query.sampleIds(1)).thenReturn(List.of(42L));
+        when(cache.mightExist(42)).thenReturn(true);
         when(cache.get(42)).thenReturn(Optional.of(new ErrandCachePort.CachedErrand(
                 "{\"status\":\"SETTLED\",\"version\":1,\"rewardCents\":500}",
                 System.currentTimeMillis() + 1_000, false)));
@@ -49,6 +50,7 @@ class CacheConsistencyCheckUseCaseTest {
         ErrandCachePort cache = mock(ErrandCachePort.class);
         SyncDiffRepository diffs = mock(SyncDiffRepository.class);
         when(query.sampleIds(1)).thenReturn(List.of(42L));
+        when(cache.mightExist(42)).thenReturn(true);
         when(cache.get(42)).thenReturn(Optional.of(new ErrandCachePort.CachedErrand(
                 "{\"status\":\"SETTLED\",\"version\":1,\"rewardCents\":500}",
                 System.currentTimeMillis() + 1_000, false)));
@@ -62,5 +64,45 @@ class CacheConsistencyCheckUseCaseTest {
         order.verify(cache).evict(42);
         order.verify(diffs).record(any(Instant.class), eq(42L), eq("status"),
                 eq("PUBLISHED"), eq("SETTLED"), eq(true));
+    }
+    @Test
+    void negative_cache_for_an_existing_task_is_evicted_and_recorded() {
+        ErrandQueryPort query = mock(ErrandQueryPort.class);
+        ErrandRepository repository = mock(ErrandRepository.class);
+        ErrandCachePort cache = mock(ErrandCachePort.class);
+        SyncDiffRepository diffs = mock(SyncDiffRepository.class);
+        when(query.sampleIds(1)).thenReturn(List.of(42L));
+        when(cache.mightExist(42)).thenReturn(true);
+        when(cache.get(42)).thenReturn(Optional.of(new ErrandCachePort.CachedErrand(
+                null, System.currentTimeMillis() + 1_000, true)));
+        when(repository.findById(42)).thenReturn(Optional.of(Errand.rehydrate(
+                42, 1, 1001, ErrandType.DELIVERY, "测试任务", Money.ofCents(500), 1,
+                null, ErrandStatus.PUBLISHED, 0, 0, 1, null, null)));
+
+        assertEquals(1, new CacheConsistencyCheckUseCase(query, repository, cache, diffs, 1).runOnce());
+
+        verify(cache).evict(42);
+        verify(diffs).record(any(Instant.class), eq(42L), eq("existence"),
+                eq("PRESENT"), eq("ABSENT"), eq(true));
+    }
+
+    @Test
+    void bloom_miss_for_a_sampled_db_task_is_re_registered_and_recorded() {
+        ErrandQueryPort query = mock(ErrandQueryPort.class);
+        ErrandRepository repository = mock(ErrandRepository.class);
+        ErrandCachePort cache = mock(ErrandCachePort.class);
+        SyncDiffRepository diffs = mock(SyncDiffRepository.class);
+        when(query.sampleIds(1)).thenReturn(List.of(42L));
+        when(cache.get(42)).thenReturn(Optional.empty());
+        when(cache.mightExist(42)).thenReturn(false);
+        when(cache.registerExisting(42)).thenReturn(true);
+
+        assertEquals(1, new CacheConsistencyCheckUseCase(query, repository, cache, diffs, 1).runOnce());
+
+        var order = inOrder(cache, diffs);
+        order.verify(cache).registerExisting(42);
+        order.verify(diffs).record(any(Instant.class), eq(42L), eq("bloom"),
+                eq("PRESENT"), eq("MISSING"), eq(true));
+        verify(repository, never()).findById(42);
     }
 }

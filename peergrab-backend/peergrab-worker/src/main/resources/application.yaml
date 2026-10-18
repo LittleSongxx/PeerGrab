@@ -16,11 +16,13 @@ spring:
 
 peergrab:
   scheduler:
-    fast-pool-size: 3          # 超时/结算扫描与消息重发
-    maintenance-pool-size: 3   # 对账、信用/缓存投影重建
+    fast-pool-size: 3          # 超时/结算扫描
+    maintenance-pool-size: 3   # 对账、信用/缓存投影重建、数据保留清理
+    mq-send-pool-size: 2       # MQ 同步发送独立成池，Broker 故障不占用兜底扫描线程
   settle:
     scan-interval-ms: 5000
-    scan-max-batches: 5         # 同一轮连续处理最多 5 页，每页 200 条
+    scan-batch-size: 100        # 批量结算单页上限：批量越大 ESCROW/COMMISSION 锁持有越久
+    scan-max-batches: 5         # 同一轮连续处理最多 5 页
     scan-max-run-ms: 30000      # 一次尽量排空到期页；其它 fast scheduler 仍有独立线程
   ws:
     # worker 进程不持有 WebSocket 连接，推送由 app 进程负责；
@@ -32,6 +34,9 @@ peergrab:
     endpoints: 127.0.0.1:8081
     topic:
       confirm-timeout: errand-confirm-timeout
+      auto-settle: errand-auto-settle
+      cache-evict: errand-cache-evict
+      fund-event: errand-fund-event-v2
     group:
       confirm-timeout: peergrab-timeout-consumer
   timeout:
@@ -43,14 +48,30 @@ peergrab:
     scan-max-run-ms: 10000      # 新到期任务扫描最多 10 秒；前置的失败重试另有 50 条上限
   message:
     retry-interval-ms: 10000
+    retry-max-run-ms: 10000     # 单轮重发时间预算，Broker 黑洞故障时把线程让给兜底扫描
+  fund-outbox:
+    retry-interval-ms: 2000
+    max-run-ms: 10000
   credit:
     calibration-cron: "0 0 3 * * ?"
     calibration-batch-size: 1000
     ranking-rebuild-interval-ms: 60000
   cache:
     shards: 1                 # 与 API 的单实例 Redis 缓存配置一致
-    bloom-enabled: false       # 与 API 默认一致；需要对照实验时显式开启
+    bloom-enabled: true        # 与 API 默认一致；判否短路防穿透（fail-open + 巡检兜底）
     bloom-rebuild-interval-ms: 300000
+    bloom-refresh-interval-ms: 1800000  # 周期全量校准
+  retention:
+    enabled: true
+    cron: "0 30 4 * * ?"       # 注意容器 TZ；生产 compose 已设置 Asia/Shanghai
+    batch-size: 500
+    max-batches: 20
+    local-message-days: 7
+    fund-outbox-days: 30
+    publish-request-days: 7
+    notification-days: 180
+    recon-diff-days: 365
+    sync-diff-days: 90
 
 server:
   port: 8082

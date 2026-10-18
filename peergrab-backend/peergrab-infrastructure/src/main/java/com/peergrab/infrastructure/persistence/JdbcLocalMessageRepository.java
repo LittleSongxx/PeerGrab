@@ -47,20 +47,6 @@ public class JdbcLocalMessageRepository implements LocalMessageRepository {
     }
 
     @Override
-    public List<PendingMessage> findPending(int limit) {
-        return jdbc.query("""
-                SELECT id, msg_key, topic, payload, deliver_at, retry_count
-                  FROM local_message
-                 WHERE status = 'PENDING' AND next_retry_at <= NOW(3)
-                 ORDER BY next_retry_at
-                 LIMIT ?
-                """, (rs, n) -> new PendingMessage(
-                        rs.getLong("id"), rs.getString("msg_key"), rs.getString("topic"),
-                        rs.getString("payload"), rs.getTimestamp("deliver_at").toInstant(),
-                        rs.getInt("retry_count")), limit);
-    }
-
-    @Override
     public List<ClaimedMessage> claimPending(int limit) {
         List<PendingMessage> candidates = jdbc.query("""
                 SELECT id, msg_key, topic, payload, deliver_at, retry_count
@@ -93,6 +79,15 @@ public class JdbcLocalMessageRepository implements LocalMessageRepository {
                 UPDATE local_message SET status = 'SENT', claim_token = NULL, claim_until = NULL
                  WHERE msg_key = ? AND status = 'PENDING' AND claim_token = ?
                 """, msgKey, claimToken) == 1;
+    }
+
+    @Override
+    public void releaseClaim(String msgKey, String claimToken) {
+        jdbc.update("""
+                UPDATE local_message
+                   SET claim_token = NULL, claim_until = NULL
+                 WHERE msg_key = ? AND status = 'PENDING' AND claim_token = ?
+                """, msgKey, claimToken);
     }
 
     @Override

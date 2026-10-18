@@ -457,7 +457,7 @@ input:not([type="checkbox"]):not([type="radio"]):focus, select:focus { border-co
 .status-DELIVERED { color: #167e91; background: #e7f8fa; }
 .status-SETTLED { color: #12815c; background: #e5f7ef; }
 .status-DISPUTED { color: #c35943; background: #fff0e9; }
-.status-CANCELLED, .status-REFUNDED, .status-CLOSED { color: #6f7d91; background: #eff2f6; }
+.status-CANCELLED, .status-REFUNDED { color: #6f7d91; background: #eff2f6; }
 .round { display: inline-flex; align-items: center; padding: 3px 7px; border-radius: 6px; background: #fff6e6; color: #a27522; font-size: 11px; font-weight: 700; }
 .reward { color: #e18b20; font-weight: 800; font-variant-numeric: tabular-nums; }
 .tabs { display: inline-flex; align-items: center; gap: 4px; padding: 4px; border: 1px solid #e3e9f2; border-radius: 11px; background: #f6f8fb; }
@@ -563,6 +563,10 @@ input:not([type="checkbox"]):not([type="radio"]):focus, select:focus { border-co
 .ledger-table .wallet-amount { font-weight: 850; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .ledger-table .wallet-amount.credit { color: var(--success); }
 .ledger-table .wallet-amount.debit { color: var(--danger); }
+.wallet-account { display: inline-flex; padding: 4px 8px; border-radius: 6px; background: #eef2f8; color: #586980; font-weight: 750; white-space: nowrap; }
+.wallet-account.is-escrow { color: #8a6a1f; background: #fff6e0; }
+.wallet-account.is-commission { color: #6a4c9c; background: #f2ecff; }
+.wallet-ledger-note { margin: 14px 0 0; padding-top: 12px; border-top: 1px solid #edf0f5; color: var(--muted); font-size: 11px; line-height: 1.6; }
 
 /* Credit */
 .credit-overview { display: grid; grid-template-columns: minmax(220px,.75fr) minmax(0,1.25fr); gap: 25px; align-items: center; }
@@ -813,7 +817,8 @@ input:not([type="checkbox"]):not([type="radio"]):focus, select:focus { border-co
   .ledger-table tbody td:nth-child(2) { grid-column: 1; grid-row: 1; }
   .ledger-table tbody td:nth-child(3) { grid-column: 2; grid-row: 1; text-align: right; font-size: 14px; }
   .ledger-table tbody td:nth-child(4) { grid-column: 1; grid-row: 3; color: #5d6d84; }
-  .ledger-table tbody td:nth-child(5) { grid-column: 2; grid-row: 3; text-align: right; }
+  .ledger-table tbody td:nth-child(5) { grid-column: 2; grid-row: 3; text-align: right; color: #5d6d84; }
+  .ledger-table tbody td:nth-child(6) { grid-column: 1 / -1; grid-row: 4; }
   .credit-overview { gap: 15px; }
   .detail-facts__list { grid-template-columns: 1fr; }
   .detail-summary__reward, .detail-summary__item { padding: 16px; }

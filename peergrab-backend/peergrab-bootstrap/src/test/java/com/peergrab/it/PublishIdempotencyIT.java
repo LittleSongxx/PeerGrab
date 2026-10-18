@@ -35,7 +35,7 @@ class PublishIdempotencyIT {
 
     @Test
     void samePublisherAndKeyCreateAndChargeExactlyOnce() throws Exception {
-        Assumptions.assumeTrue(MiddlewareAvailable.check(), "integration middleware unavailable");
+        MiddlewareAvailable.require();
         long publisher = ThreadLocalRandom.current().nextLong(6_000_000_000L, 7_000_000_000L);
         long anotherPublisher = publisher + 1_000_000_000L;
         createAccount(publisher);

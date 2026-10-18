@@ -107,6 +107,16 @@ compose=(docker compose --env-file .env.prod -f docker-compose.prod.yaml)
 
 容器就绪检查现在访问内部 `/actuator/health/readiness`：生产 API 核验 MySQL 和雪花节点发号租约，Worker 还核验 Redis、调度心跳及发号租约；公开 `/api/health` 仍只表示进程存活。`/actuator/prometheus` 仅在容器网络内提供，包括 JVM、HTTP、Hikari、`Result.code` 业务结果计数，以及资金 outbox、延迟消息、对账差异和缓存失效失败指标。建议至少告警：就绪失败、资金 outbox 最老 PENDING 持续增长、到期任务处理滞后、对账差异非零，并定期做独立恢复演练，实测记录 RPO/RTO 后再承诺可用性目标。
 
+### 2026-10 升级追加项
+
+本次版本在上述迁移之外还有以下变更，仍需先停写、备份，再按顺序执行：
+
+- `migrate-runtime.sql` 追加 `errand.transfer_count`（本轮连续递补计数，回退后归零，用于修复"达到轮次上限后候选永久失效"）与 9001 仲裁员的零余额 `wallet_account` 行（`INSERT IGNORE`）。后者只保证账户模型一致，仲裁员在应用层已被禁止参与交易。
+- `migrate-query-indexes.sql` 追加 5 个索引：`grab_record.idx_runner_errand`、`publish_request.idx_publish_created`、`notification.idx_read_time`、`local_message.idx_status_updated`、`fund_event_outbox.idx_outbox_status_updated`，服务于 runner 任务列表与保留期清理；两个脚本都可重复执行。
+- app / worker 容器新增 `TZ=Asia/Shanghai`：`credit.calibration-cron`、`recon.cron`、`retention.cron` 改按东八区解释。升级后须执行 `up -d --build` 重建容器，只重启进程不会更新环境变量。
+- Redis 由 `noeviction` 改为 `allkeys-lru`（`--maxmemory 512mb --maxmemory-samples 10`）：缓存、名额、布隆、榜单都可从 MySQL 重建，名额键被淘汰时抢单回退到数据库 CAS。
+- 资金事件实时推送并入 worker 的落库消费者，原 `peergrab-fund-event-push` 消费组退役。升级后先确认该组在旧 Topic 的积压已消费完，再删除该组；旧 `errand-fund-event` Topic 仍按上文保留期流程单独退役。
+
 ## 4. 多主机部署边界
 
 `docker-compose.prod.yaml` 仍是单 ECS 演示栈；同机把 app 扩为两个副本只能缓解进程故障，不能抵御主机或磁盘故障。仓库另提供 [`docker-compose.distributed.yaml`](docker-compose.distributed.yaml)：在至少两台主机分别运行 app、worker 和 frontend，外部负载均衡器只接入健康主机；各主机共用同一个 MySQL 主库、Redis 和 RocketMQ 集群，以及相同 JWT 密钥。所有主机应使用同一提交构建出的镜像摘要。新环境必须先在共享 MySQL 执行迁移，再启动应用。

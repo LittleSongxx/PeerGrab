@@ -1,0 +1,132 @@
+# PeerGrab 最小告警规则集（Prometheus 规则文件格式，v2/v3 通用）。
+#
+# 指标名来源：Micrometer 默认命名转换（点号 -> 下划线；Counter 追加 _total；
+# Timer 变成 <name>_seconds，带 publishPercentileHistogram() 的 Timer 还输出 _bucket）。
+# 已用仓库内真实抓取样例 bench/runs/codex-maintenance/mixed-long-fast-final-app.prom 核对：
+#   peergrab.api.results            -> peergrab_api_results_total{code="OK"}
+#   peergrab.cache.double_delete.send.failed -> peergrab_cache_double_delete_send_failed_total
+#   peergrab.grab.phase             -> peergrab_grab_phase_seconds_bucket{stage=...}
+# 资金/延迟消息/对账 gauge 由 worker 的 WorkerOperationalMetrics 注册（worker:8082）。
+groups:
+  # ---------------- 可用性 ----------------
+  - name: peergrab-availability
+    rules:
+      - alert: PeerGrabAppDown
+        expr: up{job="peergrab-app"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: peergrab-app
+        annotations:
+          summary: "app 不可达或 readiness 失败"
+          description: "Prometheus 连续 1 分钟抓取 app:8080/actuator/prometheus 失败。容器 healthcheck 用的 /actuator/health/readiness 与抓取走同一个端口，因此这同时意味着在线实例已经不可用；先看容器状态与 readiness 探针输出。"
+
+      - alert: PeerGrabWorkerDown
+        expr: up{job="peergrab-worker"} == 0
+        for: 2m
+        labels:
+          severity: warning
+          service: peergrab-worker
+        annotations:
+          summary: "worker 不可达或 readiness 失败"
+          description: "连续 2 分钟抓取 worker:8082/actuator/prometheus 失败。worker 停摆后资金 outbox、延迟消息重发与结算扫描全部停止推进，积压类告警会随后触发。"
+
+      - alert: PeerGrabTargetMissing
+        expr: absent(up{job=~"peergrab-(app|worker)"})
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Prometheus 中没有任何 PeerGrab 抓取目标"
+          description: "5 分钟内 up 序列里找不到 peergrab-app / peergrab-worker，通常是叠加文件没带 --profile observability 启动，或服务名/项目名不一致；此时其余告警都处于无数据状态，属于监控自身失效。"
+
+  # ---------------- 资金 outbox ----------------
+  - name: peergrab-fund-outbox
+    rules:
+      - alert: PeerGrabFundOutboxBacklog
+        expr: peergrab_fund_outbox_pending > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "资金 outbox 有未投递事件"
+          description: "fund_event_outbox 中 PENDING 记录连续 5 分钟大于 0。正常投递应在秒级排空，持续积压说明 MQ 发送或本地重试链路卡住，资金事件可能延迟到达。"
+
+      - alert: PeerGrabFundOutboxAging
+        expr: peergrab_fund_outbox_oldest_age_seconds > 300
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "资金 outbox 最老事件年龄超过 300s"
+          description: "最老 PENDING 资金事件的年龄连续 5 分钟大于 300 秒，已经超出可接受的投递窗口，可能出现账实不一致。先对比 fund_event_outbox 与 MQ 投递记录，再决定重放。"
+
+  # ---------------- 延迟消息 outbox ----------------
+  - name: peergrab-delay-outbox
+    rules:
+      - alert: PeerGrabDelayOutboxBacklog
+        expr: peergrab_delay_outbox_pending > 5000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "延迟消息本地表积压"
+          description: "local_message 中 PENDING 记录连续 10 分钟超过 5000 条。该表包含正常等待中的定时消息，阈值需要按发布速率调整；持续上涨通常意味着 MQ 不可用后退化到本地重发，扫描线程追不上。"
+
+      - alert: PeerGrabDelayOutboxDead
+        expr: peergrab_delay_outbox_dead > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "延迟消息进入 DEAD 状态"
+          description: "local_message 出现 DEAD 记录且持续 5 分钟，说明延迟消息重试耗尽被放弃，超时确认/自动结算等动作不会执行，需要人工重放并确认业务状态。"
+
+  # ---------------- 对账 ----------------
+  - name: peergrab-reconciliation
+    rules:
+      - alert: PeerGrabReconDiffDetected
+        expr: peergrab_recon_diffs_today > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "当日账户对账出现差异"
+          description: "recon_diff 中当天差异记录数大于 0，账户快照与流水净额不一致，直接影响资金正确性；先隔离相关账户再排查对账明细。"
+
+  # ---------------- 缓存一致性 ----------------
+  - name: peergrab-cache
+    rules:
+      - alert: PeerGrabCacheDoubleDeleteSendFailures
+        expr: sum(rate(peergrab_cache_double_delete_send_failed_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "缓存延迟双删消息持续发送失败"
+          description: "延迟双删（double delete）消息发送失败率连续 5 分钟大于 0。发送失败只降级为本地兜底，读请求可能读到旧缓存；结合缓存一致性巡检结果决定是否人工失效。"
+
+  # ---------------- API 业务结果 ----------------
+  - name: peergrab-api
+    rules:
+      - alert: PeerGrabApiBusinessFailureRatioHigh
+        expr: |
+          sum(rate(peergrab_api_results_total{code!="OK"}[5m]))
+          /
+          clamp_min(sum(rate(peergrab_api_results_total[5m])), 0.001)
+          > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "API 非 OK 业务结果占比超过 50%"
+          description: "peergrab_api_results 中 code!=OK 的响应占比连续 10 分钟超过 50%。抢单本身是高失败率场景（SLOT_FULL、GRAB_CONFLICT 都是正常业务结果），这条规则只能当粗粒度哨兵，压测或 N 抢 1 场景需要上调阈值。"
+
+      - alert: PeerGrabApiInternalError
+        expr: sum(rate(peergrab_api_results_total{code="INTERNAL_ERROR"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "接口持续返回 INTERNAL_ERROR"
+          description: "5 分钟内 INTERNAL_ERROR 结果码持续增加，说明存在未被业务码吸收的服务端异常，按接口与异常栈排查。"

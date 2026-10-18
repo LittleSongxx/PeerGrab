@@ -12,6 +12,7 @@ import com.peergrab.domain.wallet.model.EscrowOrder;
 import com.peergrab.domain.wallet.model.LedgerEntry;
 import com.peergrab.domain.wallet.model.WalletAccount;
 import com.peergrab.domain.wallet.ports.WalletRepository;
+import com.peergrab.application.usecase.security.ActorRolePolicy;
 import com.peergrab.shared.BizException;
 import com.peergrab.shared.ErrorCode;
 import com.peergrab.shared.Money;
@@ -44,8 +45,8 @@ import java.util.UUID;
 public class PublishErrandUseCase {
 
     private static final Logger log = LoggerFactory.getLogger(PublishErrandUseCase.class);
-    /** 名额键 TTL 给足，避免任务还没被抢完 Redis 键就过期了 */
-    private static final long SLOT_TTL_SECONDS = 7 * 24 * 3600;
+    /** 名额键 TTL 给足，避免任务还没被抢完 Redis 键就过期了；回退重开时复用同一 TTL。 */
+    private static final long SLOT_TTL_SECONDS = GrabSlotPort.DEFAULT_SLOT_TTL_SECONDS;
     private static final long ESCROW_ACCOUNT_OWNER = -1L;
 
     private final ErrandRepository errandRepository;
@@ -55,14 +56,17 @@ public class PublishErrandUseCase {
     private final SnowflakeIdGenerator idGenerator;
     private final ErrandCachePort cache;
     private final CacheEvictSupport cacheEvict;
+    private final ActorRolePolicy rolePolicy;
 
+    @org.springframework.beans.factory.annotation.Autowired
     public PublishErrandUseCase(ErrandRepository errandRepository,
                                 PublishRequestRepository publishRequests,
                                 WalletRepository walletRepository,
                                 GrabSlotPort grabSlotPort,
                                 SnowflakeIdGenerator idGenerator,
                                 ErrandCachePort cache,
-                                CacheEvictSupport cacheEvict) {
+                                CacheEvictSupport cacheEvict,
+                                ActorRolePolicy rolePolicy) {
         this.errandRepository = errandRepository;
         this.publishRequests = publishRequests;
         this.walletRepository = walletRepository;
@@ -70,6 +74,19 @@ public class PublishErrandUseCase {
         this.idGenerator = idGenerator;
         this.cache = cache;
         this.cacheEvict = cacheEvict;
+        this.rolePolicy = rolePolicy;
+    }
+
+    /** 单测便捷构造：默认仲裁员 ID 与演示环境一致。 */
+    PublishErrandUseCase(ErrandRepository errandRepository,
+                         PublishRequestRepository publishRequests,
+                         WalletRepository walletRepository,
+                         GrabSlotPort grabSlotPort,
+                         SnowflakeIdGenerator idGenerator,
+                         ErrandCachePort cache,
+                         CacheEvictSupport cacheEvict) {
+        this(errandRepository, publishRequests, walletRepository, grabSlotPort, idGenerator,
+                cache, cacheEvict, new ActorRolePolicy(9001L));
     }
 
     public record Command(long campusId, long publisherId, ErrandType type,
@@ -96,6 +113,8 @@ public class PublishErrandUseCase {
         if (cmd.slotTotal() != 1) {
             throw new BizException(ErrorCode.INVALID_ARGUMENT, "slotTotal must be 1");
         }
+        // 仲裁员是争议裁决者，不能同时成为交易当事人。
+        rolePolicy.requireTradable(cmd.publisherId());
         if (cmd.campusId() <= 0 || cmd.publisherId() <= 0 || cmd.type() == null
                 || cmd.title() == null || cmd.title().isBlank()
                 || cmd.title().length() > 64 || cmd.rewardCents() <= 0
@@ -118,6 +137,7 @@ public class PublishErrandUseCase {
         // Same-key competitors wait for this transaction, then replay its committed ID.
         long errandId = idGenerator.nextId();
 
+        walletRepository.ensureUserAccount(cmd.publisherId());
         WalletAccount publisherAccount = walletRepository
                 .findByOwner(cmd.publisherId(), AccountType.USER)
                 .orElseThrow(() -> new BizException(ErrorCode.ACCOUNT_NOT_FOUND, "publisher=" + cmd.publisherId()));
@@ -180,14 +200,8 @@ public class PublishErrandUseCase {
                     log.warn("published task committed but Redis slot init failed errandId={}",
                             errandId, e);
                 }
-                try {
-                    if (committed != null && !cache.registerExisting(errandId)) {
-                        log.warn("published task committed but Bloom registration was deferred errandId={}",
-                                errandId);
-                    }
-                } catch (RuntimeException e) {
-                    log.warn("published task committed but Bloom registration failed errandId={}",
-                            errandId, e);
+                if (committed != null) {
+                    registerBloomWithRetry(errandId);
                 }
             }
         });
@@ -195,6 +209,30 @@ public class PublishErrandUseCase {
         cacheEvict.evictAfterCommit(errandId);
 
         return new Result(errandId, ErrandStatus.PUBLISHED, reward.cents());
+    }
+
+    /**
+     * 发布已提交后把任务登记到布隆索引。登记失败不能让已提交的发布回报失败，
+     * 但也不能只留一条 warn：短退避重试后再放弃，残余遗漏由周期全量校准与抽样审计兜底。
+     */
+    private void registerBloomWithRetry(long errandId) {
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            try {
+                if (cache.registerExisting(errandId)) {
+                    return;
+                }
+            } catch (RuntimeException e) {
+                log.warn("published task committed but Bloom registration failed attempt={} errandId={}",
+                        attempt, errandId, e);
+            }
+            try {
+                Thread.sleep(25L * attempt);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+        log.warn("published task committed but Bloom registration deferred after retries errandId={}", errandId);
     }
 
     static String payloadHash(Command cmd) {

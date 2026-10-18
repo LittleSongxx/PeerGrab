@@ -50,7 +50,7 @@ class TimeoutTransferIT {
 
     @BeforeAll
     static void requireMiddleware() {
-        Assumptions.assumeTrue(MiddlewareAvailable.check(), "中间件未启动，跳过");
+        MiddlewareAvailable.require();
         run = BenchRun.start("IT-TIMEOUT");
     }
 
@@ -138,8 +138,8 @@ class TimeoutTransferIT {
         assertEquals(ErrandStatus.PUBLISHED, after.status());
         assertNull(after.grabberId());
         assertEquals(0, after.slotTaken(), "名额必须归还");
-        assertEquals(-1L, grabSlotPort.remainingSlot(errandId),
-                "回退后应丢弃旧 Redis 名额，下一次交给数据库 CAS 裁决");
+        assertEquals(1L, grabSlotPort.remainingSlot(errandId),
+                "回退后应重建名额键（1 个名额），抢单重新走 Redis 预占 + DB CAS");
         assertEquals(1, jdbc.queryForObject("""
                 SELECT COUNT(*) FROM credit_event
                  WHERE biz_no = ? AND user_id = 2011

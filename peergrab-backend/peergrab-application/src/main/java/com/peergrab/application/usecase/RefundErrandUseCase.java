@@ -89,6 +89,10 @@ public class RefundErrandUseCase {
         }
         Errand errand = errandRepository.findById(errandId)
                 .orElseThrow(() -> new BizException(ErrorCode.ERRAND_NOT_FOUND, "id=" + errandId));
+        if (errand.publisherId() == operatorId
+                || (errand.grabberId() != null && errand.grabberId() == operatorId)) {
+            throw new BizException(ErrorCode.ROLE_NOT_ALLOWED, "仲裁员不能裁决自己是当事人的争议");
+        }
         if (errand.status() == ErrandStatus.REFUNDED) return existingRefundResult(errand);
         if (errand.status() != ErrandStatus.DISPUTED) {
             throw new BizException(ErrorCode.NOT_ARBITRABLE, "status=" + errand.status());
@@ -158,6 +162,7 @@ public class RefundErrandUseCase {
         errandRepository.appendStatusLog(errandId, from, to, errand.round(), operatorId);
 
         WalletAccount escrowAccount = walletRepository.findByOwner(ESCROW_ACCOUNT_OWNER, AccountType.ESCROW).orElseThrow();
+        walletRepository.ensureUserAccount(escrow.publisherId());
         WalletAccount publisherAccount = walletRepository.findByOwner(escrow.publisherId(), AccountType.USER).orElseThrow();
 
         WalletPosting.post(walletRepository, idGenerator, bizNo, LedgerEntry.RefType.REFUND,

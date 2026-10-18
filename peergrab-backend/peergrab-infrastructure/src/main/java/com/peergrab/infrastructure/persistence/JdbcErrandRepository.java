@@ -53,7 +53,8 @@ public class JdbcErrandRepository implements ErrandRepository {
             rs.getTimestamp("locked_at") == null ? null : rs.getTimestamp("locked_at").toInstant(),
             rs.getTimestamp("delivered_at") == null ? null : rs.getTimestamp("delivered_at").toInstant(),
             rs.getTimestamp("confirm_deadline_at") == null ? null : rs.getTimestamp("confirm_deadline_at").toInstant(),
-            rs.getTimestamp("auto_settle_deadline_at") == null ? null : rs.getTimestamp("auto_settle_deadline_at").toInstant());
+            rs.getTimestamp("auto_settle_deadline_at") == null ? null : rs.getTimestamp("auto_settle_deadline_at").toInstant(),
+            rs.getInt("transfer_count"));
 
     @Override
     public void insert(Errand errand) {
@@ -152,6 +153,7 @@ public class JdbcErrandRepository implements ErrandRepository {
                 UPDATE errand
                    SET grabber_id = ?,
                        round = round + 1,
+                       transfer_count = transfer_count + 1,
                        locked_at = NOW(3),
                        confirm_deadline_at = DATE_ADD(NOW(3), INTERVAL ? SECOND),
                        version = version + 1
@@ -169,6 +171,7 @@ public class JdbcErrandRepository implements ErrandRepository {
                        grabber_id = NULL,
                        slot_taken = GREATEST(slot_taken - 1, 0),
                        round = round + 1,
+                       transfer_count = 0,
                        locked_at = NULL,
                        confirm_deadline_at = NULL,
                        version = version + 1
@@ -193,19 +196,19 @@ public class JdbcErrandRepository implements ErrandRepository {
      * 任务不能永久卡在 LOCKED 让资金一直冻结。
      */
     @Override
-    public List<Errand> findConfirmTimeout(long timeoutSeconds, int limit) {
+    public List<Errand> findConfirmTimeout(long graceSeconds, int limit) {
         return jdbc.query("""
                 SELECT * FROM errand
                  WHERE status = 'LOCKED'
                    AND confirm_deadline_at <= DATE_SUB(NOW(3), INTERVAL ? SECOND)
                  ORDER BY confirm_deadline_at, id
                  LIMIT ?
-                """, MAPPER, timeoutSeconds, limit);
+                """, MAPPER, graceSeconds, limit);
     }
 
     @Override
-    public List<Errand> findConfirmTimeoutAfter(long timeoutSeconds, Instant afterAt, long afterId, int limit) {
-        if (afterAt == null) return findConfirmTimeout(timeoutSeconds, limit);
+    public List<Errand> findConfirmTimeoutAfter(long graceSeconds, Instant afterAt, long afterId, int limit) {
+        if (afterAt == null) return findConfirmTimeout(graceSeconds, limit);
         Timestamp after = Timestamp.from(afterAt);
         return jdbc.query("""
                 SELECT * FROM errand
@@ -214,7 +217,7 @@ public class JdbcErrandRepository implements ErrandRepository {
                    AND (confirm_deadline_at > ? OR (confirm_deadline_at = ? AND id > ?))
                  ORDER BY confirm_deadline_at, id
                  LIMIT ?
-                """, MAPPER, timeoutSeconds, after, after, afterId, limit);
+                """, MAPPER, graceSeconds, after, after, afterId, limit);
     }
 
     @Override
@@ -240,10 +243,9 @@ public class JdbcErrandRepository implements ErrandRepository {
 
     /**
      * 结算：DELIVERED -> SETTLED。
-     * 这里不带 version 条件而只带 status，是有意的：
-     * 自动结算与人工确认可能并发，两者读到的 version 可能都是旧的。
-     * 状态和版本 CAS 使其中一个失败；资金幂等还有 escrow 状态 CAS
-     * 与 ledger 唯一索引两道保护。
+     * 状态 + version 双条件 CAS：自动结算与人工确认并发时只有一个能成功；
+     * 资金幂等还有 escrow 状态 CAS 与 ledger 唯一索引两道保护。
+     * （此前注释写成"只带 status"，与实现不符，已按实际 SQL 修正。）
      */
     @Override
     public int casSettle(long errandId, long expectedVersion) {
@@ -303,19 +305,19 @@ public class JdbcErrandRepository implements ErrandRepository {
 
     /** 自动结算扫描：走 idx_auto_settle_deadline(status, auto_settle_deadline_at, id) */
     @Override
-    public List<Errand> findAutoSettleDue(long autoSettleSeconds, int limit) {
+    public List<Errand> findAutoSettleDue(long graceSeconds, int limit) {
         return jdbc.query("""
                 SELECT * FROM errand
                  WHERE status = 'DELIVERED'
                    AND auto_settle_deadline_at <= DATE_SUB(NOW(3), INTERVAL ? SECOND)
                  ORDER BY auto_settle_deadline_at, id
                  LIMIT ?
-                """, MAPPER, autoSettleSeconds, limit);
+                """, MAPPER, graceSeconds, limit);
     }
 
     @Override
-    public List<Errand> findAutoSettleDueAfter(long autoSettleSeconds, Instant afterAt, long afterId, int limit) {
-        if (afterAt == null) return findAutoSettleDue(autoSettleSeconds, limit);
+    public List<Errand> findAutoSettleDueAfter(long graceSeconds, Instant afterAt, long afterId, int limit) {
+        if (afterAt == null) return findAutoSettleDue(graceSeconds, limit);
         Timestamp after = Timestamp.from(afterAt);
         return jdbc.query("""
                 SELECT * FROM errand
@@ -324,7 +326,7 @@ public class JdbcErrandRepository implements ErrandRepository {
                    AND (auto_settle_deadline_at > ? OR (auto_settle_deadline_at = ? AND id > ?))
                  ORDER BY auto_settle_deadline_at, id
                  LIMIT ?
-                """, MAPPER, autoSettleSeconds, after, after, afterId, limit);
+                """, MAPPER, graceSeconds, after, after, afterId, limit);
     }
 
     @Override

@@ -30,7 +30,9 @@ services:
 
   redis:
     image: redis:7.4-alpine
-    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "noeviction"]
+    # allkeys-lru：缓存/名额/布隆/榜单都是可重建数据，内存打满时宁可淘汰也不能让写命令失败；
+    # 名额键被淘汰时抢单会退化为数据库 CAS（正确性不变）。
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru", "--maxmemory-samples", "10"]
     volumes:
       - peergrab-redis-data:/data
     healthcheck:
@@ -101,6 +103,7 @@ services:
       target: app
     environment:
       JAVA_TOOL_OPTIONS: -Xms128m -Xmx768m
+      TZ: Asia/Shanghai        # 对账/信用校准 cron 按东八区执行
       SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/peer_grab?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai&rewriteBatchedStatements=true
       SPRING_DATASOURCE_USERNAME: peergrab
       SPRING_DATASOURCE_PASSWORD: ${PEERGRAB_MYSQL_APP_PASSWORD:?Set PEERGRAB_MYSQL_APP_PASSWORD in .env.prod}
@@ -139,6 +142,7 @@ services:
       target: worker
     environment:
       JAVA_TOOL_OPTIONS: -Xms128m -Xmx512m
+      TZ: Asia/Shanghai        # 数据保留/对账 cron 按东八区执行
       SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/peer_grab?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai
       SPRING_DATASOURCE_USERNAME: peergrab
       SPRING_DATASOURCE_PASSWORD: ${PEERGRAB_MYSQL_APP_PASSWORD:?Set PEERGRAB_MYSQL_APP_PASSWORD in .env.prod}

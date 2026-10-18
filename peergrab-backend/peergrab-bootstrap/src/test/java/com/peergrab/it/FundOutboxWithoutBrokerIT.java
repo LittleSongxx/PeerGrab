@@ -30,7 +30,7 @@ class FundOutboxWithoutBrokerIT {
 
     @Test
     void settlementCommitsAndEventRemainsPendingWhenBrokerIsDown() {
-        Assumptions.assumeTrue(MiddlewareAvailable.check(), "isolated MySQL/Redis required");
+        MiddlewareAvailable.require();
         long publisher = 8_000_000_000L + Math.abs(UUID.randomUUID().getMostSignificantBits() % 500_000_000L);
         long runner = publisher + 500_000_000L;
         jdbc.update("""

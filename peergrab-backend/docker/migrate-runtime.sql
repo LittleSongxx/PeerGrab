@@ -279,3 +279,21 @@ CREATE TABLE IF NOT EXISTS worker_scan_retry (
   PRIMARY KEY (job_type, errand_id),
   KEY idx_scan_retry_due (job_type, next_retry_at, lease_until)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Worker 扫描失败持久重试';
+
+-- ==================== 2026-10 修复：连续递补计数 + 仲裁员零余额账户 ====================
+
+-- 连续递补计数与本轮 round 分离：回退后归零，避免达到上限后候选递补永久失效。
+SET @transfer_count_column_exists = (
+  SELECT COUNT(*) FROM information_schema.columns
+   WHERE table_schema = DATABASE() AND table_name = 'errand' AND column_name = 'transfer_count'
+);
+SET @add_transfer_count_sql = IF(@transfer_count_column_exists = 0,
+  'ALTER TABLE errand ADD COLUMN transfer_count INT NOT NULL DEFAULT 0 COMMENT ''本轮开放以来连续递补次数，回退后归零'' AFTER round',
+  'SELECT 1');
+PREPARE add_transfer_count FROM @add_transfer_count_sql;
+EXECUTE add_transfer_count;
+DEALLOCATE PREPARE add_transfer_count;
+
+-- 仲裁员身份在应用层被禁止参与交易；仍补齐账户行，保证钱包账户模型一致且结算路径不会因缺账户失败。
+INSERT IGNORE INTO wallet_account (id, owner_id, owner_type, available, frozen, version)
+VALUES (9001, 9001, 'USER', 0, 0, 0);

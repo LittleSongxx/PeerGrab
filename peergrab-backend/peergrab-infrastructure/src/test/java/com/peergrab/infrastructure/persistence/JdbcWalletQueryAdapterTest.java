@@ -19,9 +19,13 @@ class JdbcWalletQueryAdapterTest {
         var jdbc = new JdbcTemplate(datasource);
         jdbc.execute("""
                 CREATE TABLE wallet_ledger (
-                  id BIGINT PRIMARY KEY, user_id BIGINT NOT NULL, created_at TIMESTAMP(3) NOT NULL,
-                  direction VARCHAR(8), amount BIGINT, ref_type VARCHAR(24), ref_id BIGINT,
-                  biz_no VARCHAR(64))
+                  id BIGINT PRIMARY KEY, user_id BIGINT NOT NULL, account_id BIGINT NOT NULL,
+                  created_at TIMESTAMP(3) NOT NULL, direction VARCHAR(8), amount BIGINT,
+                  ref_type VARCHAR(24), ref_id BIGINT, biz_no VARCHAR(64))
+                """);
+        jdbc.execute("""
+                CREATE TABLE wallet_account (
+                  id BIGINT PRIMARY KEY, owner_id BIGINT, owner_type VARCHAR(16))
                 """);
         jdbc.execute("CREATE INDEX idx_ledger_user_time ON wallet_ledger(user_id, created_at, id)");
         Instant time = Instant.parse("2026-09-27T02:03:04.123Z");
@@ -35,6 +39,7 @@ class JdbcWalletQueryAdapterTest {
         assertEquals(2, first.size());
         assertEquals(9_223_372_036_854_775_000L, first.get(0).id());
         assertEquals(9_223_372_036_854_774_999L, first.get(1).id());
+        assertEquals("USER", first.get(0).accountType(), "账务视图需要区分流水所在账户类型");
 
         var second = adapter.ledgerByCursor(1001, first.get(1).time(), first.get(1).id(), 2);
         assertEquals(1, second.size());
@@ -43,9 +48,12 @@ class JdbcWalletQueryAdapterTest {
 
     private static void insert(JdbcTemplate jdbc, long id, long userId, Instant time) {
         jdbc.update("""
+                INSERT INTO wallet_account (id, owner_id, owner_type) VALUES (?, ?, 'USER')
+                """, id, userId);
+        jdbc.update("""
                 INSERT INTO wallet_ledger
-                    (id, user_id, created_at, direction, amount, ref_type, ref_id, biz_no)
-                VALUES (?, ?, ?, 'CREDIT', 100, 'SETTLE', ?, ?)
-                """, id, userId, Timestamp.from(time), id, "settle:" + id);
+                    (id, user_id, account_id, created_at, direction, amount, ref_type, ref_id, biz_no)
+                VALUES (?, ?, ?, ?, 'CREDIT', 100, 'SETTLE', ?, ?)
+                """, id, userId, id, Timestamp.from(time), id, "settle:" + id);
     }
 }

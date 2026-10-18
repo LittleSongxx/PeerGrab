@@ -1,5 +1,7 @@
 package com.peergrab.presentation.auth;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -11,6 +13,8 @@ import java.util.Map;
 /** Explicitly enabled credentials for the local demo identities. */
 @Component
 public class DemoLoginPolicy {
+
+    private static final Logger log = LoggerFactory.getLogger(DemoLoginPolicy.class);
 
     private final boolean enabled;
     private final Map<Long, byte[]> passwords;
@@ -33,6 +37,10 @@ public class DemoLoginPolicy {
         if (enabled && (passwords.values().stream().anyMatch(p -> p.length < 8)
                 || new HashSet<>(java.util.List.of(password1001, password2001, password2002, password9001)).size() != 4)) {
             throw new IllegalArgumentException("演示登录启用时，四个身份须各配置不同的至少 8 字符密码");
+        }
+        if (enabled) {
+            log.warn("演示登录已启用：四个固定演示身份（含仲裁员 {}）可用口令登录。"
+                    + "该功能仅用于公开演示；真实业务部署必须关闭并接入正式身份系统。", arbitratorId);
         }
     }
 

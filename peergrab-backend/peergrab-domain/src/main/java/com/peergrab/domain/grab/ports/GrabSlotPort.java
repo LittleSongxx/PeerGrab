@@ -11,6 +11,9 @@ import com.peergrab.domain.grab.model.SlotOutcome;
  */
 public interface GrabSlotPort {
 
+    /** 名额键的生命周期：覆盖任务长期开放的最坏情况；键丢失时由数据库 CAS 兜底。 */
+    long DEFAULT_SLOT_TTL_SECONDS = 7L * 24 * 3600;
+
     /**
      * 原子完成：任务可抢校验 + 名额扣减 + 抢中者写入 + 幂等去重。
      * 这四步必须在一个 Redis Lua 脚本里完成，中间不能被其他客户端插入。

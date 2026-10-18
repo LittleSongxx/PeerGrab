@@ -102,6 +102,51 @@ jobs:
           PEERGRAB_MYSQL_ROOT_PASSWORD: ci-only-root
           PEERGRAB_MYSQL_APP_PASSWORD: ci-only-app
           PEERGRAB_AUTH_JWT_SECRET: ci-only-jwt-secret-with-at-least-thirty-two-bytes
+      - name: Validate observability overlay
+        run: >-
+          docker compose -p peergrab-observability-ci
+          --env-file .env.example
+          -f docker-compose.yaml -f docker-compose.full.yaml
+          -f docker-compose.observability.yaml
+          --profile observability config --quiet
+        working-directory: peergrab-backend/docker
+        env:
+          PEERGRAB_AUTH_DEMO_PASSWORD_1001: ci-only-1001
+          PEERGRAB_AUTH_DEMO_PASSWORD_2001: ci-only-2001
+          PEERGRAB_AUTH_DEMO_PASSWORD_2002: ci-only-2002
+          PEERGRAB_AUTH_DEMO_PASSWORD_9001: ci-only-9001
+      - name: Assert runtime timezone and recoverable Redis policy
+        run: |
+          docker compose -f docker-compose.yaml -f docker-compose.full.yaml \
+            config --format json > /tmp/peergrab-local.json
+          docker compose --env-file .env.prod.example -f docker-compose.prod.yaml \
+            config --format json > /tmp/peergrab-prod.json
+          python3 - <<'PY'
+          import json
+
+          commands = []
+          for path in ("/tmp/peergrab-local.json", "/tmp/peergrab-prod.json"):
+              with open(path, encoding="utf-8") as handle:
+                  services = json.load(handle)["services"]
+              for name in ("app", "worker"):
+                  assert services[name]["environment"]["TZ"] == "Asia/Shanghai", (path, name)
+              command = services["redis"]["command"]
+              if isinstance(command, str):
+                  command = command.split()
+              index = command.index("--maxmemory-policy")
+              assert command[index + 1] == "allkeys-lru", path
+              commands.append(path)
+          print("checked", commands)
+          PY
+        working-directory: peergrab-backend/docker
+        env:
+          PEERGRAB_AUTH_DEMO_PASSWORD_1001: ci-only-1001
+          PEERGRAB_AUTH_DEMO_PASSWORD_2001: ci-only-2001
+          PEERGRAB_AUTH_DEMO_PASSWORD_2002: ci-only-2002
+          PEERGRAB_AUTH_DEMO_PASSWORD_9001: ci-only-9001
+          PEERGRAB_MYSQL_ROOT_PASSWORD: ci-only-root
+          PEERGRAB_MYSQL_APP_PASSWORD: ci-only-app
+          PEERGRAB_AUTH_JWT_SECRET: ci-only-jwt-secret-with-at-least-thirty-two-bytes
       - name: Validate isolated benchmark Compose model
         run: |
           docker compose -p peergrab-bench-ci --env-file bench.env.example \

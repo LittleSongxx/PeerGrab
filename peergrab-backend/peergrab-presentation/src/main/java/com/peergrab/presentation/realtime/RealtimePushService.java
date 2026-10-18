@@ -3,6 +3,7 @@ package com.peergrab.presentation.realtime;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.peergrab.domain.notify.ports.RealtimeNotifier;
+import com.peergrab.shared.RealtimeEvents;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -39,7 +40,7 @@ import jakarta.annotation.PreDestroy;
 public class RealtimePushService implements RealtimeNotifier, MessageListener {
 
     private static final Logger log = LoggerFactory.getLogger(RealtimePushService.class);
-    public static final String CHANNEL = "peergrab:realtime:events";
+    public static final String CHANNEL = RealtimeEvents.CHANNEL;
 
     private final WsSessionRegistry registry;
     private final WsHandler wsHandler;
@@ -62,9 +63,7 @@ public class RealtimePushService implements RealtimeNotifier, MessageListener {
     @Override
     public void errandStatusChanged(long errandId, long publisherId, Long grabberId,
                                     String status, int round) {
-        String msg = encode("errand.status", Map.of("errandId", Long.toString(errandId),
-                "status", Objects.toString(status, ""), "round", round));
-        if (msg == null) return;
+        String msg = RealtimeEvents.errandStatus(errandId, status, round);
         push(publisherId, msg);
         if (grabberId != null && grabberId != publisherId) {
             push(grabberId, msg);
@@ -73,27 +72,12 @@ public class RealtimePushService implements RealtimeNotifier, MessageListener {
 
     @Override
     public void notificationArrived(long userId, long errandId, String type, String content) {
-        String msg = encode("notification.new", Map.of("errandId", Long.toString(errandId),
-                "noticeType", Objects.toString(type, ""), "content", Objects.toString(content, "")));
-        if (msg == null) return;
-        push(userId, msg);
+        push(userId, RealtimeEvents.notification(errandId, type, content));
     }
 
     @Override
     public void creditChanged(long userId, int newScore, int delta, String reason) {
-        String msg = encode("credit.changed", Map.of("score", newScore,
-                "delta", delta, "reason", Objects.toString(reason, "")));
-        if (msg == null) return;
-        push(userId, msg);
-    }
-
-    private String encode(String type, Map<String, Object> payload) {
-        try {
-            return objectMapper.writeValueAsString(Map.of("type", type, "payload", payload));
-        } catch (JsonProcessingException e) {
-            log.warn("实时事件序列化失败 type={}", type, e);
-            return null;
-        }
+        push(userId, RealtimeEvents.creditChanged(newScore, delta, reason));
     }
 
     private void push(long userId, String json) {
@@ -101,7 +85,7 @@ public class RealtimePushService implements RealtimeNotifier, MessageListener {
             dispatcher.execute(() -> {
                 pushLocal(userId, json);
                 try {
-                    redis.convertAndSend(CHANNEL, instanceId + "|" + userId + "|" + json);
+                    redis.convertAndSend(CHANNEL, RealtimeEvents.envelope(instanceId, userId, json));
                 } catch (RuntimeException e) {
                     // Realtime events are best-effort; clients periodically reconcile with MySQL.
                     log.warn("跨节点实时推送失败 userId={}", userId, e);

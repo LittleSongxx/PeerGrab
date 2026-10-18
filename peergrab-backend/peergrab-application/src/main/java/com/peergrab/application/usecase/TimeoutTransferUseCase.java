@@ -7,6 +7,7 @@ import com.peergrab.domain.errand.ports.ErrandRepository;
 import com.peergrab.domain.errand.ports.ErrandQueryPort;
 import com.peergrab.domain.grab.ports.CandidateQueuePort;
 import com.peergrab.domain.grab.ports.GrabSlotPort;
+import com.peergrab.domain.notify.ports.RealtimeNotifier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -51,7 +52,9 @@ public class TimeoutTransferUseCase {
      * 达到上限后直接回退 PUBLISHED 让所有人重新抢，比继续挨个试更合理。
      */
     private final int maxTransferRounds;
+    private final RealtimeNotifier notifier;
 
+    @org.springframework.beans.factory.annotation.Autowired
     public TimeoutTransferUseCase(ErrandRepository errandRepository,
                                   CandidateQueuePort candidateQueue,
                                   GrabSlotPort grabSlotPort,
@@ -62,7 +65,8 @@ public class TimeoutTransferUseCase {
                                   ErrandQueryPort errandQueryPort,
                                   @Value("${peergrab.credit.min-score:40}") int minCreditScore,
                                   @Value("${peergrab.credit.max-ongoing:5}") int maxOngoing,
-                                  @Value("${peergrab.timeout.max-transfer-rounds:5}") int maxTransferRounds) {
+                                  @Value("${peergrab.timeout.max-transfer-rounds:5}") int maxTransferRounds,
+                                  RealtimeNotifier notifier) {
         this.errandRepository = errandRepository;
         this.candidateQueue = candidateQueue;
         this.grabSlotPort = grabSlotPort;
@@ -74,6 +78,30 @@ public class TimeoutTransferUseCase {
         this.minCreditScore = minCreditScore;
         this.maxOngoing = maxOngoing;
         this.maxTransferRounds = maxTransferRounds;
+        this.notifier = notifier;
+    }
+
+    /** 单测便捷构造：默认使用空实时通知实现。 */
+    TimeoutTransferUseCase(ErrandRepository errandRepository,
+                           CandidateQueuePort candidateQueue,
+                           GrabSlotPort grabSlotPort,
+                           TimeoutMessageDispatcher messageDispatcher,
+                           TimeoutTransferStep step,
+                           CacheEvictSupport cacheEvict,
+                           CreditRepository creditRepository,
+                           ErrandQueryPort errandQueryPort,
+                           int minCreditScore,
+                           int maxOngoing,
+                           int maxTransferRounds) {
+        this(errandRepository, candidateQueue, grabSlotPort, messageDispatcher, step, cacheEvict,
+                creditRepository, errandQueryPort, minCreditScore, maxOngoing, maxTransferRounds,
+                new RealtimeNotifier() {
+                    @Override public void errandStatusChanged(long errandId, long publisherId, Long grabberId,
+                                                              String status, int round) { }
+                    @Override public void notificationArrived(long userId, long errandId, String type,
+                                                              String content) { }
+                    @Override public void creditChanged(long userId, int newScore, int delta, String reason) { }
+                });
     }
 
     public enum Outcome {
@@ -108,10 +136,11 @@ public class TimeoutTransferUseCase {
             return Outcome.SKIPPED;
         }
 
-        // 超过最大流转轮次：不再逐个试候选人，直接回退让所有人重新抢
-        if (errand.round() >= maxTransferRounds) {
-            log.info("流转轮次已达上限 errandId={} round={} max={}，回退重新开放",
-                    errandId, errand.round(), maxTransferRounds);
+        // 超过连续递补上限：不再逐个试候选人，直接回退让所有人重新抢。
+        // 计数在回退时归零，回退后重新抢单的任务仍可正常递补候选。
+        if (errand.transferCount() >= maxTransferRounds) {
+            log.info("连续递补次数已达上限 errandId={} transferCount={} max={}，回退重新开放",
+                    errandId, errand.transferCount(), maxTransferRounds);
             return revertAndReturnSlot(errand);
         }
 
@@ -164,6 +193,12 @@ public class TimeoutTransferUseCase {
             }
             cacheEvict.evictAfterCommit(errandId);
             messageDispatcher.dispatch(result.pendingSend());
+            notifyRealtime(() -> {
+                notifier.errandStatusChanged(errandId, errand.publisherId(), nextRunner,
+                        ErrandStatus.LOCKED.name(), expectedRound + 1);
+                notifier.notificationArrived(nextRunner, errandId, "TRANSFERRED",
+                        "任务已递补给你，请在确认时限内接单");
+            });
             log.info("任务已流转 errandId={} round={} -> nextRunner={}",
                     errandId, expectedRound + 1, nextRunner);
             return Outcome.TRANSFERRED;
@@ -199,6 +234,13 @@ public class TimeoutTransferUseCase {
         } catch (RuntimeException e) {
             log.warn("回退后 Redis 名额失效失败，后续由数据库 CAS 兜底 errandId={}", errand.id(), e);
         }
+        // 重新开放后重建名额键：否则二次开放的热点任务会一直走 SLOT_MISSING→数据库 CAS，
+        // 丢失 Redis 削峰能力（正确性仍由数据库保证）。
+        try {
+            grabSlotPort.initSlot(errand.id(), errand.slotTotal(), GrabSlotPort.DEFAULT_SLOT_TTL_SECONDS);
+        } catch (RuntimeException e) {
+            log.warn("回退后 Redis 名额重建失败，后续抢单走数据库 CAS errandId={}", errand.id(), e);
+        }
         try {
             candidateQueue.clear(errand.id());
         } catch (RuntimeException e) {
@@ -210,7 +252,22 @@ public class TimeoutTransferUseCase {
         } catch (RuntimeException e) {
             log.warn("任务已回退，详情缓存失效失败 errandId={}", errand.id(), e);
         }
+        notifyRealtime(() -> {
+            notifier.errandStatusChanged(errand.id(), errand.publisherId(), null,
+                    ErrandStatus.PUBLISHED.name(), errand.round() + 1);
+            notifier.notificationArrived(errand.publisherId(), errand.id(), "REVERTED",
+                    "上一位跑腿未及时确认，任务已重新开放");
+        });
         return Outcome.REVERTED;
+    }
+
+    /** 实时通知是体验优化：失败只告警，客户端仍会通过轮询看到已提交的状态。 */
+    private void notifyRealtime(Runnable action) {
+        try {
+            action.run();
+        } catch (RuntimeException e) {
+            log.warn("任务已流转/回退但实时推送失败，客户端将轮询同步", e);
+        }
     }
 
     /** 抢单成功后登记首轮超时消息，供 GrabErrandUseCase 在事务提交后调用 */

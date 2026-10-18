@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api } from '../api';
+import { api, getRole } from '../api';
 import type { ErrandCard } from '../api';
 import ErrandCardView from '../components/ErrandCard';
 import UiIcon from '../components/UiIcon';
@@ -91,6 +91,8 @@ export default function Square() {
     }
   };
 
+  // 仲裁员不参与发布/抢单：发布入口隐藏（抢单按钮由后端 availableActions 决定）
+  const isArbitrator = getRole() === 'ARBITRATOR';
   const availableCount = cards.filter((card) => card.availableActions.includes('GRAB')).length;
   const visibleCards = useMemo(() => {
     const keyword = query.trim().toLocaleLowerCase();
@@ -122,7 +124,8 @@ export default function Square() {
           try {
             const resp = await fetch(`/api/errands/${errandId}/grab`, {
               method: 'POST',
-              headers: { 'Authorization': `Bearer ${credential.token}` },
+              // 每次并发抢单是独立请求，各自带幂等键（同一请求重试才复用）
+              headers: { 'Authorization': `Bearer ${credential.token}`, 'X-Request-Id': crypto.randomUUID() },
             });
             const body = await resp.json();
             return {
@@ -162,7 +165,7 @@ export default function Square() {
           <button type="button" className="btn btn-secondary" onClick={load} disabled={loading || loadingMore}>
             <UiIcon name="refresh" size={16} /> {loading ? '正在刷新…' : '刷新任务'}
           </button>
-          <a className="btn btn-primary" href="#/publish"><UiIcon name="plus" size={16} /> 发布任务</a>
+          {!isArbitrator && <a className="btn btn-primary" href="#/publish"><UiIcon name="plus" size={16} /> 发布任务</a>}
         </div>
       </header>
 
@@ -243,9 +246,11 @@ export default function Square() {
           <div className="empty-state square-empty">
             <span className="empty-state__icon" aria-hidden="true">⌕</span>
             <h3>{cards.length === 0 ? '暂时没有开放任务' : '没有找到匹配的任务'}</h3>
-            <p>{cards.length === 0 ? '发布第一条任务，让校园里的互助从这里开始。' : '试试其他关键词，或查看全部任务。'}</p>
+            <p>{cards.length === 0
+              ? (isArbitrator ? '仲裁员身份不参与发布任务。' : '发布第一条任务，让校园里的互助从这里开始。')
+              : '试试其他关键词，或查看全部任务。'}</p>
             {cards.length === 0
-              ? <a className="btn btn-primary" href="#/publish"><UiIcon name="plus" size={16} /> 发布任务</a>
+              ? (!isArbitrator && <a className="btn btn-primary" href="#/publish"><UiIcon name="plus" size={16} /> 发布任务</a>)
               : <button type="button" className="btn btn-secondary" onClick={() => { setQuery(''); setFilter('all'); }}>清除筛选</button>}
           </div>
         ) : (

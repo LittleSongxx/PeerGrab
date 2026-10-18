@@ -6,11 +6,15 @@ import org.apache.rocketmq.client.apis.message.Message;
 import org.apache.rocketmq.client.apis.producer.Producer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongSupplier;
 
 /**
  * 延迟消息端口的 RocketMQ 实现。
@@ -31,10 +35,37 @@ public class RocketMqDelayMessageAdapter implements DelayMessagePort {
 
     private final ClientServiceProvider provider;
     private final Producer producer;
+    private final long failureCooldownMillis;
+    private final LongSupplier clock;
+    private final AtomicLong unavailableUntil = new AtomicLong();
 
+    /** 便捷构造：默认 5s 故障冷却窗口。 */
     public RocketMqDelayMessageAdapter(ClientServiceProvider provider, Producer producer) {
+        this(provider, producer, 5_000L, System::currentTimeMillis);
+    }
+
+    @Autowired
+    public RocketMqDelayMessageAdapter(ClientServiceProvider provider, Producer producer,
+                                       @Value("${peergrab.mq.failure-cooldown-ms:5000}") long failureCooldownMs) {
+        this(provider, producer, failureCooldownMs, System::currentTimeMillis);
+    }
+
+    /** 测试用时钟注入构造。 */
+    RocketMqDelayMessageAdapter(ClientServiceProvider provider, Producer producer,
+                                long failureCooldownMs, LongSupplier clock) {
         this.provider = provider;
         this.producer = producer;
+        this.failureCooldownMillis = Math.max(0, failureCooldownMs);
+        this.clock = clock;
+    }
+
+    /**
+     * Broker 故障后短期拒发：worker 的重发任务据此快速返回，
+     * 不再一条条等满请求超时，把调度线程让给兜底扫描。
+     */
+    @Override
+    public boolean available() {
+        return clock.getAsLong() >= unavailableUntil.get();
     }
 
     @Override
@@ -53,7 +84,11 @@ public class RocketMqDelayMessageAdapter implements DelayMessagePort {
             var receipt = producer.send(message);
             log.debug("定时消息已投递 msgKey={} msgId={} deliverAt={}", msgKey, receipt.getMessageId(), deliverAt);
         } catch (Exception e) {
-            // 抛 RuntimeException 让上层感知：消息仍是 PENDING，worker 会重发
+            // 抛 RuntimeException 让上层感知：消息仍是 PENDING，worker 会重发；
+            // 同时进入冷却窗口，避免重发任务连续等待请求超时。
+            if (failureCooldownMillis > 0) {
+                unavailableUntil.set(clock.getAsLong() + failureCooldownMillis);
+            }
             throw new IllegalStateException("定时消息发送失败 msgKey=" + msgKey, e);
         }
     }

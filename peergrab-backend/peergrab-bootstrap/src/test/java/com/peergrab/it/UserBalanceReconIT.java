@@ -22,7 +22,7 @@ class UserBalanceReconIT {
 
     @Test
     void userSnapshotDriftIsDetectedAgainstLatestOrderedPosting() {
-        Assumptions.assumeTrue(MiddlewareAvailable.check(), "isolated MySQL/Redis required");
+        MiddlewareAvailable.require();
         long accountId = 8_000_000_000L + Math.abs(UUID.randomUUID().getLeastSignificantBits() % 1_000_000_000L);
         long ledgerId = accountId + 1_000_000_000L;
         try {

@@ -6,7 +6,9 @@ import com.peergrab.domain.wallet.model.LedgerEntry;
 import com.peergrab.domain.wallet.model.WalletAccount;
 import com.peergrab.domain.wallet.ports.WalletRepository;
 import com.peergrab.shared.Money;
+import com.peergrab.shared.SnowflakeIdGenerator;
 import io.micrometer.core.instrument.MeterRegistry;
+import org.springframework.beans.factory.annotation.Autowired;
 import io.micrometer.core.instrument.Timer;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -28,9 +30,17 @@ public class JdbcWalletRepository implements WalletRepository {
     private final JdbcTemplate jdbc;
     private final Timer accountLockTimer;
     private final Timer ownerLookupTimer;
+    private final SnowflakeIdGenerator idGenerator;
 
+    /** 测试便捷构造：零号雪花节点足够生成不冲突的账户 ID。 */
     public JdbcWalletRepository(JdbcTemplate jdbc, MeterRegistry registry) {
+        this(jdbc, registry, new SnowflakeIdGenerator(0));
+    }
+
+    @Autowired
+    public JdbcWalletRepository(JdbcTemplate jdbc, MeterRegistry registry, SnowflakeIdGenerator idGenerator) {
         this.jdbc = jdbc;
+        this.idGenerator = idGenerator;
         this.accountLockTimer = Timer.builder("peergrab.wallet.account.lock")
                 .description("Time to fetch and lock all participating wallet rows, including SQL and lock wait")
                 .serviceLevelObjectives(Duration.ofMillis(1), Duration.ofMillis(5),
@@ -168,6 +178,30 @@ public class JdbcWalletRepository implements WalletRepository {
                 }
             }
         }
+        // 驱动可能返回 -2（未知影响行数），因此再回读一次锁定版本，
+        // 把"批量更新是否真的按期望落地"变成可验证事实，而不是信任驱动返回值。
+        verifyAccountUpdates(updates);
+    }
+
+    private void verifyAccountUpdates(List<WalletRepository.AccountUpdate> updates) {
+        if (updates == null || updates.isEmpty()) return;
+        String placeholders = String.join(",",
+                java.util.Collections.nCopies(updates.size(), "?"));
+        Map<Long, WalletAccount> current = new LinkedHashMap<>();
+        for (WalletAccount account : jdbc.query(
+                "SELECT * FROM wallet_account WHERE id IN (" + placeholders + ") ORDER BY id",
+                MAPPER, updates.stream().map(WalletRepository.AccountUpdate::accountId).toArray())) {
+            current.put(account.id(), account);
+        }
+        for (WalletRepository.AccountUpdate update : updates) {
+            WalletAccount account = current.get(update.accountId());
+            if (account == null
+                    || account.available().cents() != update.availableCents()
+                    || account.version() != update.version()) {
+                throw new IllegalStateException(
+                        "wallet account batch update verification failed account=" + update.accountId());
+            }
+        }
     }
 
     @Override
@@ -218,6 +252,19 @@ public class JdbcWalletRepository implements WalletRepository {
                 """,
                 order.id(), order.campusId(), order.errandId(), order.publisherId(),
                 order.amount().cents(), order.status().name());
+    }
+
+    /**
+     * INSERT ... ON DUPLICATE KEY UPDATE 以 uk_owner(owner_id, owner_type) 作为幂等键，
+     * 并发/重复调用只会保留一条账户行；余额始终为 0，不影响对账。
+     */
+    @Override
+    public void ensureUserAccount(long userId) {
+        jdbc.update("""
+                INSERT INTO wallet_account (id, owner_id, owner_type, available, frozen, version)
+                VALUES (?, ?, 'USER', 0, 0, 0)
+                ON DUPLICATE KEY UPDATE owner_id = owner_id
+                """, idGenerator.nextId(), userId);
     }
 
     @Override

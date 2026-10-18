@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useState, type FormEvent } from 'react';
 import { useHashRoute } from './router';
-import { getUserId, login, logout } from './api';
+import { getRole, getUserId, login, logout } from './api';
 import { IDENTITIES, demoPasswordFor } from './identity';
 import UiIcon from './components/UiIcon';
 import TopBar from './components/TopBar';
@@ -145,7 +145,7 @@ export default function App() {
 
   let page;
   if (route.startsWith('/detail/')) {
-    page = <Detail errandId={route.split('/')[2]} onIdentityChange={setUserId} />;
+    page = <Detail errandId={route.split('/')[2]} />;
   } else if (route === '/publish') {
     page = <Publish />;
   } else if (route === '/mine') {
@@ -162,7 +162,7 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <TopBar route={route} userId={userId} onLogout={signOut} />
+      <TopBar route={route} userId={userId} onLogout={signOut} role={getRole()} />
       <main className="main" id="main-content"><div className="page-container">
         <Suspense fallback={<div className="loading-state" role="status">正在加载页面…</div>}>
           {page}

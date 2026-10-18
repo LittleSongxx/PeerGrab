@@ -38,7 +38,11 @@ class ErrandStatusMachineTest {
     @Test
     @DisplayName("终态没有任何出边")
     void terminalStatesHaveNoOutgoing() {
-        assertTrue(ErrandStatus.CLOSED.allowedTargets().isEmpty());
+        assertTrue(ErrandStatus.SETTLED.allowedTargets().isEmpty());
+        assertTrue(ErrandStatus.REFUNDED.allowedTargets().isEmpty());
         assertTrue(ErrandStatus.CANCELLED.allowedTargets().isEmpty());
+        // 已有人接单后不能由发单人单方面取消：状态机不再声明 CANCELLED 出边。
+        assertFalse(ErrandStatus.LOCKED.canTransitTo(ErrandStatus.CANCELLED));
+        assertFalse(ErrandStatus.ACCEPTED.canTransitTo(ErrandStatus.CANCELLED));
     }
 }

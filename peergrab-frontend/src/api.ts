@@ -10,9 +10,17 @@ export interface ApiResult<T> {
   data: T;
 }
 
+/** 登录响应里的服务端角色：仲裁员与普通用户；未知/旧值一律按 null 处理 */
+export type UserRole = 'ARBITRATOR' | 'USER';
+
+function normalizeRole(value: unknown): UserRole | null {
+  return value === 'ARBITRATOR' || value === 'USER' ? value : null;
+}
+
 let token: string | null = localStorage.getItem('peergrab_token');
 let currentUserId: number | null = JSON.parse(localStorage.getItem('peergrab_user') || 'null');
 let refreshToken: string | null = localStorage.getItem('peergrab_refresh');
+let role: UserRole | null = normalizeRole(localStorage.getItem('peergrab_role'));
 let refreshInFlight: Promise<boolean> | null = null;
 let authGeneration = 0;
 
@@ -20,10 +28,13 @@ export interface DemoCredentials {
   token: string;
   refreshToken?: string;
   userId: number;
+  role?: UserRole;
 }
 
 export function getToken() { return token; }
 export function getUserId() { return currentUserId; }
+/** 当前登录角色；未登录或后端未返回时为 null（按普通用户处理） */
+export function getRole(): UserRole | null { return role; }
 
 /** Request a demo token without changing the current browser identity. */
 export async function issueDemoCredentials(userId: number, password: string): Promise<DemoCredentials> {
@@ -43,10 +54,13 @@ export async function login(userId: number, password: string): Promise<string> {
   token = credentials.token;
   refreshToken = credentials.refreshToken ?? null;
   currentUserId = userId;
+  role = normalizeRole(credentials.role);
   localStorage.setItem('peergrab_token', token!);
   localStorage.setItem('peergrab_user', JSON.stringify(userId));
   if (refreshToken) localStorage.setItem('peergrab_refresh', refreshToken);
   else localStorage.removeItem('peergrab_refresh');
+  if (role) localStorage.setItem('peergrab_role', role);
+  else localStorage.removeItem('peergrab_role');
   return token!;
 }
 
@@ -55,9 +69,11 @@ function clearLocalAuth() {
   token = null;
   refreshToken = null;
   currentUserId = null;
+  role = null;
   localStorage.removeItem('peergrab_token');
   localStorage.removeItem('peergrab_refresh');
   localStorage.removeItem('peergrab_user');
+  localStorage.removeItem('peergrab_role');
   window.dispatchEvent(new Event('peergrab:auth-changed'));
 }
 
@@ -90,6 +106,11 @@ async function renewSession(): Promise<boolean> {
     })().finally(() => { refreshInFlight = null; });
   }
   return refreshInFlight;
+}
+
+/** 供 WebSocket 等非 request 链路复用：仅在存在 refresh token 时尝试刷新 */
+export function refreshSession(): Promise<boolean> {
+  return renewSession();
 }
 
 /** Invalidate both server credentials, then clear local state even when offline. */
@@ -188,6 +209,12 @@ export interface CreditRankEntry {
   score: number;
 }
 
+/** 钱包流水：accountType 区分个人钱包与平台账户（USER / ESCROW / COMMISSION） */
+export interface LedgerEntry {
+  id: string; time: string; direction: string; amountCents: number;
+  refType: string; refId: string; bizNo: string; accountType: string;
+}
+
 export const api = {
   health: () => request<{ status: string }>('/api/health'),
   list: (campusId = 1, status?: string) =>
@@ -204,24 +231,21 @@ export const api = {
   publish: (req: { title: string; rewardCents: number; slotTotal: number; type?: string }, requestId: string) =>
     request<{ errandId: string; status: string }>('/api/errands', 'POST', req,
       { 'X-Request-Id': requestId }),
-  grab: (id: string) =>
-    request<{ code: string; grabbed: boolean }>(`/api/errands/${id}/grab`, 'POST'),
+  // 抢单：requestId 用于幂等，网络失败重试时复用同一个值
+  grab: (id: string, requestId?: string) =>
+    request<{ code: string; grabbed: boolean }>(`/api/errands/${id}/grab`, 'POST', undefined,
+      requestId ? { 'X-Request-Id': requestId } : undefined),
+  // settle/cancel 成功时 data 是 { result: 'SETTLED' | 'ALREADY_SETTLED' | ... }
   action: (id: string, name: 'confirm' | 'pickup' | 'deliver' | 'settle' | 'cancel' | 'dispute') =>
-    request<unknown>(`/api/errands/${id}/${name}`, 'POST'),
+    request<{ result?: string } | null>(`/api/errands/${id}/${name}`, 'POST'),
   arbitrate: (id: string, favor: 'RUNNER' | 'PUBLISHER') =>
     request<{ result: string }>(`/api/errands/${id}/arbitrate`, 'POST', { favor }),
   wallet: () => request<{ availableCents: number; frozenCents: number }>('/api/wallet'),
-  ledger: () => request<{
-    id: string; time: string; direction: string; amountCents: number;
-    refType: string; refId: string; bizNo: string;
-  }[]>('/api/wallet/ledger'),
+  ledger: () => request<LedgerEntry[]>('/api/wallet/ledger'),
   ledgerByCursor: (cursor = '', size = 20) => {
     const params = new URLSearchParams({ cursor, size: String(size) });
-    return request<{
-      items: { id: string; time: string; direction: string; amountCents: number;
-               refType: string; refId: string; bizNo: string }[];
-      nextCursor: string;
-    }>(`/api/wallet/ledger?${params.toString()}`);
+    return request<{ items: LedgerEntry[]; nextCursor: string }>(
+      `/api/wallet/ledger?${params.toString()}`);
   },
   notifications: () => request<{
     id: string; errandId: string; type: string; content: string; time: string; read: boolean;
@@ -241,7 +265,7 @@ export function yuan(cents: number): string {
 export const STATUS_TEXT: Record<string, string> = {
   DRAFT: '草稿', PUBLISHED: '待抢单', LOCKED: '待确认', ACCEPTED: '待取货',
   PICKED_UP: '配送中', DELIVERED: '待确认完成', SETTLED: '已结算',
-  CLOSED: '已关闭', CANCELLED: '已取消', DISPUTED: '争议中', REFUNDED: '已退款',
+  CANCELLED: '已取消', DISPUTED: '争议中', REFUNDED: '已退款',
 };
 
 export const ACTION_TEXT: Record<string, string> = {

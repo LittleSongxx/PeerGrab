@@ -5,6 +5,7 @@ import com.peergrab.domain.errand.ports.ErrandRepository;
 import com.peergrab.domain.errand.ports.RunnerQuotaPort;
 import com.peergrab.domain.grab.model.GrabRecord;
 import com.peergrab.domain.grab.ports.GrabRecordRepository;
+import com.peergrab.domain.wallet.ports.WalletRepository;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -22,15 +23,18 @@ public class GrabTransactionalStep {
     private final ErrandRepository errandRepository;
     private final GrabRecordRepository grabRecordRepository;
     private final RunnerQuotaPort runnerQuotaPort;
+    private final WalletRepository walletRepository;
     private final int maxOngoing;
 
     public GrabTransactionalStep(ErrandRepository errandRepository,
                                  GrabRecordRepository grabRecordRepository,
                                  RunnerQuotaPort runnerQuotaPort,
+                                 WalletRepository walletRepository,
                                  @org.springframework.beans.factory.annotation.Value("${peergrab.credit.max-ongoing:5}") int maxOngoing) {
         this.errandRepository = errandRepository;
         this.grabRecordRepository = grabRecordRepository;
         this.runnerQuotaPort = runnerQuotaPort;
+        this.walletRepository = walletRepository;
         this.maxOngoing = maxOngoing;
     }
 
@@ -50,6 +54,8 @@ public class GrabTransactionalStep {
             // 状态已被别人改掉，说明这个名额被别人抢走了
             return LockResult.CONFLICT;
         }
+        // 抢中即占用额度，同时保证收款账户存在：结算时不会再因缺账户而让任务中毒。
+        walletRepository.ensureUserAccount(runnerId);
         try {
             grabRecordRepository.insert(GrabRecord.grabbed(recordId, campusId, errandId, runnerId,
                     seq, round, requestId));

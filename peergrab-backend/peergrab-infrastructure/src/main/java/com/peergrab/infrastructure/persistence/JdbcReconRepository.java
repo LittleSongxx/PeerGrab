@@ -127,10 +127,4 @@ public class JdbcReconRepository implements ReconRepository {
         }
     }
 
-    @Override
-    public int countDiffs(LocalDate date) {
-        Integer n = jdbc.queryForObject(
-                "SELECT COUNT(*) FROM recon_diff WHERE check_date = ?", Integer.class, date);
-        return n == null ? 0 : n;
-    }
 }

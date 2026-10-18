@@ -6,10 +6,9 @@ import { subscribeWs } from '../ws';
 
 interface Props {
   errandId: string;
-  onIdentityChange: (id: number) => void;
 }
 
-const TERMINAL = new Set(['SETTLED', 'CLOSED', 'CANCELLED', 'REFUNDED']);
+const TERMINAL = new Set(['SETTLED', 'CANCELLED', 'REFUNDED']);
 const ROLE_TEXT: Record<string, string> = {
   PUBLISHER: '发单人', CURRENT_RUNNER: '当前跑腿', ARBITRATOR: '仲裁员', VIEWER: '访客',
 };
@@ -25,12 +24,21 @@ const STATUS_HINT: Record<string, string> = {
   DELIVERED: '跑腿已送达，等待发单人确认完成。',
   SETTLED: '任务已完成，悬赏已结算。',
   CANCELLED: '任务已取消，悬赏将退回发单人。',
-  CLOSED: '任务已关闭。',
   DISPUTED: '任务正在仲裁，资金暂时保持托管。',
   REFUNDED: '任务已退款，悬赏已退回发单人。',
 };
 
-export default function Detail({ errandId, onIdentityChange }: Props) {
+/** 仲裁成功的两种结果；其他值（ALREADY_DONE / CONFLICT 等）按未完成提示 */
+const ARBITRATE_RESULT_TEXT: Record<string, string> = {
+  SETTLED_TO_RUNNER: '支持跑腿，资金已结算',
+  REFUNDED_TO_PUBLISHER: '支持发单人，资金已退回',
+};
+const ARBITRATE_UNFINISHED_TEXT: Record<string, string> = {
+  ALREADY_DONE: '该任务已被处理，本次仲裁未改动资金',
+  CONFLICT: '任务状态已变化，请刷新后重试',
+};
+
+export default function Detail({ errandId }: Props) {
   const [card, setCard] = useState<ErrandCard | null>(null);
   const [timeline, setTimeline] = useState<StatusChange[]>([]);
   const [detailError, setDetailError] = useState<string | null>(null);
@@ -76,8 +84,14 @@ export default function Detail({ errandId, onIdentityChange }: Props) {
     try {
       const r = await api.arbitrate(errandId, favor);
       window.dispatchEvent(new Event('peergrab:wallet-changed'));
-      setActionNotice({ kind: 'success', text: `仲裁完成：${r.result === 'SETTLED_TO_RUNNER' ? '支持跑腿，资金已结算' : '支持发单人，资金已退回'}` });
-      setArbitrating(false);
+      const outcome = ARBITRATE_RESULT_TEXT[r.result];
+      if (outcome) {
+        setActionNotice({ kind: 'success', text: `仲裁完成：${outcome}` });
+        setArbitrating(false);
+      } else {
+        // 非成功结果按错误展示，避免把“未生效”误报成仲裁完成
+        setActionNotice({ kind: 'error', text: `仲裁未完成：${ARBITRATE_UNFINISHED_TEXT[r.result] || r.result || '未知结果'}` });
+      }
       load();
     } catch (e) {
       setActionNotice({ kind: 'error', text: e instanceof BizError ? `${e.message}（${e.code}）` : '网络错误，请稍后重试。' });

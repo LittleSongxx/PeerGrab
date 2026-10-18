@@ -5,6 +5,7 @@ import com.peergrab.domain.errand.model.Errand;
 import com.peergrab.domain.errand.model.ErrandStatus;
 import com.peergrab.domain.errand.ports.ErrandQueryPort;
 import com.peergrab.domain.errand.ports.ErrandRepository;
+import com.peergrab.application.usecase.security.ActorRolePolicy;
 import com.peergrab.domain.notify.ports.RealtimeNotifier;
 import com.peergrab.domain.grab.model.SlotOutcome;
 import com.peergrab.domain.grab.ports.CandidateQueuePort;
@@ -53,7 +54,9 @@ public class GrabErrandUseCase {
     private final RealtimeNotifier notifier;
     private final GrabRateLimiterPort rateLimiter;
     private final GrabPhaseMetrics metrics;
+    private final ActorRolePolicy rolePolicy;
 
+    @org.springframework.beans.factory.annotation.Autowired
     public GrabErrandUseCase(GrabSlotPort grabSlotPort,
                              GrabRecordRepository grabRecordRepository,
                              CandidateQueuePort candidateQueue,
@@ -68,7 +71,8 @@ public class GrabErrandUseCase {
                               @org.springframework.beans.factory.annotation.Value("${peergrab.credit.max-ongoing:5}") int maxOngoing,
                               RealtimeNotifier notifier,
                               GrabRateLimiterPort rateLimiter,
-                              GrabPhaseMetrics metrics) {
+                              GrabPhaseMetrics metrics,
+                              ActorRolePolicy rolePolicy) {
         this.grabSlotPort = grabSlotPort;
         this.grabRecordRepository = grabRecordRepository;
         this.candidateQueue = candidateQueue;
@@ -84,6 +88,28 @@ public class GrabErrandUseCase {
         this.notifier = notifier;
         this.rateLimiter = rateLimiter;
         this.metrics = metrics;
+        this.rolePolicy = rolePolicy;
+    }
+
+    /** 单测便捷构造：默认仲裁员 ID 与演示环境一致。 */
+    GrabErrandUseCase(GrabSlotPort grabSlotPort,
+                      GrabRecordRepository grabRecordRepository,
+                      CandidateQueuePort candidateQueue,
+                      ErrandRepository errandRepository,
+                      GrabTransactionalStep transactionalStep,
+                      SnowflakeIdGenerator idGenerator,
+                      TimeoutTransferUseCase timeoutTransferUseCase,
+                      CacheEvictSupport cacheEvict,
+                      CreditRepository creditRepository,
+                      ErrandQueryPort errandQueryPort,
+                      int minCreditScore,
+                      int maxOngoing,
+                      RealtimeNotifier notifier,
+                      GrabRateLimiterPort rateLimiter,
+                      GrabPhaseMetrics metrics) {
+        this(grabSlotPort, grabRecordRepository, candidateQueue, errandRepository, transactionalStep,
+                idGenerator, timeoutTransferUseCase, cacheEvict, creditRepository, errandQueryPort,
+                minCreditScore, maxOngoing, notifier, rateLimiter, metrics, new ActorRolePolicy(9001L));
     }
 
     /**
@@ -110,6 +136,10 @@ public class GrabErrandUseCase {
     public Result grab(Command cmd) {
         if (cmd.requestId() == null || cmd.requestId().isBlank() || cmd.requestId().length() > 128) {
             return Result.failed(ErrorCode.INVALID_ARGUMENT, null);
+        }
+        // 仲裁员不能参与交易，否则可能成为自己案件的当事人。
+        if (rolePolicy.isArbitrator(cmd.runnerId())) {
+            return Result.failed(ErrorCode.ROLE_NOT_ALLOWED, null);
         }
 
         // L1：热点任务限流。放在所有下游调用之前，避免过热任务继续消耗 Redis 与 DB。
@@ -190,20 +220,25 @@ public class GrabErrandUseCase {
             case ALREADY_GRABBED -> {
                 Errand current = metrics.time(TASK_READ,
                         () -> errandRepository.findById(cmd.errandId()).orElse(null));
-                return current != null && current.status() == ErrandStatus.PUBLISHED
-                        ? Result.failed(ErrorCode.GRAB_CONFLICT, null)
-                        : Result.failed(ErrorCode.ALREADY_GRABBED, null);
+                if (current != null && current.status() == ErrandStatus.PUBLISHED) {
+                    // 数据库说任务可抢、Redis 却把这个用户记成"已抢"：典型是上次 Lua 预占后
+                    // 进程崩溃、rollback 没执行。清掉陈旧快照，让下一次请求走数据库 CAS。
+                    healStaleRedisReservation(cmd);
+                    return Result.failed(ErrorCode.GRAB_CONFLICT, null);
+                }
+                return Result.failed(ErrorCode.ALREADY_GRABBED, null);
             }
             case DUPLICATE_REQUEST -> {
                 // Redis 只有预占位，不能把尚未提交的请求回复为成功。
                 Result committed = persistedResult(target.campusId(), cmd);
-                return committed == null ? Result.failed(ErrorCode.GRAB_CONFLICT, null) : committed;
+                if (committed == null) {
+                    healStaleRedisReservation(cmd);
+                    return Result.failed(ErrorCode.GRAB_CONFLICT, null);
+                }
+                return committed;
             }
             case REQUEST_ID_CONFLICT -> {
                 return Result.failed(ErrorCode.DUPLICATE_REQUEST, null);
-            }
-            case NOT_GRABBABLE -> {
-                return Result.failed(ErrorCode.ERRAND_NOT_GRABBABLE, null);
             }
             case ACQUIRED, SLOT_MISSING -> {
                 // 名额键缺失时直接走 L4，不重建可能覆盖并发预占位的 Redis 快照。
@@ -264,6 +299,19 @@ public class GrabErrandUseCase {
     private boolean mayHaveRecordedGrab(Errand errand) {
         // 首次发布且尚未锁定的任务不可能已有成功抢单记录，省掉热点首轮的一次 DB 查询。
         return errand.status() != ErrandStatus.PUBLISHED || errand.round() > 0;
+    }
+
+    /**
+     * DB 已开放但 Redis 快照仍认为该请求/该用户在途时，丢弃陈旧快照。
+     * 只在没有活跃 pending 预占时执行，避免擦掉别的请求正在进行的落库窗口。
+     */
+    private void healStaleRedisReservation(Command cmd) {
+        try {
+            if (grabSlotPort.reservationPending(cmd.errandId())) return;
+            grabSlotPort.invalidate(cmd.errandId());
+        } catch (RuntimeException e) {
+            log.warn("陈旧名额快照清理失败，后续走数据库 CAS errandId={}", cmd.errandId(), e);
+        }
     }
 
     private void rollbackIfReserved(Command cmd, boolean reserved) {

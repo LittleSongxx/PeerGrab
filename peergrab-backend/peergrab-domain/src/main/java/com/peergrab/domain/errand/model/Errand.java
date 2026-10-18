@@ -29,6 +29,8 @@ public class Errand {
     private ErrandStatus status;
     private int slotTaken;
     private int round;
+    /** 本轮开放以来连续递补候选的次数；回退重新开放后归零，避免"轮次上限"永久生效。 */
+    private int transferCount;
     private long version;
     private Instant lockedAt;
     private Instant deliveredAt;
@@ -43,7 +45,7 @@ public class Errand {
     private Errand(long id, long campusId, long publisherId, ErrandType type, String title,
                    Money reward, int slotTotal, Long grabberId, ErrandStatus status,
                    int slotTaken, int round, long version, Instant lockedAt, Instant deliveredAt,
-                   Instant confirmDeadlineAt, Instant autoSettleDeadlineAt) {
+                   Instant confirmDeadlineAt, Instant autoSettleDeadlineAt, int transferCount) {
         this.id = id;
         this.campusId = campusId;
         this.publisherId = publisherId;
@@ -55,6 +57,7 @@ public class Errand {
         this.status = status;
         this.slotTaken = slotTaken;
         this.round = round;
+        this.transferCount = transferCount;
         this.version = version;
         this.lockedAt = lockedAt;
         this.deliveredAt = deliveredAt;
@@ -72,7 +75,7 @@ public class Errand {
             throw new IllegalArgumentException("当前任务模型只支持一个名额");
         }
         return new Errand(id, campusId, publisherId, type, title, reward, slotTotal,
-                null, ErrandStatus.DRAFT, 0, 0, 0L, null, null, null, null);
+                null, ErrandStatus.DRAFT, 0, 0, 0L, null, null, null, null, 0);
     }
 
     /** 从存储重建聚合，不做业务校验（数据已经是既成事实） */
@@ -81,7 +84,7 @@ public class Errand {
                                    ErrandStatus status, int slotTaken, int round, long version,
                                    Instant lockedAt) {
         return new Errand(id, campusId, publisherId, type, title, reward, slotTotal, grabberId,
-                status, slotTaken, round, version, lockedAt, null, null, null);
+                status, slotTaken, round, version, lockedAt, null, null, null, 0);
     }
 
     /** 从存储重建（带送达时间），自动结算扫描需要 deliveredAt */
@@ -90,7 +93,7 @@ public class Errand {
                                    ErrandStatus status, int slotTaken, int round, long version,
                                    Instant lockedAt, Instant deliveredAt) {
         return rehydrate(id, campusId, publisherId, type, title, reward, slotTotal, grabberId,
-                status, slotTaken, round, version, lockedAt, deliveredAt, null, null);
+                status, slotTaken, round, version, lockedAt, deliveredAt, null, null, 0);
     }
 
     /** 持久化截止时间由数据库写入，消息早到和应用时钟偏差都由数据库裁决。 */
@@ -101,7 +104,19 @@ public class Errand {
                                    Instant confirmDeadlineAt, Instant autoSettleDeadlineAt) {
         return new Errand(id, campusId, publisherId, type, title, reward, slotTotal, grabberId,
                 status, slotTaken, round, version, lockedAt, deliveredAt,
-                confirmDeadlineAt, autoSettleDeadlineAt);
+                confirmDeadlineAt, autoSettleDeadlineAt, 0);
+    }
+
+    /** 从存储重建（带连续递补计数）：回退后归零，达到轮次上限时直接回退重新开放。 */
+    public static Errand rehydrate(long id, long campusId, long publisherId, ErrandType type,
+                                   String title, Money reward, int slotTotal, Long grabberId,
+                                   ErrandStatus status, int slotTaken, int round, long version,
+                                   Instant lockedAt, Instant deliveredAt,
+                                   Instant confirmDeadlineAt, Instant autoSettleDeadlineAt,
+                                   int transferCount) {
+        return new Errand(id, campusId, publisherId, type, title, reward, slotTotal, grabberId,
+                status, slotTaken, round, version, lockedAt, deliveredAt,
+                confirmDeadlineAt, autoSettleDeadlineAt, transferCount);
     }
 
     /**
@@ -175,6 +190,7 @@ public class Errand {
         transitTo(ErrandStatus.LOCKED, expectedVersion);
         this.grabberId = nextRunnerId;
         this.round++;
+        this.transferCount++;
         this.lockedAt = now;
     }
 
@@ -191,6 +207,7 @@ public class Errand {
         this.grabberId = null;
         this.slotTaken = Math.max(0, this.slotTaken - 1);
         this.round++;
+        this.transferCount = 0;
         this.lockedAt = null;
     }
 
@@ -308,6 +325,7 @@ public class Errand {
     public Long grabberId() { return grabberId; }
     public ErrandStatus status() { return status; }
     public int round() { return round; }
+    public int transferCount() { return transferCount; }
     public long version() { return version; }
     public Instant lockedAt() { return lockedAt; }
     public Instant deliveredAt() { return deliveredAt; }

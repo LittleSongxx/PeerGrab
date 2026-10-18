@@ -62,10 +62,10 @@ public interface ErrandRepository {
     boolean confirmTimeoutDue(long errandId, int expectedRound);
 
     /** 兜底扫描：按持久截止时间与宽限秒数查找 LOCKED 任务。 */
-    List<Errand> findConfirmTimeout(long timeoutSeconds, int limit);
+    List<Errand> findConfirmTimeout(long graceSeconds, int limit);
 
     /** 带时间和 id 游标，避免最早的一批持续失败时饿死后续任务。 */
-    List<Errand> findConfirmTimeoutAfter(long timeoutSeconds, Instant afterAt, long afterId, int limit);
+    List<Errand> findConfirmTimeoutAfter(long graceSeconds, Instant afterAt, long afterId, int limit);
 
     /** 跑腿取货：ACCEPTED -> PICKED_UP */
     int casPickUp(long errandId, long runnerId, long expectedVersion);
@@ -95,8 +95,8 @@ public interface ErrandRepository {
     int casSettleFromDispute(long errandId, long expectedVersion);
 
     /** 兜底扫描：按持久截止时间查找可自动结算任务。 */
-    List<Errand> findAutoSettleDue(long autoSettleSeconds, int limit);
+    List<Errand> findAutoSettleDue(long graceSeconds, int limit);
 
     /** 带时间和 id 游标，避免最早的一批持续失败时饿死后续任务。 */
-    List<Errand> findAutoSettleDueAfter(long autoSettleSeconds, Instant afterAt, long afterId, int limit);
+    List<Errand> findAutoSettleDueAfter(long graceSeconds, Instant afterAt, long afterId, int limit);
 }

@@ -6,7 +6,7 @@
 //   2. 重连用指数退避（1s -> 2s -> 4s -> 8s 封顶），避免服务端故障时重连风暴
 //   3. 心跳 ping/pong 防中间设备掐断空闲连接
 
-import { getToken } from './api';
+import { getToken, refreshSession } from './api';
 
 export interface WsEvent {
   type: 'errand.status' | 'notification.new' | 'credit.changed';
@@ -30,6 +30,32 @@ export function isWsAvailable() {
 export function subscribeWs(handler: Handler): () => void {
   handlers.add(handler);
   return () => handlers.delete(handler);
+}
+
+/** 服务端因鉴权拒绝关闭连接：1008 或 4xxx 业务关闭码 */
+function isAuthCloseCode(code: number) {
+  return code === 1008 || (code >= 4000 && code < 5000);
+}
+
+/** 指数退避重连；连续失败到上限就标记降级（页面转轮询），但仍继续尝试 */
+function scheduleReconnect() {
+  reconnectTimer = window.setTimeout(() => {
+    reconnectDelay = Math.min(reconnectDelay * 2, 8000);
+    if (reconnectDelay >= 8000) wsAvailable = false;
+    connectWs();
+  }, reconnectDelay);
+}
+
+/**
+ * 鉴权关闭后先用 refresh token 换新 token（connectWs 内的 getToken() 会读到新值）。
+ * 刷新失败就停止自动重连，避免拿着过期 token 无限重连；
+ * 下一次 connectWs()（重新登录 / API 401 刷新后）仍可再次尝试。
+ */
+async function reconnectAfterAuthClose() {
+  const refreshed = await refreshSession();
+  if (!wantsConnection) return;
+  if (refreshed) scheduleReconnect();
+  else wsAvailable = false;
 }
 
 export function connectWs() {
@@ -70,16 +96,16 @@ export function connectWs() {
     }
   };
 
-  socket.onclose = () => {
+  socket.onclose = (event) => {
     if (heartbeatTimer) window.clearInterval(heartbeatTimer);
     socket = null;
     if (!wantsConnection) return;
-    // 指数退避重连；超过 8s 仍失败就标记降级（页面转轮询），但继续尝试重连
-    reconnectTimer = window.setTimeout(() => {
-      reconnectDelay = Math.min(reconnectDelay * 2, 8000);
-      if (reconnectDelay >= 8000) wsAvailable = false;
-      connectWs();
-    }, reconnectDelay);
+    // 鉴权被拒：先刷新会话，成功则用新 token 继续按退避重连
+    if (isAuthCloseCode(event.code)) {
+      void reconnectAfterAuthClose();
+      return;
+    }
+    scheduleReconnect();
   };
 
   socket.onerror = () => {

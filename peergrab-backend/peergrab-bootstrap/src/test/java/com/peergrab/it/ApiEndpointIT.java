@@ -52,7 +52,7 @@ class ApiEndpointIT {
 
     @BeforeAll
     static void requireMiddleware() {
-        Assumptions.assumeTrue(MiddlewareAvailable.check(), "中间件未启动，跳过");
+        MiddlewareAvailable.require();
     }
 
     @SuppressWarnings("unchecked")
@@ -225,10 +225,11 @@ class ApiEndpointIT {
             errandCache.registerExisting(id);
         }
 
-        // PUBLISHED：跑腿可抢（GRAB），发单人可取消（CANCEL），不能抢自己的
+        // PUBLISHED：跑腿可抢（GRAB），发单人可取消（CANCEL），不能抢自己的；
+        // 仲裁员不参与交易，因此没有任何交易动作（只在其专属的 DISPUTED 状态出现 ARBITRATE）。
         assertActions(910_000_000_000L, RUNNER, List.of("GRAB"));
         assertActions(910_000_000_000L, PUB, List.of("CANCEL"));
-        assertActions(910_000_000_000L, ARBITRATOR, List.of("GRAB"));
+        assertActions(910_000_000_000L, ARBITRATOR, List.of());
 
         // LOCKED：只有当前跑腿可确认。注意没有 DISPUTE——
         // 状态机 FROM_LOCKED 不含 DISPUTED：任务还没人开始执行，不存在争议标的，

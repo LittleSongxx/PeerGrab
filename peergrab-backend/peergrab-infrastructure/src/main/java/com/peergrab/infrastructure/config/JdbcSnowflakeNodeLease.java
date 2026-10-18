@@ -64,18 +64,9 @@ public final class JdbcSnowflakeNodeLease {
             long ceilingMillis = Math.addExact(nowMillis, 2_000L * leaseSeconds);
             long deadlineNanos = localDeadline(startedNanos);
 
-            int inserted = jdbc.update("""
-                    INSERT IGNORE INTO snowflake_node_lease (node_id, holder, expires_at, safe_after_ms)
-                    VALUES (?, ?, TIMESTAMPADD(SECOND, ?, NOW(3)), ?)
-                    """, candidate, holder, leaseSeconds, ceilingMillis);
-            if (inserted == 1) {
-                return new Acquired(candidate, deadlineNanos, ceilingMillis);
-            }
-
-            // 先看上一持有者的持久上界；时钟未越过时使用别的 ID，不能重发旧时间段的序号。
-            Long oldCeiling = jdbc.query("SELECT safe_after_ms FROM snowflake_node_lease WHERE node_id = ?",
-                    rs -> rs.next() ? rs.getLong(1) : null, candidate);
-            if (oldCeiling == null || nowMillis <= oldCeiling) continue;
+            // 先尝试认领"已到期且时间栅栏已越过"的旧行（UPDATE 直接拿排他锁），
+            // 只有行不存在时才 INSERT。原来的 INSERT IGNORE + UPDATE 顺序会在首次并发
+            // 插入时拿到共享锁再升级排他锁，扩大启动期锁竞争。
             int claimed = jdbc.update("""
                     UPDATE snowflake_node_lease
                        SET holder = ?, expires_at = TIMESTAMPADD(SECOND, ?, NOW(3)),
@@ -83,6 +74,13 @@ public final class JdbcSnowflakeNodeLease {
                      WHERE node_id = ? AND expires_at <= NOW(3) AND safe_after_ms < ?
                     """, holder, leaseSeconds, ceilingMillis, candidate, nowMillis);
             if (claimed == 1) {
+                return new Acquired(candidate, deadlineNanos, ceilingMillis);
+            }
+            int inserted = jdbc.update("""
+                    INSERT IGNORE INTO snowflake_node_lease (node_id, holder, expires_at, safe_after_ms)
+                    VALUES (?, ?, TIMESTAMPADD(SECOND, ?, NOW(3)), ?)
+                    """, candidate, holder, leaseSeconds, ceilingMillis);
+            if (inserted == 1) {
                 return new Acquired(candidate, deadlineNanos, ceilingMillis);
             }
         }

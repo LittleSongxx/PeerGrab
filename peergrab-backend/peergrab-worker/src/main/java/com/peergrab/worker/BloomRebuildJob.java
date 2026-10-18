@@ -57,21 +57,37 @@ public class BloomRebuildJob {
 
     @Scheduled(fixedDelayString = "${peergrab.cache.bloom-rebuild-interval-ms:300000}", scheduler = "maintenanceTaskScheduler")
     public void ensureReady() {
-        if (!bloomEnabled || cache.isDegraded() || cache.existenceIndexReady() || cache.isDegraded()) return;
+        if (!bloomEnabled || cache.isDegraded() || cache.existenceIndexReady()) return;
+        rebuildWithLock("startup-recovery");
+    }
+
+    /**
+     * 周期全量校准：布隆只增不减、且发布侧登记可能失败，只靠"未就绪才重建"无法修复
+     * "已就绪但漏登记"的 id。定期全量重灌才能在有限时间内把遗漏补齐。
+     * 重建期间撤销就绪标记，读路径 fail-open，不会误杀真实任务。
+     */
+    @Scheduled(fixedDelayString = "${peergrab.cache.bloom-refresh-interval-ms:1800000}",
+            scheduler = "maintenanceTaskScheduler")
+    public void periodicRefresh() {
+        if (!bloomEnabled || cache.isDegraded()) return;
+        rebuildWithLock("periodic-refresh");
+    }
+
+    private void rebuildWithLock(String reason) {
         RLock lock = null;
         boolean acquired = false;
         try {
             lock = redisson.getLock(REBUILD_LOCK);
             // Redisson watchdog 自动续约，长扫描不会因固定租约到期而并发重建。
             acquired = lock.tryLock(0, TimeUnit.SECONDS);
-            if (!acquired || cache.existenceIndexReady()) return;
+            if (!acquired) return;
             int count = rebuildUseCase.rebuild();
-            log.info("布隆索引恢复完成 count={}", count);
+            log.info("布隆索引重建完成 reason={} count={}", reason, count);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } catch (RuntimeException e) {
             // 就绪标记保持缺失；读请求向 DB 核实，下一轮扫描继续重试。
-            log.error("布隆索引重建失败，下一轮重试", e);
+            log.error("布隆索引重建失败 reason={}，下一轮重试", reason, e);
         } finally {
             if (acquired && lock != null) {
                 try {

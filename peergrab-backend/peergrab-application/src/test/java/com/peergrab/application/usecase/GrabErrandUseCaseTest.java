@@ -279,6 +279,41 @@ class GrabErrandUseCaseTest {
         return errand;
     }
 
+    @Test
+    @DisplayName("仲裁员抢单在任何下游调用前被拒绝")
+    void arbitrator_cannot_grab() {
+        var slot = mock(GrabSlotPort.class);
+        var errands = mock(ErrandRepository.class);
+        var errand = publishedErrand();
+        when(errands.findById(errand.id())).thenReturn(Optional.of(errand));
+
+        var result = useCase(slot, mock(GrabRecordRepository.class), errands,
+                mock(GrabTransactionalStep.class)).grab(
+                new GrabErrandUseCase.Command(errand.id(), 9001L, "arbitrator-grab"));
+
+        assertEquals(ErrorCode.ROLE_NOT_ALLOWED, result.code());
+        verifyNoInteractions(slot);
+    }
+
+    @Test
+    @DisplayName("数据库可抢但 Redis 仍记该用户在 grabbed 集合时清理陈旧快照")
+    void stale_grabbed_snapshot_is_healed() {
+        var slot = mock(GrabSlotPort.class);
+        var errands = mock(ErrandRepository.class);
+        var errand = publishedErrand();
+        when(errands.findById(errand.id())).thenReturn(Optional.of(errand));
+        when(slot.tryAcquire(errand.id(), 2001L, "stale-grabbed"))
+                .thenReturn(SlotOutcome.ALREADY_GRABBED);
+        when(slot.reservationPending(errand.id())).thenReturn(false);
+
+        var result = useCase(slot, mock(GrabRecordRepository.class), errands,
+                mock(GrabTransactionalStep.class)).grab(
+                new GrabErrandUseCase.Command(errand.id(), 2001L, "stale-grabbed"));
+
+        assertEquals(ErrorCode.GRAB_CONFLICT, result.code());
+        verify(slot).invalidate(errand.id());
+    }
+
     private static GrabErrandUseCase useCase(GrabSlotPort slot, GrabRecordRepository records,
                                             ErrandRepository errands, GrabTransactionalStep step) {
         return useCase(slot, records, errands, step, mock(TimeoutTransferUseCase.class));
@@ -321,7 +356,6 @@ class GrabErrandUseCaseTest {
         @Override public Optional<CreditScore> find(long userId) { return Optional.empty(); }
         @Override public boolean applyEvent(CreditEvent event) { return false; }
         @Override public List<CreditEvent> recentEvents(long userId, int days, int limit) { return List.of(); }
-        @Override public int windowDelta(long userId, int windowDays) { return 0; }
         @Override public int calibrateScores(int windowDays, int limit) { return 0; }
     }
 
@@ -331,7 +365,7 @@ class GrabErrandUseCaseTest {
         @Override
         public SlotOutcome tryAcquire(long errandId, long runnerId, String requestId) {
             tryAcquireCalls++;
-            return SlotOutcome.NOT_GRABBABLE;
+            return SlotOutcome.SLOT_MISSING;
         }
 
         @Override public void rollback(long errandId, long runnerId, String requestId) {}
