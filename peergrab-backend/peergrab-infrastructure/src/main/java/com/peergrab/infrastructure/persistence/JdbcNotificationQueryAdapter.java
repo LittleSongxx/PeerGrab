@@ -27,7 +27,7 @@ public class JdbcNotificationQueryAdapter implements NotificationQueryPort {
                         rs.getLong("id"), rs.getLong("errand_id"), rs.getString("type"),
                         rs.getString("content"), rs.getTimestamp("created_at").toInstant(),
                         rs.getBoolean("read_flag")),
-                userId, size, page * size);
+                userId, size, (long) page * size);
     }
 
     @Override

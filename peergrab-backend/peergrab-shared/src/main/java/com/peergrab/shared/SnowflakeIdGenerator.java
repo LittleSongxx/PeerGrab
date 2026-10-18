@@ -100,10 +100,20 @@ public class SnowflakeIdGenerator {
 
     private long waitNextMillis(long lastTimestamp) {
         long timestamp = clock.getAsLong();
+        int spins = 0;
         while (timestamp <= lastTimestamp) {
             if (leaseDeadlineNanos != Long.MAX_VALUE && System.nanoTime() - leaseDeadlineNanos >= 0) {
                 revoked = true;
                 throw new IllegalStateException("雪花节点租约已失效，拒绝生成 ID");
+            }
+            spins++;
+            if (spins > 10_000) {
+                throw new IllegalStateException("等待时钟前进超时（时钟停滞或持续回拨）");
+            }
+            if (spins < 64) {
+                Thread.onSpinWait();
+            } else {
+                java.util.concurrent.locks.LockSupport.parkNanos(100_000L);
             }
             timestamp = clock.getAsLong();
         }

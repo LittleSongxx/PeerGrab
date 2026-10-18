@@ -13,6 +13,9 @@ public interface GrabRecordRepository {
 
     int countGrabbed(long campusId, long errandId);
 
-    /** 持久化的幂等结果；NULL request_id 的历史记录不会命中。 */
-    Optional<Long> findRunnerByRequestId(long campusId, long errandId, String requestId);
+    /**
+     * 持久化的幂等结果。必须带 round：任务回退/流转后 round 自增，
+     * 旧轮次的 requestId 记录不能冒充"本轮已抢中"。NULL request_id 的历史记录不会命中。
+     */
+    Optional<GrabRecord> findGrabbedByRequestId(long campusId, long errandId, String requestId, int round);
 }

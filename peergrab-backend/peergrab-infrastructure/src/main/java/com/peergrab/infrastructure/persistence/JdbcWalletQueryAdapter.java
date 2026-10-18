@@ -34,14 +34,14 @@ public class JdbcWalletQueryAdapter implements WalletQueryPort {
         // 同时返回 account_type，让前端区分"个人钱包动作"与"平台托管/佣金账户动作"。
         return jdbc.query("""
                 SELECT l.id, l.created_at, l.direction, l.amount, l.ref_type, l.ref_id, l.biz_no,
-                       a.owner_type
+                       COALESCE(a.owner_type, 'UNKNOWN') AS owner_type
                   FROM wallet_ledger l
                   LEFT JOIN wallet_account a ON a.id = l.account_id
                  WHERE l.user_id = ?
                  ORDER BY l.created_at DESC, l.id DESC
                  LIMIT ? OFFSET ?
                 """, (rs, n) -> mapLedger(rs),
-                ownerId, size, page * size);
+                ownerId, size, (long) page * size);
     }
 
     @Override
@@ -49,7 +49,7 @@ public class JdbcWalletQueryAdapter implements WalletQueryPort {
         if (beforeCreatedAt == null || beforeId == null) {
             return jdbc.query("""
                     SELECT l.id, l.created_at, l.direction, l.amount, l.ref_type, l.ref_id, l.biz_no,
-                           a.owner_type
+                           COALESCE(a.owner_type, 'UNKNOWN') AS owner_type
                       FROM wallet_ledger l
                       LEFT JOIN wallet_account a ON a.id = l.account_id
                      WHERE l.user_id = ?
@@ -60,7 +60,7 @@ public class JdbcWalletQueryAdapter implements WalletQueryPort {
         Timestamp before = Timestamp.from(beforeCreatedAt);
         return jdbc.query("""
                 SELECT l.id, l.created_at, l.direction, l.amount, l.ref_type, l.ref_id, l.biz_no,
-                       a.owner_type
+                       COALESCE(a.owner_type, 'UNKNOWN') AS owner_type
                   FROM wallet_ledger l
                   LEFT JOIN wallet_account a ON a.id = l.account_id
                  WHERE l.user_id = ?

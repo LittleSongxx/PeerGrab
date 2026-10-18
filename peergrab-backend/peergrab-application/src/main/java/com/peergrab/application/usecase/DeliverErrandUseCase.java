@@ -53,6 +53,11 @@ public class DeliverErrandUseCase {
     public void deliver(long errandId, long runnerId) {
         Errand errand = errandRepository.findById(errandId)
                 .orElseThrow(() -> new BizException(ErrorCode.ERRAND_NOT_FOUND, "id=" + errandId));
+        if (errand.status() == ErrandStatus.DELIVERED
+                && java.util.Objects.equals(errand.grabberId(), runnerId)) {
+            // 弱网/双击重试：已送达且仍是当前跑腿，按幂等成功处理（自动结算消息也已登记）。
+            return;
+        }
         // 领域校验
         errand.deliver(runnerId, errand.version(), Instant.now());
 

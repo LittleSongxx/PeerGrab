@@ -39,7 +39,7 @@ public class JdbcErrandQueryAdapter implements ErrandQueryPort {
                  WHERE campus_id = ? AND status = ?
                  ORDER BY created_at DESC
                  LIMIT ? OFFSET ?
-                """, MAPPER, campusId, status, size, page * size);
+                """, MAPPER, campusId, status, size, (long) page * size);
     }
 
     @Override
@@ -74,19 +74,18 @@ public class JdbcErrandQueryAdapter implements ErrandQueryPort {
                  WHERE publisher_id = ?
                  ORDER BY created_at DESC
                  LIMIT ? OFFSET ?
-                """, MAPPER, publisherId, size, page * size);
+                """, MAPPER, publisherId, size, (long) page * size);
     }
 
     @Override
     public List<Errand> listByRunner(long runnerId, int page, int size) {
-        // 抢中过的任务：EXISTS 走 idx_runner_errand(runner_id, errand_id)，避免 DISTINCT 派生表。
+        // "我抢到的任务"按当前 grabber 归属查询：任务被递补/回退后不会错留在前一位跑腿名下。
         return jdbc.query("""
                 SELECT e.* FROM errand e
-                 WHERE EXISTS (SELECT 1 FROM grab_record g
-                                WHERE g.runner_id = ? AND g.errand_id = e.id)
+                 WHERE e.grabber_id = ?
                  ORDER BY e.created_at DESC
                  LIMIT ? OFFSET ?
-                """, MAPPER, runnerId, size, page * size);
+                """, MAPPER, runnerId, size, (long) page * size);
     }
 
     @Override

@@ -8,6 +8,8 @@ import com.peergrab.domain.errand.model.ErrandStatus;
 import com.peergrab.domain.errand.ports.ErrandRepository;
 import com.peergrab.domain.errand.ports.LocalMessageRepository;
 import com.peergrab.domain.errand.ports.RunnerQuotaPort;
+import com.peergrab.domain.grab.model.GrabRecord;
+import com.peergrab.domain.grab.ports.GrabRecordRepository;
 import com.peergrab.domain.notify.ports.NotificationRepository;
 import com.peergrab.shared.SnowflakeIdGenerator;
 import org.springframework.beans.factory.annotation.Value;
@@ -37,6 +39,7 @@ public class TimeoutTransferStep {
     private final RunnerQuotaPort runnerQuotaPort;
     private final CreditRepository creditRepository;
     private final NotificationRepository notificationRepository;
+    private final GrabRecordRepository grabRecordRepository;
     private final int maxOngoing;
     private final String confirmTimeoutTopic;
 
@@ -46,6 +49,7 @@ public class TimeoutTransferStep {
                                RunnerQuotaPort runnerQuotaPort,
                                CreditRepository creditRepository,
                                NotificationRepository notificationRepository,
+                               GrabRecordRepository grabRecordRepository,
                                @org.springframework.beans.factory.annotation.Value("${peergrab.credit.max-ongoing:5}") int maxOngoing,
                                @Value("${peergrab.mq.topic.confirm-timeout:errand-confirm-timeout}") String confirmTimeoutTopic) {
         this.errandRepository = errandRepository;
@@ -54,6 +58,7 @@ public class TimeoutTransferStep {
         this.runnerQuotaPort = runnerQuotaPort;
         this.creditRepository = creditRepository;
         this.notificationRepository = notificationRepository;
+        this.grabRecordRepository = grabRecordRepository;
         this.maxOngoing = maxOngoing;
         this.confirmTimeoutTopic = confirmTimeoutTopic;
     }
@@ -90,6 +95,9 @@ public class TimeoutTransferStep {
             return StepResult.skipped();
         }
         int newRound = errand.round() + 1;
+        // 递补也是"抢中"，必须在同一事务内留抓单记录，否则"我抢到的任务"和 INV 唯一索引防线都会漏掉这条路径。
+        grabRecordRepository.insert(GrabRecord.grabbed(idGenerator.nextId(), errand.campusId(),
+                errand.id(), nextRunnerId, errand.slotTaken(), newRound, null));
         errandRepository.appendStatusLog(errand.id(), ErrandStatus.LOCKED, ErrandStatus.LOCKED,
                 newRound, nextRunnerId);
         notificationRepository.insertIfAbsent(idGenerator.nextId(),

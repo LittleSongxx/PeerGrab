@@ -115,7 +115,7 @@ compose=(docker compose --env-file .env.prod -f docker-compose.prod.yaml)
 - `migrate-query-indexes.sql` 追加 5 个索引：`grab_record.idx_runner_errand`、`publish_request.idx_publish_created`、`notification.idx_read_time`、`local_message.idx_status_updated`、`fund_event_outbox.idx_outbox_status_updated`，服务于 runner 任务列表与保留期清理；两个脚本都可重复执行。
 - app / worker 容器新增 `TZ=Asia/Shanghai`：`credit.calibration-cron`、`recon.cron`、`retention.cron` 改按东八区解释。升级后须执行 `up -d --build` 重建容器，只重启进程不会更新环境变量。
 - Redis 由 `noeviction` 改为 `allkeys-lru`（`--maxmemory 512mb --maxmemory-samples 10`）：缓存、名额、布隆、榜单都可从 MySQL 重建，名额键被淘汰时抢单回退到数据库 CAS。
-- 资金事件实时推送并入 worker 的落库消费者，原 `peergrab-fund-event-push` 消费组退役。升级后先确认该组在旧 Topic 的积压已消费完，再删除该组；旧 `errand-fund-event` Topic 仍按上文保留期流程单独退役。
+- 资金事件实时推送并入 worker 的落库消费者，原 `peergrab-fund-event-push` 消费组退役。升级后先确认该组在旧 Topic 的积压已消费完，再删除该组（示例：`sh bin/mqadmin deleteSubscriptionGroup -n <namesrv> -g peergrab-fund-event-push`，以实际集群管理命令为准）；旧 `errand-fund-event` Topic 仍按上文保留期流程单独退役。
 
 ## 4. 多主机部署边界
 

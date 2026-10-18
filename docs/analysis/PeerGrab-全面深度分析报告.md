@@ -305,7 +305,7 @@ WebSocket（握手 query token + 浏览器 Origin 白名单）→ 每次推送�
 | 编号 | 状态 | 对应模块 | 修复要点 |
 | --- | --- | --- | --- |
 | M1 | 已修复 | domain `Errand.transferCount`；application `TimeoutTransferUseCase`；docker `migrate-runtime.sql` | 新增 `errand.transfer_count` 记录连续递补，回退归零；达到上限回退重开，不再永久失效 |
-| M2 | 已缓解并标注边界 | 账务模型未变 | 共享 ESCROW/COMMISSION 行锁仍在；README 实测短批次结算 32–39 TPS，作为已知容量边界披露，未做影子账户或缓冲记账 |
+| M2 | 已缓解并标注边界 | 账务模型未变 | 共享 ESCROW/COMMISSION 行锁仍在；README 实测短批次结算 34.72/36.09/39.52 TPS（约 34–40 TPS），作为已知容量边界披露，未做影子账户或缓冲记账 |
 | M3 | 已修复 | docker compose Redis 配置 | `noeviction` 改为 `allkeys-lru`（512MB，samples 10）；缓存、名额、布隆、榜单可重建，名额键淘汰后回退数据库 CAS |
 | M4 | 已修复 | application `CacheConsistencyCheckUseCase` | 抽样校验新增负值缓存核对，"DB 有、缓存空值"可被发现 |
 | M5 | 已修复 | application `GrabErrandUseCase` | 数据库仍为 PUBLISHED 时清理陈旧的 grabbed/idem 快照，进程崩溃不再导致长期误判 ALREADY_GRABBED |
@@ -332,7 +332,7 @@ WebSocket（握手 query token + 浏览器 Origin 白名单）→ 每次推送�
 | L-文档死链 | 已修复 | docs、`peergrab-backend/README.md` | 恢复架构设计文档（`docs/architecture/架构设计与技术选型.md`）并新增配置参考；后端 README 链接改为 `../docs/architecture/...`，不再指向已删除路径 |
 | L-注释与代码不一致 | 已修复 | `JdbcErrandRepository`、`GetErrandDetailUseCase`、`ErrandRepository.findConfirmTimeout` | 重写与实现不符的注释；Bloom 校准语义、CAS SQL 条件、宽限期参数命名按实际行为描述 |
 | L-死代码/未用端口 | 已缓解并标注边界 | domain/application | 删除 CLOSED、CANCEL_AFTER_GRAB、DELIVERY_LATE、CANDIDATE/EXPIRED、NOT_GRABBABLE、`cancelAfterGrabBizNo`；边界：`GrabSlotPort.remainingSlot` 与 `ErrandRepository.findAutoSettleDue` 保留给集成测试和游标兜底 |
-| L-规模化隐患 | 已修复（含边界） | `JdbcErrandQueryAdapter`、`CreditRankingRebuildJob`、docker 索引迁移、worker `DataRetentionJob` | 随机抽样改为 min/max 随机起点范围扫描；runner 任务列表改 `EXISTS` 并新增 `idx_runner_errand`；校区列表缓存 5 分钟；新增 5 个清理/查询索引并定期清理历史表。边界：对账 SQL 的相关子查询未改写，仍按校园量级设计，未做十万级压测 |
+| L-规模化隐患 | 已修复（含边界） | `JdbcErrandQueryAdapter`、`CreditRankingRebuildJob`、docker 索引迁移、worker `DataRetentionJob` | 随机抽样改为 min/max 随机起点范围扫描；runner 任务列表按当前 `grabber_id` 归属并新增 `idx_grabber_created`；新增查询/清理索引并定期清理历史表。边界：没有校区列表接口（前端固定 `campusId=1`），对账相关子查询未改写，仍按校园量级设计，未做十万级压测 |
 | L-IT 门禁 | 已修复 | `MiddlewareAvailable`、各 IT 类的 `@EnabledIfSystemProperty` | `-Dpeergrab.it=true` 时中间件不可用直接失败；本地无中间件时 IT 类不执行，不再静默"全绿" |
 | L-可观测性 | 已缓解并标注边界 | `docker-compose.observability.yaml`、`docker/observability/` | 新增 Prometheus/Grafana overlay 与 11 条告警规则；边界：无 tracing、无日志聚合、无 Alertmanager，单实例本地 TSDB 保留 7 天 |
 
@@ -353,3 +353,48 @@ WebSocket（握手 query token + 浏览器 Origin 白名单）→ 每次推送�
 **复核**：`mvn -Dpeergrab.it=true test`（289 项、0 失败/0 跳过）覆盖以上改动；运行时冒烟与旧库升级验证脚本未入库，命令见本轮交付说明。
 
 **合计**：H 7 项、M 20 项、L 6 类，共 33 条记录；其中 28 条"已修复"、5 条"已缓解并标注边界"。复核入口：`git diff`、`mvn -Dpeergrab.it=true test`、[单机部署说明](../../peergrab-backend/docker/ECS_DEPLOY.md)与[可观测性 README](../../peergrab-backend/docker/observability/README.md)。
+
+## 10. 第三轮独立审计追加修复（2026-10）
+
+在 §9 修复并提交后，又做了三路独立只读审计（资金/并发链路、配置/部署/CI/前端、全生命周期遗留缺陷），以下为**有代码证据且已在本轮修掉**的项；
+
+| 问题 | 状态 | 对应模块 | 说明 |
+| --- | --- | --- | --- |
+| 登录限速维度可被伪造 `X-Forwarded-For` 绕过 | 已修复 | `LoginAttemptGuard` | 仅对可信代理（loopback/私网）解析转发头，并从右往左取第一个非可信跳；公网直连只用 `remoteAddr`；补伪造头单测 |
+| 抢单幂等重放跨轮次误报"已抢中" | 已修复 | `GrabRecordRepository`/`JdbcGrabRecordRepository`/`GrabErrandUseCase` | `findGrabbedByRequestId` 带 round 查询，只有当前轮、当前 runner 的记录才回放成功；补跨轮重放单测 |
+| 结算/退款/仲裁事务内 `ensureUserAccount` 破坏锁序 | 已修复 | `SettleErrandUseCase`/`RefundErrandUseCase`/`ArbitrateErrandUseCase`/`ArbitrateSettleStep`/`PublishErrandUseCase` | 账户开通移到事务外（发布侧改为仅做存在性校验），消除 wallet→escrow 与 escrow→wallet 的环；并发发布/退款 IT 复验无死锁 |
+| worker 缺 `settle.commission-rate` 配置 | 已修复 | worker `application.yaml` | 补齐 commission-rate 与 auto-settle-seconds，避免自动/手动结算分账口径漂移 |
+| 自动结算扫描把 `CONFLICT` 当成功 | 已修复 | `AutoSettleScanJob` | 冲突结果登记 durable retry 并计数，不再静默跳过资金滞留 |
+| 递补路径不写 `grab_record`、我的任务归属错误 | 已修复 | `TimeoutTransferStep`、`JdbcErrandQueryAdapter` | 递补同事务补抓单记录；`listByRunner` 改为按当前 `grabber_id` 并补 `idx_grabber_created` 索引 |
+| `confirm` 缺归属校验、`deliver` 不幂等 | 已修复 | `ConfirmErrandUseCase`/`DeliverErrandUseCase` | 非当前跑腿确认返回 `NOT_CURRENT_GRABBER`；已送达重试按幂等成功，不再误报非法流转 |
+| 自动结算消费者对状态已变抛异常并无限重投 | 已修复 | `AutoSettleConsumer` | `ILLEGAL_STATE_TRANSITION/ERRAND_NOT_FOUND/ESCROW_NOT_FOUND` 分类 ACK 并告警 |
+| 钱包流水 `accountType` 为 NULL 时接口 500 | 已修复 | `JdbcWalletQueryAdapter`/`WalletController` | SQL `COALESCE(...,'UNKNOWN')` + 控制器 null-safe 映射 |
+| `page * size` 整型溢出导致负 OFFSET | 已修复 | 三个查询适配器 | 统一 `(long) page * size` |
+| JWT resolve 本地缓存无界增长 | 已修复 | `JwtAuthAdapter` | 容量上限 + 过期清理 |
+| 雪花回拨等待纯忙等 | 已修复 | `SnowflakeIdGenerator` | 自旋/park 退避 + 等待上限，避免持锁空转 |
+| 佣金 `Math.floor(double)` 对 0.29 等费率少 1 分 | 已修复 | `SettleErrandUseCase` | 改用 `BigDecimal` 十进制精确计算并向下取整 |
+| 退款/仲裁提交后副作用无隔离、审计顺序靠后 | 已修复 | `RefundErrandUseCase`/`ArbitrateErrandUseCase` | 审计提前 + 每项独立兜底日志，已提交不会被 500 误报 |
+| 发布幂等重放硬编码返回 `PUBLISHED` | 已修复 | `PublishErrandUseCase` | 重放时读取任务真实状态 |
+| `recon_diff` 被保留期任务删除、发布幂等窗口仅 7 天 | 已修复 | `DataRetentionJob`/worker yaml/config docs | `recon_diff` 不再自动删除（审计证据）；`publish-request-days` 默认 30 天并在文档标注幂等窗口 |
+| `confirm_deadline_at/auto_settle_deadline_at` 为 NULL 的任务永不扫描 | 已修复 | `ErrandDeadlineRepairJob` | 新增修复任务：按 locked_at/delivered_at 回填，无法修复的 ERROR 告警；migration 已回填正常历史数据 |
+| WS 限流/连接上限用 1008，被前端误判为鉴权失败 | 已修复 | `WsHandler` | 限流关闭改用 1013（TRY_AGAIN_LATER），鉴权仍 1008 |
+| 非安全上下文 `crypto.randomUUID` undefined | 已修复 | 前端 `utils/requestId.ts` 等 | 增加降级实现，HTTP/IP 直连 demo 不再 TypeError |
+| bench 环境模板四个口令相同导致启动失败 | 已修复 | `bench.env.example` | 改为四个互不相同的占位口令 |
+| 文档/告警/部署口径 | 已修复 | 报告/架构文档/README/observability/UPGRADE/compose | 删除"校区列表缓存"未实现项、修正 `SLOT_MISSING` 表述、告警描述改为抓取可达性、UPGRADE 指向最新迁移、prod/distributed demo 开关可被环境变量覆盖并在注释声明、README 测试数更新 |
+
+### 10.1 已评估但本轮不修（登记边界）
+
+| 项 | 原因/建议 |
+| --- | --- |
+| 信用分校准 job 无游标、每批从头重扫（O(N²)） | 属夜间批处理性能重构，需要游标分页 + 快照增量判定；当前校园量级可接受，已记录 |
+| 热点抢单 `SLOT_FULL + pending` 分支不入候选队列 | 涉及产品语义与候选队列容量压测；极端时间窗仅 10s，失败请求可重试，已记录 |
+| Redis 名额键在终态未主动失效 | 依赖 7 天 TTL + DB CAS 兜底，不影响资金正确性；建议后续补 reconcile job |
+| `worker_scan_retry` 无 DEAD 终态 | 需新增列/迁移与运维处置流程，避免误丢可恢复项，暂保持无限重试 |
+| 发布 afterCommit 内 Bloom 登记重试 sleep 占用连接 | 改为后台队列需新增本地消息类型，属性能优化 |
+| 详情冷 miss 每请求最多等待 50ms | 与 Tomcat 线程池容量相关，属容量优化/压测项 |
+| 雪花租约混用 DB `NOW(3)` 与应用时钟 | 需时钟偏移注入验证；当前方向偏安全，已记录待验证 |
+| 分页参数只修溢出未做上界 clamp | 需产品确定最大页深；当前溢出已不再 500 |
+
+以上 10.1 项均为非资金正确性问题，已在代码注释/文档中留痕，不在本轮抢修范围。
+
+**复核**：`mvn -B -ntp -Dpeergrab.it=true clean test` 在隔离 MySQL/Redis 上执行；前端 `npm run build`；迁移脚本在旧 schema 与全新 schema 上分别验证。

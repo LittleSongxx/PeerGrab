@@ -86,3 +86,16 @@ SET @fund_outbox_status_updated_index_sql = IF(@fund_outbox_status_updated_index
 PREPARE add_fund_outbox_status_updated_index FROM @fund_outbox_status_updated_index_sql;
 EXECUTE add_fund_outbox_status_updated_index;
 DEALLOCATE PREPARE add_fund_outbox_status_updated_index;
+
+-- 2026-10 追加：我的任务按当前 grabber 归属查询（递补/流转后不再错留前一位跑腿）
+SET @grabber_created_index_exists = (
+  SELECT COUNT(*) FROM information_schema.statistics
+   WHERE table_schema = DATABASE() AND table_name = 'errand'
+     AND index_name = 'idx_grabber_created'
+);
+SET @grabber_created_index_sql = IF(@grabber_created_index_exists = 0,
+  'ALTER TABLE errand ADD INDEX idx_grabber_created (grabber_id, created_at)',
+  'SELECT 1');
+PREPARE add_grabber_created_index FROM @grabber_created_index_sql;
+EXECUTE add_grabber_created_index;
+DEALLOCATE PREPARE add_grabber_created_index;

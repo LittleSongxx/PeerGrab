@@ -2,6 +2,8 @@ package com.peergrab.worker;
 
 import com.peergrab.application.usecase.SettleErrandUseCase;
 import com.peergrab.domain.errand.model.Errand;
+import com.peergrab.shared.BizException;
+import com.peergrab.shared.ErrorCode;
 import com.peergrab.shared.MessagePayloadCodec;
 import jakarta.annotation.PreDestroy;
 import org.apache.rocketmq.client.apis.ClientConfiguration;
@@ -88,6 +90,17 @@ public class AutoSettleConsumer {
                         log.info("自动结算消息处理 errandId={} result={}", errandId, result);
                         // ALREADY_SETTLED / CONFLICT 也是幂等生效的正常结果，都要 ACK
                         return ConsumeResult.SUCCESS;
+                    } catch (BizException e) {
+                        if (e.code() == ErrorCode.ILLEGAL_STATE_TRANSITION
+                                || e.code() == ErrorCode.ERRAND_NOT_FOUND
+                                || e.code() == ErrorCode.ESCROW_NOT_FOUND) {
+                            // 任务已取消/退款/争议：再重投也不会成功，ACK 并交给对账/巡检暴露异常状态。
+                            log.warn("自动结算消息状态已变化，ACK 不再重试 errandId={} code={}",
+                                    errandId, e.code());
+                            return ConsumeResult.SUCCESS;
+                        }
+                        log.error("自动结算消息处理失败，交由 MQ 重试 body={}", body, e);
+                        return ConsumeResult.FAILURE;
                     } catch (RuntimeException e) {
                         log.error("自动结算消息处理失败，交由 MQ 重试 body={}", body, e);
                         return ConsumeResult.FAILURE;

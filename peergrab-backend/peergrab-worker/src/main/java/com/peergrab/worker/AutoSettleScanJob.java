@@ -243,7 +243,22 @@ public class AutoSettleScanJob {
     private boolean settleOneWithRetry(Errand errand, AtomicInteger failures) {
         long settleStarted = nanoTime.getAsLong();
         try {
-            settleUseCase.settle(errand.id(), Errand.SYSTEM_OPERATOR);
+            SettleErrandUseCase.Result result =
+                    settleUseCase.settle(errand.id(), Errand.SYSTEM_OPERATOR);
+            if (result == SettleErrandUseCase.Result.CONFLICT) {
+                // escrow/errand 状态不一致不是幂等成功：登记重试并暴露失败，避免资金永久滞留且无人知晓。
+                IllegalStateException conflict =
+                        new IllegalStateException("auto settle conflict errandId=" + errand.id());
+                failures.incrementAndGet();
+                failureCounter.increment();
+                log.warn("自动结算状态冲突，登记重试 errandId={}", errand.id());
+                try {
+                    retryQueue.recordFailure(ScanRetryQueue.Type.AUTO_SETTLE, errand.id(), 0, conflict);
+                } catch (RuntimeException persistFailure) {
+                    log.error("自动结算冲突项登记失败，停止推进游标 errandId={}", errand.id(), persistFailure);
+                    return false;
+                }
+            }
         } catch (Exception ex) {
             failures.incrementAndGet();
             failureCounter.increment();
@@ -276,7 +291,13 @@ public class AutoSettleScanJob {
                     retryQueue.complete(ScanRetryQueue.Type.AUTO_SETTLE, item);
                     continue;
                 }
-                settleUseCase.settle(item.errandId(), Errand.SYSTEM_OPERATOR);
+                SettleErrandUseCase.Result result =
+                        settleUseCase.settle(item.errandId(), Errand.SYSTEM_OPERATOR);
+                if (result == SettleErrandUseCase.Result.CONFLICT) {
+                    retryQueue.reschedule(ScanRetryQueue.Type.AUTO_SETTLE, item,
+                            new IllegalStateException("auto settle conflict errandId=" + item.errandId()));
+                    continue;
+                }
                 retryQueue.complete(ScanRetryQueue.Type.AUTO_SETTLE, item);
             } catch (Exception e) {
                 log.warn("重试自动结算失败 errandId={}", item.errandId(), e);

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { newRequestId } from '../utils/requestId';
 import { api, getRole } from '../api';
 import type { ErrandCard } from '../api';
 import ErrandCardView from '../components/ErrandCard';
@@ -125,7 +126,7 @@ export default function Square() {
             const resp = await fetch(`/api/errands/${errandId}/grab`, {
               method: 'POST',
               // 每次并发抢单是独立请求，各自带幂等键（同一请求重试才复用）
-              headers: { 'Authorization': `Bearer ${credential.token}`, 'X-Request-Id': crypto.randomUUID() },
+              headers: { 'Authorization': `Bearer ${credential.token}`, 'X-Request-Id': newRequestId() },
             });
             const body = await resp.json();
             return {

@@ -22,16 +22,15 @@ class DataRetentionJobTest {
         jdbc.responses.add(new int[]{3});             // fund_event_outbox
         jdbc.responses.add(new int[]{0});             // publish_request
         jdbc.responses.add(new int[]{7});             // notification
-        jdbc.responses.add(new int[]{2});             // recon_diff
         jdbc.responses.add(new int[]{1});             // sync_diff
 
         DataRetentionJob job = new DataRetentionJob(jdbc, true, 500, 20,
-                7, 30, 7, 180, 365, 90);
+                7, 30, 30, 180, 90);
         job.run();
 
-        assertEquals(6, jdbc.distinctTables(), "六张表各清理一次（含分批重复调用）");
+        assertEquals(5, jdbc.distinctTables(), "五张可清理表各清理一次（含分批重复调用）");
         assertEquals(3, jdbc.callsFor("local_message"), "满批后继续删，尾批后停止");
-        assertEquals(1025, jdbc.totalRemoved);
+        assertEquals(1023, jdbc.totalRemoved);
     }
 
     @Test
@@ -42,19 +41,18 @@ class DataRetentionJobTest {
         jdbc.responses.add(new int[]{1}); // fund_event_outbox
         jdbc.responses.add(new int[]{1}); // publish_request
         jdbc.responses.add(new int[]{1}); // notification
-        jdbc.responses.add(new int[]{1}); // recon_diff
         jdbc.responses.add(new int[]{1}); // sync_diff
 
-        new DataRetentionJob(jdbc, true, 500, 20, 7, 30, 7, 180, 365, 90).run();
+        new DataRetentionJob(jdbc, true, 500, 20, 7, 30, 30, 180, 90).run();
 
-        assertEquals(5, jdbc.successfulTables(), "local_message 失败后其余 5 张表仍继续");
+        assertEquals(4, jdbc.successfulTables(), "local_message 失败后其余 4 张表仍继续");
     }
 
     @Test
     @DisplayName("关闭保留策略时不执行任何删除")
     void disabledSkipsEverything() {
         RecordingJdbcTemplate jdbc = new RecordingJdbcTemplate();
-        new DataRetentionJob(jdbc, false, 500, 20, 7, 30, 7, 180, 365, 90).run();
+        new DataRetentionJob(jdbc, false, 500, 20, 7, 30, 30, 180, 90).run();
         assertEquals(0, jdbc.totalCalls);
     }
 

@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
 
 class LoginAttemptGuardTest {
 
@@ -56,6 +57,29 @@ class LoginAttemptGuardTest {
         assertTrue(guard.allow("fresh|1001"));
 
         assertTrue(guard.trackedKeys() <= 1, "过期窗口的 key 应被清理，实际=" + guard.trackedKeys());
+    }
+
+    @Test
+    @DisplayName("公网客户端伪造 X-Forwarded-For 不能改变限速维度")
+    void spoofedForwardedHeaderFromUntrustedClientIsIgnored() {
+        jakarta.servlet.http.HttpServletRequest request =
+                mock(jakarta.servlet.http.HttpServletRequest.class);
+        when(request.getRemoteAddr()).thenReturn("203.0.113.7");
+        when(request.getHeader("X-Forwarded-For")).thenReturn("1.2.3.4, 5.6.7.8");
+
+        assertEquals("203.0.113.7", LoginAttemptGuard.clientIp(request));
+    }
+
+    @Test
+    @DisplayName("可信代理链从右往左取第一个非可信跳，取不到伪造的首段")
+    void forwardedChainFromTrustedProxyUsesRealClient() {
+        jakarta.servlet.http.HttpServletRequest request =
+                mock(jakarta.servlet.http.HttpServletRequest.class);
+        when(request.getRemoteAddr()).thenReturn("172.18.0.5");
+        when(request.getHeader("X-Forwarded-For"))
+                .thenReturn("6.6.6.6, 203.0.113.9, 172.18.0.2");
+
+        assertEquals("203.0.113.9", LoginAttemptGuard.clientIp(request));
     }
 
     @Test

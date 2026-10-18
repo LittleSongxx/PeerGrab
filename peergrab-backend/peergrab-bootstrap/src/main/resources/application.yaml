@@ -74,7 +74,7 @@ peergrab:
       fund-event: errand-fund-event-v2
   timeout:
     confirm-seconds: 300
-    max-transfer-rounds: 5      # 防无限流转：超过则回退让所有人重新抢          # 生产 5 分钟；测试用 @TestPropertySource 压到 2 秒
+    max-transfer-rounds: 5      # 防无限流转：超过则回退让所有人重新抢（生产 5 轮；测试用 @TestPropertySource 压到 2 轮）
     dispatch-sender-threads: 4   # 超时消息已持久化，后台即时发送失败由 worker 重发
     dispatch-queue-capacity: 2048
 

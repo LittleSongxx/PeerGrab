@@ -49,8 +49,9 @@ public class ConfirmErrandUseCase {
                 .orElseThrow(() -> new BizException(ErrorCode.ERRAND_NOT_FOUND, "id=" + cmd.errandId()));
 
         if (errand.status() == ErrandStatus.ACCEPTED) {
-            // 重复确认按幂等处理，不报错
-            return;
+            // 只有当前抢中者的重复确认才幂等成功；无关用户不能"确认成功"却什么都没发生。
+            if (java.util.Objects.equals(errand.grabberId(), cmd.runnerId())) return;
+            throw new BizException(ErrorCode.NOT_CURRENT_GRABBER, "actor=" + cmd.runnerId());
         }
 
         // 领域层先校验"是不是当前抢中者"，尽早失败并给出明确错误

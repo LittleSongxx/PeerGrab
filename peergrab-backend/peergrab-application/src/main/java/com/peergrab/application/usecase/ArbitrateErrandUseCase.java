@@ -13,6 +13,8 @@ import com.peergrab.domain.wallet.ports.FundAuditPort;
 import com.peergrab.domain.wallet.ports.WalletRepository;
 import com.peergrab.shared.BizException;
 import com.peergrab.shared.ErrorCode;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -28,6 +30,8 @@ import org.springframework.stereotype.Service;
  */
 @Service
 public class ArbitrateErrandUseCase {
+
+    private static final Logger log = LoggerFactory.getLogger(ArbitrateErrandUseCase.class);
 
     private final ErrandRepository errandRepository;
     private final WalletRepository walletRepository;
@@ -61,6 +65,14 @@ public class ArbitrateErrandUseCase {
 
     public enum Result { SETTLED_TO_RUNNER, REFUNDED_TO_PUBLISHER, ALREADY_DONE, CONFLICT }
 
+    private void sideEffect(String name, Runnable action) {
+        try {
+            action.run();
+        } catch (RuntimeException e) {
+            log.warn("仲裁已提交但后置动作失败 name={}（资金结果不受影响）", name, e);
+        }
+    }
+
     public Result arbitrate(long errandId, ArbitrationFavor favor, long operatorId) {
         if (operatorId != arbitratorId) {
             throw new BizException(ErrorCode.UNAUTHORIZED, "仲裁员身份不匹配 actor=" + operatorId);
@@ -82,12 +94,10 @@ public class ArbitrateErrandUseCase {
 
         if (favor == ArbitrationFavor.PUBLISHER) {
             var r = refundUseCase.arbitrateRefund(errandId, operatorId);
-            if (r == RefundErrandUseCase.Result.REFUNDED) {
-                if (errand.grabberId() != null) {
-                    notifier.creditChanged(errand.grabberId(),
-                            creditRepository.scoreOf(errand.grabberId()),
-                            CreditEventType.DISPUTE_LOSE.delta(), "争议败诉");
-                }
+            if (r == RefundErrandUseCase.Result.REFUNDED && errand.grabberId() != null) {
+                sideEffect("arbitrate-refund-credit-notify", () -> notifier.creditChanged(
+                        errand.grabberId(), creditRepository.scoreOf(errand.grabberId()),
+                        CreditEventType.DISPUTE_LOSE.delta(), "争议败诉"));
             }
             return r == RefundErrandUseCase.Result.REFUNDED
                     ? Result.REFUNDED_TO_PUBLISHER
@@ -102,16 +112,19 @@ public class ArbitrateErrandUseCase {
         }
 
         String bizNo = LedgerEntry.settleBizNo(errandId);
+        // 账户开通放在事务外，避免 ensure 在事务内先拿 wallet 行锁破坏公共账户锁序。
+        walletRepository.ensureUserAccount(errand.grabberId());
         boolean committed = WalletDeadlockRetry.execute(() ->
                 settleStep.settleFromDispute(errandId, errand, escrow, bizNo, operatorId));
 
         if (committed) {
-            cacheEvict.evictAfterCommit(errandId);
-            auditPort.record(bizNo, "ARBITRATE", errandId, operatorId,
+            // 资金已提交：审计优先且逐项兜底，避免推送失败导致"已裁决却返回 500、审计缺失"。
+            sideEffect("arbitrate-audit", () -> auditPort.record(bizNo, "ARBITRATE", errandId, operatorId,
                     String.format("{\"favor\":\"RUNNER\",\"amount\":%d}", escrow.amount().cents()),
-                    true, null);
-            notifier.errandStatusChanged(errandId, errand.publisherId(), errand.grabberId(),
-                    "SETTLED", errand.round());
+                    true, null));
+            sideEffect("arbitrate-cache-evict", () -> cacheEvict.evictAfterCommit(errandId));
+            sideEffect("arbitrate-realtime", () -> notifier.errandStatusChanged(errandId,
+                    errand.publisherId(), errand.grabberId(), "SETTLED", errand.round()));
             return Result.SETTLED_TO_RUNNER;
         }
         return Result.CONFLICT;

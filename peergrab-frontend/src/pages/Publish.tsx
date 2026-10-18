@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
 import { api, BizError, getRole, getUserId, yuan } from '../api';
+import { newRequestId } from '../utils/requestId';
 
 const PENDING_PUBLISH_KEY = 'peergrab_pending_publish';
 
@@ -14,7 +15,7 @@ function requestIdFor(payload: object): string {
   } catch {
     // Malformed browser storage cannot stop publication.
   }
-  const requestId = crypto.randomUUID();
+  const requestId = newRequestId();
   try { sessionStorage.setItem(PENDING_PUBLISH_KEY, JSON.stringify({ fingerprint, requestId })); }
   catch { /* The current request still has its idempotency key. */ }
   return requestId;

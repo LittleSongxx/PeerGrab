@@ -96,15 +96,48 @@ public class LoginAttemptGuard {
         return attempts.size();
     }
 
-    /** 优先取代理后的首个 X-Forwarded-For，其次 remoteAddr；仅用于限速维度。 */
+    /**
+     * 限速维度用的客户端 IP。
+     *
+     * <p>只有当连接直接来自可信代理（本机/容器私网，即 nginx/负载均衡）时才解析
+     * X-Forwarded-For，并从右往左取第一个非可信 IP——代理只会<b>追加</b>真实来源，
+     * 最右侧的可信段才是代理自己，再往左第一个不可信段就是真实客户端。
+     * 直接访问本进程的公网客户端一律使用 remoteAddr，避免伪造头绕过登录限速。</p>
+     */
     public static String clientIp(jakarta.servlet.http.HttpServletRequest request) {
         if (request == null) return "unknown";
+        String remote = request.getRemoteAddr();
+        if (remote == null || remote.isBlank()) return "unknown";
+        if (!isTrustedProxy(remote)) return remote;
         String forwarded = request.getHeader("X-Forwarded-For");
-        if (forwarded != null && !forwarded.isBlank()) {
-            int comma = forwarded.indexOf(',');
-            return (comma < 0 ? forwarded : forwarded.substring(0, comma)).trim();
+        if (forwarded == null || forwarded.isBlank()) return remote;
+        String[] hops = forwarded.split(",");
+        for (int index = hops.length - 1; index >= 0; index--) {
+            String hop = hops[index].trim();
+            if (!hop.isEmpty() && !isTrustedProxy(hop)) return hop;
         }
-        return request.getRemoteAddr() == null ? "unknown" : request.getRemoteAddr();
+        return remote;
+    }
+
+    /** 代理链中可直接信任的本机/私网地址段（Docker 网桥、loopback）。 */
+    static boolean isTrustedProxy(String address) {
+        if (address == null) return false;
+        String host = address.startsWith("[") && address.contains("]")
+                ? address.substring(0, address.indexOf(']') + 1) : address;
+        if (host.startsWith("127.") || "::1".equals(host) || "[::1]".equals(host)) return true;
+        if (host.startsWith("10.") || host.startsWith("192.168.")) return true;
+        if (host.startsWith("172.")) {
+            String[] parts = host.split("\\.");
+            if (parts.length > 1) {
+                try {
+                    int second = Integer.parseInt(parts[1]);
+                    return second >= 16 && second <= 31;
+                } catch (NumberFormatException ignored) {
+                    return false;
+                }
+            }
+        }
+        return false;
     }
 
     private static final class Attempts {

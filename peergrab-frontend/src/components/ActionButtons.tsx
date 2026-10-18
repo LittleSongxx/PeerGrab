@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react';
 import { api, ACTION_TEXT, BizError } from '../api';
 import type { ErrandCard } from '../api';
+import { newRequestId } from '../utils/requestId';
 
 /** settle/cancel 的幂等成功结果：后端重复处理时 data.result 落在这两个值上 */
 const ALREADY_TEXT: Record<string, string> = {
@@ -37,7 +38,7 @@ export default function ActionButtons({ card, onChanged, compact, onRequestArbit
     const grabbing = action === 'GRAB';
     // 上一次是网络错误时复用同一个 requestId，服务端就不会把重试当成新请求
     const requestId = grabbing
-      ? pendingRequestId.current.get(card.id) ?? crypto.randomUUID()
+      ? pendingRequestId.current.get(card.id) ?? newRequestId()
       : undefined;
     if (requestId) pendingRequestId.current.set(card.id, requestId);
     try {

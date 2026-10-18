@@ -154,15 +154,15 @@
 
 | 键 | 默认值 | 作用 | 生效进程 |
 | --- | --- | --- | --- |
+| `peergrab.deadline-repair.interval-ms` | `300000` | NULL 截止时间数据修复周期 | worker |
 | `peergrab.retention.enabled` | `true` | 保留期清理开关 | worker |
 | `peergrab.retention.cron` | `0 30 4 * * ?` | 清理 cron（按容器 TZ 解释） | worker |
 | `peergrab.retention.batch-size` | `500` | 单批删除行数 | worker |
 | `peergrab.retention.max-batches` | `20` | 单表单轮最多批次 | worker |
 | `peergrab.retention.local-message-days` | `7` | 已发送本地消息保留天数 | worker |
 | `peergrab.retention.fund-outbox-days` | `30` | 已发送资金事件保留天数 | worker |
-| `peergrab.retention.publish-request-days` | `7` | 发布幂等登记保留天数 | worker |
+| `peergrab.retention.publish-request-days` | `30` | 发布幂等登记保留天数（不得短于客户端离线重试窗口） | worker |
 | `peergrab.retention.notification-days` | `180` | 已读通知保留天数 | worker |
-| `peergrab.retention.recon-diff-days` | `365` | 对账差异保留天数 | worker |
 | `peergrab.retention.sync-diff-days` | `90` | 缓存一致性差异保留天数 | worker |
 
 ## 进程、租约与对账（worker-id / worker-lease.* / recon.*）

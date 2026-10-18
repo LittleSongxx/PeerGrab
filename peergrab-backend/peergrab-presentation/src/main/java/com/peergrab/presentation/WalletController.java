@@ -40,10 +40,16 @@ public class WalletController {
     }
 
     private static Map<String, Object> toLedger(com.peergrab.domain.wallet.ports.WalletQueryPort.LedgerView v) {
-        return Map.of(
-                "id", String.valueOf(v.id()), "time", v.time().toString(),
-                "direction", v.direction(), "amountCents", v.amountCents(),
-                "refType", v.refType(), "refId", String.valueOf(v.refId()),
-                "bizNo", v.bizNo(), "accountType", v.accountType());
+        // 账户行可能缺失，accountType 为 null；Map.of 不允许 null，这里用有序 Map 兜底。
+        Map<String, Object> row = new java.util.LinkedHashMap<>();
+        row.put("id", String.valueOf(v.id()));
+        row.put("time", v.time().toString());
+        row.put("direction", v.direction());
+        row.put("amountCents", v.amountCents());
+        row.put("refType", v.refType());
+        row.put("refId", String.valueOf(v.refId()));
+        row.put("bizNo", v.bizNo());
+        row.put("accountType", v.accountType() == null ? "UNKNOWN" : v.accountType());
+        return row;
     }
 }

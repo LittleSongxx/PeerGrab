@@ -119,7 +119,8 @@ services:
       MANAGEMENT_ENDPOINT_HEALTH_GROUP_READINESS_INCLUDE: readinessState,db,snowflakeLease
       PEERGRAB_WEB_CORS_ORIGINS: https://www.peergrab.cn
       PEERGRAB_AUTH_ALLOW_HEADER_IDENTITY: "false"
-      PEERGRAB_AUTH_DEMO_ENABLED: "true"
+      # 本编排默认面向公开演示站；正式生产请设 PEERGRAB_AUTH_DEMO_ENABLED=false 并接入真实身份。
+      PEERGRAB_AUTH_DEMO_ENABLED: "${PEERGRAB_AUTH_DEMO_ENABLED:-true}"
       PEERGRAB_AUTH_DEMO_PASSWORD_1001: ${PEERGRAB_AUTH_DEMO_PASSWORD_1001:?Set a unique demo password in .env.prod}
       PEERGRAB_AUTH_DEMO_PASSWORD_2001: ${PEERGRAB_AUTH_DEMO_PASSWORD_2001:?Set a unique demo password in .env.prod}
       PEERGRAB_AUTH_DEMO_PASSWORD_2002: ${PEERGRAB_AUTH_DEMO_PASSWORD_2002:?Set a unique demo password in .env.prod}

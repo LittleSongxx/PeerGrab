@@ -42,6 +42,7 @@ public class JwtAuthAdapter implements RefreshTokenPort {
     private final long refreshTtlMinutes;
     private final long resolveCacheMillis;
     /** sid -> 已校验过的 userId + 本地缓存过期时间；只缓存"有效"结果，登出/轮换时主动清理。 */
+    private static final int MAX_RESOLVE_CACHE_ENTRIES = 10_000;
     private final Map<String, CachedSession> sessionCache = new ConcurrentHashMap<>();
 
     public JwtAuthAdapter(JdbcTemplate jdbc,
@@ -144,6 +145,7 @@ public class JwtAuthAdapter implements RefreshTokenPort {
                 return Optional.empty();
             }
             if (resolveCacheMillis > 0) {
+                pruneResolveCacheIfNeeded(now);
                 sessionCache.put(sessionId, new CachedSession(userId, now + resolveCacheMillis));
             }
             return Optional.of(userId);
@@ -154,6 +156,13 @@ public class JwtAuthAdapter implements RefreshTokenPort {
 
     private void clearResolveCache(String sessionId) {
         if (sessionId != null) sessionCache.remove(sessionId);
+    }
+
+    /** 缓存条目无 TTL 淘汰，长期运行必须在上限处清理过期 entry，避免一次登录一条、只增不减。 */
+    private void pruneResolveCacheIfNeeded(long now) {
+        if (sessionCache.size() < MAX_RESOLVE_CACHE_ENTRIES) return;
+        sessionCache.entrySet().removeIf(entry -> entry.getValue().expiresAtMillis() <= now);
+        if (sessionCache.size() >= MAX_RESOLVE_CACHE_ENTRIES) sessionCache.clear();
     }
 
     private record CachedSession(long userId, long expiresAtMillis) {}

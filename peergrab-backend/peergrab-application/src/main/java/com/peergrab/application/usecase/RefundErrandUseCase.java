@@ -15,6 +15,8 @@ import com.peergrab.domain.wallet.ports.WalletRepository;
 import com.peergrab.shared.BizException;
 import com.peergrab.shared.ErrorCode;
 import com.peergrab.shared.SnowflakeIdGenerator;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -31,6 +33,7 @@ import java.util.List;
 @Service
 public class RefundErrandUseCase {
 
+    private static final Logger log = LoggerFactory.getLogger(RefundErrandUseCase.class);
     private static final long ESCROW_ACCOUNT_OWNER = -1L;
 
     private final ErrandRepository errandRepository;
@@ -123,6 +126,9 @@ public class RefundErrandUseCase {
         FundEvent event = new FundEvent(bizNo, "REFUNDED", errandId, errand.publisherId(),
                 errand.grabberId() != null ? errand.grabberId() : 0L, escrow.amount().cents(), 0);
 
+        // 账户开通放在事务外：事务内 ensure 会在公共账户之前拿 wallet 行锁，破坏全局锁序。
+        walletRepository.ensureUserAccount(escrow.publisherId());
+
         // 一个用例事务涵盖状态、退款、信用和 outbox；CAS 冲突回滚整个事务。
         boolean committed = WalletDeadlockRetry.execute(() ->
                 Boolean.TRUE.equals(transactionTemplate.execute(status -> {
@@ -136,14 +142,24 @@ public class RefundErrandUseCase {
                     return true;
                 })));
         if (committed) {
-            cacheEvict.evictAfterCommit(errandId);
-            notifier.errandStatusChanged(errandId, errand.publisherId(), errand.grabberId(),
-                    to.name(), errand.round());
-            auditPort.record(bizNo, "REFUND", errandId, operatorId,
-                    String.format("{\"amount\":%d}", escrow.amount().cents()), true, null);
+            // 资金已提交：审计最关键，必须排在其它可降级副作用之前且独立兜底。
+            sideEffect("refund-audit", () -> auditPort.record(bizNo, "REFUND", errandId, operatorId,
+                    String.format("{\"amount\":%d}", escrow.amount().cents()), true, null));
+            sideEffect("refund-cache-evict", () -> cacheEvict.evictAfterCommit(errandId));
+            sideEffect("refund-realtime", () -> notifier.errandStatusChanged(errandId, errand.publisherId(),
+                    errand.grabberId(), to.name(), errand.round()));
             return Result.REFUNDED;
         }
         return Result.CONFLICT;
+    }
+
+    private void sideEffect(String name, Runnable action) {
+        try {
+            action.run();
+        } catch (RuntimeException e) {
+            log.warn("退款已提交但后置动作失败 name={} errandId={}（可运维补偿，不影响资金结果）",
+                    name, e);
+        }
     }
 
     /** 退款事务体，由 TransactionTemplate 包裹（见 doRefund 注释） */
@@ -162,7 +178,6 @@ public class RefundErrandUseCase {
         errandRepository.appendStatusLog(errandId, from, to, errand.round(), operatorId);
 
         WalletAccount escrowAccount = walletRepository.findByOwner(ESCROW_ACCOUNT_OWNER, AccountType.ESCROW).orElseThrow();
-        walletRepository.ensureUserAccount(escrow.publisherId());
         WalletAccount publisherAccount = walletRepository.findByOwner(escrow.publisherId(), AccountType.USER).orElseThrow();
 
         WalletPosting.post(walletRepository, idGenerator, bizNo, LedgerEntry.RefType.REFUND,

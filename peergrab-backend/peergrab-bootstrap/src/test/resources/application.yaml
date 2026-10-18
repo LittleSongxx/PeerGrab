@@ -1,4 +1,5 @@
-# 集成测试专用配置（完整拷贝）：
+# 集成测试专用配置（最小覆写集：只显式固定与生产不同的项；
+# 其余键由代码内建默认值生效，跑 IT 时需注意默认值可能与主 yaml 漂移）：
 # Spring Boot 不会合并 src/main 与 src/test 的同名 application.yaml，
 # test resources 里的是完整替换——这里必须包含数据源等基础配置，
 # 缺任何一段都会报 "Failed to determine a suitable driver class"（实测踩过）。

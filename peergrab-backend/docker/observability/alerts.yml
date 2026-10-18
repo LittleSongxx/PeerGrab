@@ -18,8 +18,8 @@ groups:
           severity: critical
           service: peergrab-app
         annotations:
-          summary: "app 不可达或 readiness 失败"
-          description: "Prometheus 连续 1 分钟抓取 app:8080/actuator/prometheus 失败。容器 healthcheck 用的 /actuator/health/readiness 与抓取走同一个端口，因此这同时意味着在线实例已经不可用；先看容器状态与 readiness 探针输出。"
+          summary: "app 指标抓取不可达"
+          description: "Prometheus 连续 1 分钟抓取 app:8080/actuator/prometheus 失败。该端点与容器 healthcheck 的 /actuator/health/readiness 共用端口，因此抓取失败通常意味着实例不可达；但 up 只看抓取可达性，业务健康请结合 readiness 探针/容器状态一起判断。"
 
       - alert: PeerGrabWorkerDown
         expr: up{job="peergrab-worker"} == 0

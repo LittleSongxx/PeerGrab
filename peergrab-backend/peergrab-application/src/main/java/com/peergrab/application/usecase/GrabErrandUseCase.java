@@ -154,7 +154,7 @@ public class GrabErrandUseCase {
             return Result.failed(ErrorCode.ERRAND_NOT_FOUND, null);
         }
         if (mayHaveRecordedGrab(target)) {
-            Result replay = persistedResult(target.campusId(), cmd);
+            Result replay = persistedResult(target.campusId(), cmd, target.round());
             if (replay != null) return replay;
         }
         if (target.publisherId() == cmd.runnerId()) {
@@ -230,7 +230,7 @@ public class GrabErrandUseCase {
             }
             case DUPLICATE_REQUEST -> {
                 // Redis 只有预占位，不能把尚未提交的请求回复为成功。
-                Result committed = persistedResult(target.campusId(), cmd);
+                Result committed = persistedResult(target.campusId(), cmd, target.round());
                 if (committed == null) {
                     healStaleRedisReservation(cmd);
                     return Result.failed(ErrorCode.GRAB_CONFLICT, null);
@@ -261,13 +261,13 @@ public class GrabErrandUseCase {
                             errand.campusId(), cmd.errandId(), cmd.runnerId(), errand.version(), seq, errand.round(),
                             idGenerator.nextId(), errand.status(), cmd.requestId()));
             if (lockResult == GrabTransactionalStep.LockResult.QUOTA_FULL) {
-                Result committed = persistedResult(errand.campusId(), cmd);
+                Result committed = persistedResult(errand.campusId(), cmd, errand.round());
                 if (committed != null) return committed;
                 rollbackIfReserved(cmd, reservedInRedis);
                 return Result.failed(ErrorCode.TOO_MANY_ONGOING, null);
             }
             if (lockResult != GrabTransactionalStep.LockResult.GRABBED) {
-                Result committed = persistedResult(errand.campusId(), cmd);
+                Result committed = persistedResult(errand.campusId(), cmd, errand.round());
                 if (committed != null) return committed;
                 rollbackIfReserved(cmd, reservedInRedis);
                 return classifyUnavailable(cmd, score);
@@ -277,7 +277,7 @@ public class GrabErrandUseCase {
         } catch (RuntimeException e) {
             // 提交结果不明时先查数据库；只有确认未落库才撤销 Redis 预占位。
             try {
-                Result committed = persistedResult(target.campusId(), cmd);
+                Result committed = persistedResult(target.campusId(), cmd, target.round());
                 if (committed != null) return committed;
                 rollbackIfReserved(cmd, reservedInRedis);
             } catch (RuntimeException readFailure) {
@@ -288,11 +288,14 @@ public class GrabErrandUseCase {
         }
     }
 
-    private Result persistedResult(long campusId, Command cmd) {
+    private Result persistedResult(long campusId, Command cmd, int round) {
         var holder = metrics.time(REPLAY_READ,
-                () -> grabRecordRepository.findRunnerByRequestId(campusId, cmd.errandId(), cmd.requestId()));
+                () -> grabRecordRepository.findGrabbedByRequestId(
+                        campusId, cmd.errandId(), cmd.requestId(), round));
         if (holder.isEmpty()) return null;
-        return holder.get() == cmd.runnerId()
+        var record = holder.get();
+        if (record.round() != round) return null;
+        return record.runnerId() == cmd.runnerId()
                 ? Result.success() : Result.failed(ErrorCode.DUPLICATE_REQUEST, null);
     }
 

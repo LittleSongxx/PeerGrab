@@ -1,5 +1,6 @@
 package com.peergrab.application.usecase;
 
+import com.peergrab.application.usecase.security.ActorRolePolicy;
 import com.peergrab.domain.credit.ports.CreditRepository;
 import com.peergrab.domain.errand.model.Errand;
 import com.peergrab.domain.errand.model.ErrandStatus;
@@ -53,6 +54,7 @@ public class TimeoutTransferUseCase {
      */
     private final int maxTransferRounds;
     private final RealtimeNotifier notifier;
+    private final ActorRolePolicy rolePolicy;
 
     @org.springframework.beans.factory.annotation.Autowired
     public TimeoutTransferUseCase(ErrandRepository errandRepository,
@@ -66,7 +68,8 @@ public class TimeoutTransferUseCase {
                                   @Value("${peergrab.credit.min-score:40}") int minCreditScore,
                                   @Value("${peergrab.credit.max-ongoing:5}") int maxOngoing,
                                   @Value("${peergrab.timeout.max-transfer-rounds:5}") int maxTransferRounds,
-                                  RealtimeNotifier notifier) {
+                                  RealtimeNotifier notifier,
+                                  ActorRolePolicy rolePolicy) {
         this.errandRepository = errandRepository;
         this.candidateQueue = candidateQueue;
         this.grabSlotPort = grabSlotPort;
@@ -79,6 +82,7 @@ public class TimeoutTransferUseCase {
         this.maxOngoing = maxOngoing;
         this.maxTransferRounds = maxTransferRounds;
         this.notifier = notifier;
+        this.rolePolicy = rolePolicy;
     }
 
     /** 单测便捷构造：默认使用空实时通知实现。 */
@@ -101,7 +105,8 @@ public class TimeoutTransferUseCase {
                     @Override public void notificationArrived(long userId, long errandId, String type,
                                                               String content) { }
                     @Override public void creditChanged(long userId, int newScore, int delta, String reason) { }
-                });
+                },
+                new ActorRolePolicy(9001L));
     }
 
     public enum Outcome {
@@ -153,6 +158,7 @@ public class TimeoutTransferUseCase {
             try {
                 eligible = nextRunner != errand.publisherId()
                         && (errand.grabberId() == null || nextRunner != errand.grabberId())
+                        && !rolePolicy.isArbitrator(nextRunner)
                         && creditRepository.scoreOf(nextRunner) >= minCreditScore
                         && errandQueryPort.countOngoingByRunner(nextRunner) < maxOngoing;
             } catch (RuntimeException e) {

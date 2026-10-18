@@ -124,6 +124,21 @@ class TimeoutTransferUseCaseTest {
         order.verify(fixture.dispatcher).dispatch(send);
     }
 
+    @Test
+    void arbitrator_is_never_selected_as_candidate() {
+        var fixture = new Fixture();
+        var candidate = new CandidateQueuePort.Candidate(9001L, 5.0, "lease-arb");
+        when(fixture.queue.pollBest(10001L)).thenReturn(
+                Optional.of(candidate), Optional.empty());
+        when(fixture.step.revert(fixture.errand))
+                .thenReturn(new TimeoutTransferStep.StepResult(true, null));
+
+        assertEquals(TimeoutTransferUseCase.Outcome.REVERTED,
+                fixture.useCase.handleTimeout(10001L, 0));
+        verify(fixture.queue).acknowledge(10001L, candidate);
+        verify(fixture.step, never()).transfer(any(), anyLong());
+    }
+
     private static final class Fixture {
         final Errand errand = Errand.rehydrate(10001L, 1L, 1001L, ErrandType.DELIVERY,
                 "测试任务", Money.ofCents(100), 1, 2001L, ErrandStatus.LOCKED,

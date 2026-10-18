@@ -60,7 +60,8 @@ public class WsHandler extends TextWebSocketHandler {
         if (!validateSession(userId, session)) return;
         if (!registry.add(userId, session)) {
             // 单用户连接数超限：拒绝新连接，避免恶意/异常客户端耗尽服务端资源。
-            closeAndRemove(session, userId);
+            // 1013 让前端按普通断线退避重连，而不是误判鉴权失败去刷新 token。
+            closeWith(session, userId, new CloseStatus(1013, "too many connections"));
         }
     }
 
@@ -106,11 +107,24 @@ public class WsHandler extends TextWebSocketHandler {
         }
     }
 
+    private void closeWith(WebSocketSession session, Long userId, CloseStatus status) {
+        if (userId != null) registry.remove(userId, session);
+        if (!session.isOpen()) return;
+        try {
+            synchronized (session) {
+                session.close(status);
+            }
+        } catch (Exception e) {
+            log.debug("WebSocket 连接关闭失败 userId={}", userId, e);
+        }
+    }
+
     @Override
     protected void handleTextMessage(WebSocketSession session, TextMessage message) throws Exception {
         if (!allowClientMessage(session)) {
             synchronized (session) {
-                session.close(CloseStatus.POLICY_VIOLATION);
+                // 1013 表示"稍后再试"，前端不应把它当成鉴权失败去刷新 token。
+                session.close(new CloseStatus(1013, "rate-limited"));
             }
             return;
         }

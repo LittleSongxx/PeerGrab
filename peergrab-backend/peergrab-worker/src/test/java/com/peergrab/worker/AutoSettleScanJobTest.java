@@ -158,6 +158,24 @@ class AutoSettleScanJobTest {
         verify(settle, never()).settle(anyLong(), eq(Errand.SYSTEM_OPERATOR));
     }
 
+    @Test
+    void conflict_result_enters_durable_retry_queue() {
+        ErrandRepository repository = mock(ErrandRepository.class);
+        SettleErrandUseCase settle = mock(SettleErrandUseCase.class);
+        ScanRetryQueue retry = mock(ScanRetryQueue.class);
+        Instant due = Instant.parse("2026-01-01T00:00:00Z");
+        when(retry.claimDue(ScanRetryQueue.Type.AUTO_SETTLE, 50)).thenReturn(List.of());
+        when(retry.trackedRounds(eq(ScanRetryQueue.Type.AUTO_SETTLE), anyList())).thenReturn(Map.of());
+        when(repository.findAutoSettleDueAfter(0, null, 0, 200)).thenReturn(List.of(errand(1, due)));
+        when(settle.settleAutoBatch(anyList())).thenThrow(new IllegalStateException("batch conflict"));
+        when(settle.settle(1, Errand.SYSTEM_OPERATOR)).thenReturn(SettleErrandUseCase.Result.CONFLICT);
+
+        new AutoSettleScanJob(repository, settle, retry).scan();
+
+        verify(retry).recordFailure(eq(ScanRetryQueue.Type.AUTO_SETTLE), eq(1L), eq(0),
+                any(Exception.class));
+    }
+
     private static Errand errand(long id, Instant deliveredAt) {
         return Errand.rehydrate(id, 1, 1001, ErrandType.DELIVERY, "task",
                 Money.ofCents(100), 1, 2001L, ErrandStatus.DELIVERED,

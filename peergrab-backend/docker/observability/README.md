@@ -1,5 +1,8 @@
 # PeerGrab 最小可观测性栈（Prometheus + Grafana）
 
+> 该 overlay 只面向本地/演示栈。不要直接叠加到生产栈：Grafana 默认匿名访问且口令为本地占位值，
+> Prometheus 也是无鉴权的单实例 TSDB。生产接入前必须先改鉴权、网络暴露范围与保留策略。
+
 本目录提供一套**最小可用**的本机可观测性栈：Prometheus 抓取 app / worker 的
 `/actuator/prometheus`，加载 11 条告警规则，并用一个 9 面板的 Grafana dashboard
 覆盖 API 业务结果、抢单阶段延迟、资金 / 延迟消息 outbox 积压、对账差异、进程与 JVM 资源。

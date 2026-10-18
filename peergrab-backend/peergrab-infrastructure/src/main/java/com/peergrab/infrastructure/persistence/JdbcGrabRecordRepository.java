@@ -41,11 +41,22 @@ public class JdbcGrabRecordRepository implements GrabRecordRepository {
     }
 
     @Override
-    public Optional<Long> findRunnerByRequestId(long campusId, long errandId, String requestId) {
-        List<Long> rows = jdbc.query("""
-                SELECT runner_id FROM grab_record
-                 WHERE campus_id = ? AND errand_id = ? AND request_id = ? AND result = 'GRABBED'
-                """, (rs, rowNum) -> rs.getLong(1), campusId, errandId, requestId);
+    public Optional<GrabRecord> findGrabbedByRequestId(long campusId, long errandId,
+                                                       String requestId, int round) {
+        List<GrabRecord> rows = jdbc.query("""
+                SELECT id, campus_id, errand_id, runner_id, seq, round, result, request_id, created_at
+                  FROM grab_record
+                 WHERE campus_id = ? AND errand_id = ? AND request_id = ?
+                   AND round = ? AND result = 'GRABBED'
+                 LIMIT 1
+                """, (rs, rowNum) -> new GrabRecord(
+                        rs.getLong("id"), rs.getLong("campus_id"), rs.getLong("errand_id"),
+                        rs.getLong("runner_id"), rs.getInt("seq"), rs.getInt("round"),
+                        com.peergrab.domain.grab.model.GrabRecord.GrabResultType.valueOf(rs.getString("result")),
+                        rs.getString("request_id"),
+                        rs.getTimestamp("created_at") == null ? null
+                                : rs.getTimestamp("created_at").toInstant()),
+                campusId, errandId, requestId, round);
         return rows.stream().findFirst();
     }
 }

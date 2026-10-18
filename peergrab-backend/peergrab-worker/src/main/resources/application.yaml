@@ -20,13 +20,15 @@ peergrab:
     maintenance-pool-size: 3   # 对账、信用/缓存投影重建、数据保留清理
     mq-send-pool-size: 2       # MQ 同步发送独立成池，Broker 故障不占用兜底扫描线程
   settle:
+    commission-rate: 0.05       # 必须与 API 一致：自动结算与手动结算的分账口径不能漂移
+    auto-settle-seconds: 86400  # 与 API 一致；空 deadline 数据修复任务按此回填
     scan-interval-ms: 5000
     scan-batch-size: 100        # 批量结算单页上限：批量越大 ESCROW/COMMISSION 锁持有越久
     scan-max-batches: 5         # 同一轮连续处理最多 5 页
     scan-max-run-ms: 30000      # 一次尽量排空到期页；其它 fast scheduler 仍有独立线程
   ws:
     # worker 进程不持有 WebSocket 连接，推送由 app 进程负责；
-    # 这里显式关闭以装配 NoopRealtimeNotifier（用例依赖该端口）
+    # 这里显式关闭以装配 RedisFanoutRealtimeNotifier（用例依赖 RealtimeNotifier 端口）
     enabled: false
   worker-id: 2                  # 与在线服务（1）区分，避免雪花 ID 重复
   mq:
@@ -41,7 +43,7 @@ peergrab:
       confirm-timeout: peergrab-timeout-consumer
   timeout:
     confirm-seconds: 300
-    max-transfer-rounds: 5      # 防无限流转：超过则回退让所有人重新抢        # 生产 5 分钟；测试用 10 秒
+    max-transfer-rounds: 5      # 防无限流转：超过则回退让所有人重新抢
     scan-interval-ms: 5000
     scan-grace-seconds: 2       # 宽限期：让 MQ 主通道先处理
     scan-max-batches: 5         # 同一轮最多连续处理 5 页，每页 200 条
@@ -61,6 +63,8 @@ peergrab:
     bloom-enabled: true        # 与 API 默认一致；判否短路防穿透（fail-open + 巡检兜底）
     bloom-rebuild-interval-ms: 300000
     bloom-refresh-interval-ms: 1800000  # 周期全量校准
+  deadline-repair:
+    interval-ms: 300000         # 截止时间缺失修复周期；命中时打 ERROR 日志提示人工排查
   retention:
     enabled: true
     cron: "0 30 4 * * ?"       # 注意容器 TZ；生产 compose 已设置 Asia/Shanghai
@@ -68,9 +72,8 @@ peergrab:
     max-batches: 20
     local-message-days: 7
     fund-outbox-days: 30
-    publish-request-days: 7
+    publish-request-days: 30    # 发布幂等窗口：不得短于客户端离线重试/补发上限
     notification-days: 180
-    recon-diff-days: 365
     sync-diff-days: 90
 
 server:

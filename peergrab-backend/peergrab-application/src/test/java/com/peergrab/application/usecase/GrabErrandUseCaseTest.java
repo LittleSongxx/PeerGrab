@@ -92,7 +92,8 @@ class GrabErrandUseCaseTest {
         var step = mock(GrabTransactionalStep.class);
         var errand = publishedErrand();
         when(errands.findById(errand.id())).thenReturn(Optional.of(errand));
-        when(records.findRunnerByRequestId(1L, errand.id(), "same-request")).thenReturn(Optional.empty());
+        when(records.findGrabbedByRequestId(1L, errand.id(), "same-request", 0))
+                .thenReturn(Optional.empty());
         when(slot.tryAcquire(errand.id(), 2001L, "same-request")).thenReturn(SlotOutcome.DUPLICATE_REQUEST);
 
         var result = useCase(slot, records, errands, step).grab(
@@ -113,13 +114,41 @@ class GrabErrandUseCaseTest {
                 "测试任务", Money.ofCents(100), 1, 2001L, ErrandStatus.LOCKED,
                 1, 0, 2L, java.time.Instant.now());
         when(errands.findById(errand.id())).thenReturn(Optional.of(errand));
-        when(records.findRunnerByRequestId(1L, errand.id(), "used-request")).thenReturn(Optional.of(2001L));
+        when(records.findGrabbedByRequestId(1L, errand.id(), "used-request", 0))
+                .thenReturn(Optional.of(com.peergrab.domain.grab.model.GrabRecord.grabbed(
+                        9L, 1L, errand.id(), 2001L, 1, 0, "used-request")));
 
         var result = useCase(slot, records, errands, mock(GrabTransactionalStep.class)).grab(
                 new GrabErrandUseCase.Command(errand.id(), 2002L, "used-request"));
 
         assertEquals(ErrorCode.DUPLICATE_REQUEST, result.code());
         verifyNoInteractions(slot);
+    }
+
+    @Test
+    @DisplayName("回退后的新轮次不能命中旧轮次 requestId 记录而被误报抢中")
+    void stale_request_id_from_previous_round_is_not_reported_as_success() {
+        var slot = mock(GrabSlotPort.class);
+        var records = mock(GrabRecordRepository.class);
+        var errands = mock(ErrandRepository.class);
+        var step = mock(GrabTransactionalStep.class);
+        // 任务已回退：round=1、PUBLISHED、无 grabber；旧轮次 round=0 留有同一 requestId 记录。
+        var reopened = Errand.rehydrate(10001L, 1L, 1001L, ErrandType.DELIVERY,
+                "回退任务", Money.ofCents(100), 1, null, ErrandStatus.PUBLISHED,
+                0, 1, 3L, null);
+        when(errands.findById(reopened.id())).thenReturn(Optional.of(reopened));
+        when(records.findGrabbedByRequestId(1L, reopened.id(), "replay-request", 1))
+                .thenReturn(Optional.empty());
+        when(slot.tryAcquire(reopened.id(), 2002L, "replay-request"))
+                .thenReturn(SlotOutcome.REQUEST_ID_CONFLICT);
+
+        var result = useCase(slot, records, errands, step).grab(
+                new GrabErrandUseCase.Command(reopened.id(), 2002L, "replay-request"));
+
+        assertFalse(result.grabbed());
+        assertEquals(ErrorCode.DUPLICATE_REQUEST, result.code());
+        verify(records).findGrabbedByRequestId(1L, reopened.id(), "replay-request", 1);
+        verify(records, never()).findGrabbedByRequestId(1L, reopened.id(), "replay-request", 0);
     }
 
     @Test
@@ -132,7 +161,8 @@ class GrabErrandUseCaseTest {
         var timeout = mock(TimeoutTransferUseCase.class);
         var errand = publishedErrand();
         when(errands.findById(errand.id())).thenReturn(Optional.of(errand));
-        when(records.findRunnerByRequestId(1L, errand.id(), "fallback-request")).thenReturn(Optional.empty());
+        when(records.findGrabbedByRequestId(1L, errand.id(), "fallback-request", 0))
+                .thenReturn(Optional.empty());
         when(slot.tryAcquire(errand.id(), 2001L, "fallback-request")).thenReturn(SlotOutcome.SLOT_MISSING);
         when(step.lockAndRecord(eq(1L), eq(errand.id()), eq(2001L), anyLong(),
                 anyInt(), anyInt(), anyLong(), any(), eq("fallback-request")))
@@ -202,7 +232,8 @@ class GrabErrandUseCaseTest {
                 "测试任务", Money.ofCents(100), 1, 2001L, ErrandStatus.LOCKED,
                 1, 0, 2L, java.time.Instant.now());
         when(errands.findById(errand.id())).thenReturn(Optional.of(errand));
-        when(records.findRunnerByRequestId(1L, errand.id(), "candidate-request")).thenReturn(Optional.empty());
+        when(records.findGrabbedByRequestId(1L, errand.id(), "candidate-request", 0))
+                .thenReturn(Optional.empty());
         when(credit.scoreOf(2002L)).thenReturn(60);
         when(queue.offer(eq(errand.id()), eq(2002L), anyDouble())).thenReturn(7L);
         var useCase = new GrabErrandUseCase(slot, records, queue, errands,
@@ -236,7 +267,7 @@ class GrabErrandUseCaseTest {
                 "回退任务", Money.ofCents(100), 1, null, ErrandStatus.PUBLISHED,
                 0, 1, 3L, null);
         when(errands.findById(locked.id())).thenReturn(Optional.of(locked), Optional.of(reopened));
-        when(records.findRunnerByRequestId(1L, locked.id(), "reopened-request"))
+        when(records.findGrabbedByRequestId(1L, locked.id(), "reopened-request", 0))
                 .thenReturn(Optional.empty());
         when(slot.tryAcquire(locked.id(), 2002L, "reopened-request"))
                 .thenReturn(SlotOutcome.SLOT_MISSING);
@@ -387,7 +418,8 @@ class GrabErrandUseCaseTest {
     private static final class EmptyGrabRecordRepository implements GrabRecordRepository {
         @Override public void insert(GrabRecord record) {}
         @Override public int countGrabbed(long campusId, long errandId) { return 0; }
-        @Override public Optional<Long> findRunnerByRequestId(long campusId, long errandId, String requestId) {
+        @Override public Optional<com.peergrab.domain.grab.model.GrabRecord> findGrabbedByRequestId(
+                long campusId, long errandId, String requestId, int round) {
             return Optional.empty();
         }
     }

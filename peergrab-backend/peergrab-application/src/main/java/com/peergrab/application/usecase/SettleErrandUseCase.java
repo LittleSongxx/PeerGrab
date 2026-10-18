@@ -157,7 +157,7 @@ public class SettleErrandUseCase {
 
         // 计算佣金（向下取整，余数归跑腿）
         long totalCents = escrow.amount().cents();
-        long commissionCents = (long) Math.floor(totalCents * commissionRate);
+        long commissionCents = commissionCents(totalCents);
         long runnerCents = totalCents - commissionCents;
         Money runnerAmount = Money.ofCents(runnerCents);
         Money commissionAmount = Money.ofCents(commissionCents);
@@ -165,6 +165,10 @@ public class SettleErrandUseCase {
         String bizNo = LedgerEntry.settleBizNo(errandId);
         FundEvent event = new FundEvent(bizNo, "SETTLED", errandId, errand.publisherId(),
                 errand.grabberId() != null ? errand.grabberId() : 0L, runnerCents, commissionCents);
+
+        // 账户开通放在事务外：ODKU 对已存在的 wallet 行取 X 锁，若放在事务内、
+        // 公共账户加锁之前，会与发布/退款形成 wallet→escrow 与 escrow→wallet 的环。
+        walletRepository.ensureUserAccount(errand.grabberId());
 
         // 一个用例事务涵盖状态、资金、信用和 outbox；CAS 冲突回滚整个事务。
         boolean committed = WalletDeadlockRetry.execute(() ->
@@ -238,7 +242,7 @@ public class SettleErrandUseCase {
                     .orElseThrow(() -> new BizException(ErrorCode.ESCROW_NOT_FOUND,
                             "errandId=" + errand.id()));
             long totalCents = escrow.amount().cents();
-            long commissionCents = (long) Math.floor(totalCents * commissionRate);
+            long commissionCents = commissionCents(totalCents);
             long runnerCents = totalCents - commissionCents;
             String bizNo = LedgerEntry.settleBizNo(errand.id());
             candidates.add(new AutoSettlement(errand, escrow, Money.ofCents(runnerCents),
@@ -247,6 +251,10 @@ public class SettleErrandUseCase {
                             errand.grabberId(), runnerCents, commissionCents)));
         }
         if (candidates.isEmpty()) return new BatchResult(0, skipped);
+
+        // 事务外按 grabberId 升序幂等开通账户，避免 ensure 在事务内插队破坏全局锁序。
+        candidates.stream().map(item -> item.errand().grabberId())
+                .distinct().sorted().forEach(walletRepository::ensureUserAccount);
 
         List<AutoSettlement> committed = new ArrayList<>(candidates.size());
         final int initialSkipped = skipped;
@@ -271,10 +279,6 @@ public class SettleErrandUseCase {
                     }
                     if (applied.isEmpty()) return new BatchResult(0, transactionSkipped);
 
-                    for (AutoSettlement item : applied) {
-                        // 兜底自愈：历史/异常数据可能缺少跑腿账户，结算前幂等开通。
-                        walletRepository.ensureUserAccount(item.errand().grabberId());
-                    }
                     List<WalletRepository.OwnerRef> refs = new ArrayList<>(applied.size() + 2);
                     refs.add(new WalletRepository.OwnerRef(ESCROW_ACCOUNT_OWNER, AccountType.ESCROW));
                     refs.add(new WalletRepository.OwnerRef(COMMISSION_ACCOUNT_OWNER, AccountType.COMMISSION));
@@ -350,6 +354,14 @@ public class SettleErrandUseCase {
      * 结算的事务体。由 TransactionTemplate 包裹执行（见 settle 里的注释），
      * 不依赖 @Transactional 代理——lambda 自调用场景下代理不可靠。
      */
+    /** 费率用十进制精确计算，避免 0.29 这类二进制表示偏小的费率在 Math.floor 下少 1 分。 */
+    private long commissionCents(long totalCents) {
+        return java.math.BigDecimal.valueOf(totalCents)
+                .multiply(java.math.BigDecimal.valueOf(commissionRate))
+                .setScale(0, java.math.RoundingMode.DOWN)
+                .longValueExact();
+    }
+
     boolean doSettle(long errandId, Errand errand, EscrowOrder escrow,
                      Money runnerAmount, Money commissionAmount, String bizNo, long operatorId) {
         // 所有资金终态先锁任务、再锁托管单，避免结算与仲裁退款互相等待。
@@ -371,8 +383,7 @@ public class SettleErrandUseCase {
                 com.peergrab.domain.errand.model.ErrandStatus.SETTLED,
                 errand.round(), operatorId);
 
-        // 资金转移：托管账户 -> 跑腿 + 佣金
-        walletRepository.ensureUserAccount(errand.grabberId());
+        // 资金转移：托管账户 -> 跑腿 + 佣金（账户已在事务外幂等开通）
         var escrowRef = new WalletRepository.OwnerRef(ESCROW_ACCOUNT_OWNER, AccountType.ESCROW);
         var runnerRef = new WalletRepository.OwnerRef(errand.grabberId(), AccountType.USER);
         var commissionRef = new WalletRepository.OwnerRef(COMMISSION_ACCOUNT_OWNER, AccountType.COMMISSION);

@@ -130,14 +130,19 @@ public class PublishErrandUseCase {
                     "X-Request-Id reused with different publish details");
         }
         if (claim.errandId() != null) {
-            return new Result(claim.errandId(), ErrandStatus.PUBLISHED, reward.cents());
+            // 幂等重放必须返回任务当前真实状态，否则任务已结算/取消时前端仍显示可取消的 PUBLISHED。
+            ErrandStatus current = errandRepository.findById(claim.errandId())
+                    .map(Errand::status).orElse(ErrandStatus.PUBLISHED);
+            return new Result(claim.errandId(), current, reward.cents());
         }
 
         // The claim's unique key and row lock are acquired before any wallet row.
         // Same-key competitors wait for this transaction, then replay its committed ID.
         long errandId = idGenerator.nextId();
 
-        walletRepository.ensureUserAccount(cmd.publisherId());
+        // 账户开通不放事务内：ensure 会对已存在账户行取 X 锁，放在领取发布登记/公共账户之前
+        // 会与退款/结算的 escrow->wallet 锁序相互等待成环。发布方身份来自受控账户体系，
+        // 缺失账户应在注册/初始化时建好；这里只做存在性校验。
         WalletAccount publisherAccount = walletRepository
                 .findByOwner(cmd.publisherId(), AccountType.USER)
                 .orElseThrow(() -> new BizException(ErrorCode.ACCOUNT_NOT_FOUND, "publisher=" + cmd.publisherId()));

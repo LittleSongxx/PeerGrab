@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS errand (
   KEY idx_confirm_deadline (status, confirm_deadline_at, id),
   KEY idx_auto_settle_deadline (status, auto_settle_deadline_at, id),
   KEY idx_grabber_status (grabber_id, status),
+  KEY idx_grabber_created (grabber_id, created_at),
   KEY idx_publisher (publisher_id, created_at),
   -- 数据库级不变式：已占名额永远不能超过总名额（INV-1 的最后保险）
   CONSTRAINT ck_slot CHECK (slot_taken >= 0 AND slot_taken <= slot_total)

@@ -29,7 +29,6 @@ public class DataRetentionJob {
     private final int fundOutboxDays;
     private final int publishRequestDays;
     private final int notificationDays;
-    private final int reconDiffDays;
     private final int syncDiffDays;
 
     @Autowired
@@ -41,7 +40,6 @@ public class DataRetentionJob {
                             @Value("${peergrab.retention.fund-outbox-days:30}") int fundOutboxDays,
                             @Value("${peergrab.retention.publish-request-days:7}") int publishRequestDays,
                             @Value("${peergrab.retention.notification-days:180}") int notificationDays,
-                            @Value("${peergrab.retention.recon-diff-days:365}") int reconDiffDays,
                             @Value("${peergrab.retention.sync-diff-days:90}") int syncDiffDays) {
         this.jdbc = jdbc;
         this.enabled = enabled;
@@ -51,7 +49,6 @@ public class DataRetentionJob {
         this.fundOutboxDays = Math.max(1, fundOutboxDays);
         this.publishRequestDays = Math.max(1, publishRequestDays);
         this.notificationDays = Math.max(1, notificationDays);
-        this.reconDiffDays = Math.max(1, reconDiffDays);
         this.syncDiffDays = Math.max(1, syncDiffDays);
     }
 
@@ -79,11 +76,7 @@ public class DataRetentionJob {
                  WHERE read_flag = 1 AND created_at < DATE_SUB(NOW(3), INTERVAL ? DAY)
                  LIMIT ?
                 """, notificationDays);
-        total += prune("recon_diff", """
-                DELETE FROM recon_diff
-                 WHERE check_date < DATE_SUB(CURRENT_DATE(), INTERVAL ? DAY)
-                 LIMIT ?
-                """, reconDiffDays);
+        // recon_diff 是"账实不一致"的审计证据，不做自动删除：保留到人工确认处理完毕。
         total += prune("sync_diff", """
                 DELETE FROM sync_diff
                  WHERE check_time < DATE_SUB(NOW(3), INTERVAL ? DAY)
