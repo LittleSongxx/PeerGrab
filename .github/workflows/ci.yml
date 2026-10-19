@@ -201,8 +201,9 @@ jobs:
           import xml.etree.ElementTree as ET
 
           root = Path('peergrab-backend/bench/jmeter')
-          plans = sorted(root.rglob('*.jmx'))
-          assert len(plans) == 7
+          # archive/ 下是已退役/反例计划，不参与现役计划数量门禁。
+          plans = sorted(p for p in root.rglob('*.jmx') if 'archive' not in p.parts)
+          assert len(plans) == 7, plans
           for plan in plans:
               ET.parse(plan)
 
