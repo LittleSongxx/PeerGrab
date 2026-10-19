@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, getUserId } from '../api';
 import type { CreditSelf, CreditRankEntry } from '../api';
+import LoadingSkeleton from '../components/LoadingSkeleton';
+import { subscribeWs } from '../ws';
 
 /**
  * 信用分页：我的分数 + 30 天事件流水 + 校区排行榜。
@@ -29,12 +31,24 @@ export default function Credit() {
     }
   }, []);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    void load();
+    const unsubscribe = subscribeWs((event) => {
+      if (event.type === 'credit.changed' || event.type === 'notification.new') void load();
+    });
+    const poll = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void load();
+    }, 30000);
+    return () => {
+      unsubscribe();
+      window.clearInterval(poll);
+    };
+  }, [load]);
 
   const myRank = ranking.findIndex((entry) => entry.userId === String(getUserId()));
 
   return (
-    <div className="credit-page page-stack">
+    <div className="credit-page page-stack" data-testid="credit-page">
       <header className="page-intro">
         <div>
           <span className="page-eyebrow">信用成长</span>
@@ -78,7 +92,7 @@ export default function Credit() {
             </div>
             {self && <span className="section-count">近 {self.windowDays} 天</span>}
           </div>
-          {loading && !self && <div className="loading-state" role="status">正在加载信用记录…</div>}
+          {loading && !self && <LoadingSkeleton variant="rows" rows={3} label="正在加载信用记录…" />}
           {!loading && self?.events.length === 0 && (
             <div className="empty-state credit-empty">
               <span className="empty-state-icon" aria-hidden="true">◎</span>
@@ -107,7 +121,7 @@ export default function Credit() {
             </div>
             <span className="section-count">Top 20</span>
           </div>
-          {loading && ranking.length === 0 && <div className="loading-state" role="status">正在加载排行榜…</div>}
+          {loading && ranking.length === 0 && <LoadingSkeleton variant="rows" rows={3} label="正在加载排行榜…" />}
           {!loading && ranking.length === 0 && (
             <div className="empty-state credit-empty">
               <span className="empty-state-icon" aria-hidden="true">☆</span>

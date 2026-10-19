@@ -289,6 +289,7 @@ public class SpikeLoadClient {
                 .uri(URI.create(baseUrl + "/api/errands"))
                 .header("Authorization", "Bearer " + publisherToken)
                 .header("Content-Type", "application/json")
+                .header("X-Request-Id", UUID.randomUUID().toString())
                 .timeout(Duration.ofSeconds(10))
                 .POST(HttpRequest.BodyPublishers.ofString(json))
                 .build();

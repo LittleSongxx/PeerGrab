@@ -287,6 +287,8 @@ public final class CacheLoadClient {
                 .uri(URI.create(baseUrl + path))
                 .timeout(Duration.ofSeconds(10))
                 .header("Content-Type", "application/json")
+                // 发布接口强制幂等键；其他 POST 带着也无副作用。
+                .header("X-Request-Id", java.util.UUID.randomUUID().toString())
                 .POST(HttpRequest.BodyPublishers.ofString(body == null ? "{}" : body));
         if (token != null) b.header("Authorization", "Bearer " + token);
         HttpResponse<String> response = client.send(b.build(), HttpResponse.BodyHandlers.ofString());

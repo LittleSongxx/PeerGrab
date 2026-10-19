@@ -105,15 +105,23 @@ public final class JdbcSnowflakeNodeLease {
                      WHERE node_id = ? AND holder = ? AND expires_at > NOW(3)
                     """, leaseSeconds, ceilingMillis, nodeId, holder);
             if (updated != 1) {
-                throw new IllegalStateException("雪花节点租约已被接管或过期 nodeId=" + nodeId);
+                loseLease("雪花节点租约已被接管或过期 nodeId=" + nodeId);
+                return;
             }
             generator.extendLease(localDeadline(startedNanos), ceilingMillis);
         } catch (RuntimeException e) {
-            closed = true;
-            generator.revoke();
-            log.error("雪花节点续租失败，进程永久停止发号 nodeId={}", nodeId, e);
-            lossHandler.run();
+            // DB 瞬时不可用与"租约确实被抢走"必须区分：
+            // 本地租约还有窗口，下一次续租可恢复；若租约真的丢了，
+            // DB 恢复后 UPDATE 返回 0，会走 loseLease 并触发受控退出。
+            log.warn("雪花节点续租暂时失败，保留本地租约并等待重试 nodeId={}", nodeId, e);
         }
+    }
+
+    private void loseLease(String reason) {
+        closed = true;
+        generator.revoke();
+        log.error("雪花节点租约丢失，进程永久停止发号 nodeId={}", nodeId);
+        lossHandler.run();
     }
 
     @PreDestroy

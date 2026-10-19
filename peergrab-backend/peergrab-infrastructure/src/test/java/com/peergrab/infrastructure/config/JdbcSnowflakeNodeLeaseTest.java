@@ -74,12 +74,17 @@ class JdbcSnowflakeNodeLeaseTest {
     }
 
     @Test
-    void databaseFailureDuringRenewalRevokesGenerator() {
+    void databaseFailureDuringRenewalKeepsLocalLeaseUntilNextRetry() {
         var lease = new JdbcSnowflakeNodeLease(jdbc, 1, 30);
+        var shutdowns = new java.util.concurrent.atomic.AtomicInteger();
+        lease.onLeaseLost(shutdowns::incrementAndGet);
         jdbc.execute("DROP TABLE snowflake_node_lease");
 
         lease.renew();
 
-        assertThrows(IllegalStateException.class, () -> lease.generator().nextId());
+        assertTrue(lease.canGenerateIds(), "DB 瞬时失败不能立刻吊销本地租约");
+        assertEquals(0, shutdowns.get(), "没有确认失租就不触发受控退出");
+        assertDoesNotThrow(() -> lease.generator().nextId());
+        lease.close();
     }
 }

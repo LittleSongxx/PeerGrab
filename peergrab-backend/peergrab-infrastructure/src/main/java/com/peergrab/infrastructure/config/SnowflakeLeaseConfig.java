@@ -17,7 +17,7 @@ public class SnowflakeLeaseConfig {
     public JdbcSnowflakeNodeLease jdbcSnowflakeNodeLease(JdbcTemplate jdbc,
             @Value("${peergrab.worker-id:1}") int preferredNodeId,
             @Value("${peergrab.worker-lease.seconds:30}") int leaseSeconds,
-            @Value("${peergrab.worker-lease.close-on-loss:false}") boolean closeOnLoss,
+            @Value("${peergrab.worker-lease.close-on-loss:true}") boolean closeOnLoss,
             ConfigurableApplicationContext context) {
         JdbcSnowflakeNodeLease lease = new JdbcSnowflakeNodeLease(jdbc, preferredNodeId, leaseSeconds);
         if (closeOnLoss) {

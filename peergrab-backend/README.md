@@ -14,7 +14,8 @@ peergrab-backend/
 ├── peergrab-bootstrap/       API 进程装配与集成测试
 ├── peergrab-worker/          延迟流转、自动结算、补偿、校验和对账
 ├── peergrab-bench/           实验客户端
-└── peergrab-sharding-lab/   离线 ShardingSphere 规则实验，不进入 API/Worker 运行包
+├── peergrab-sharding-lab/   离线 ShardingSphere 规则实验，不进入 API/Worker 运行包
+└── peergrab-txmsg-lab/      离线 RocketMQ 事务消息协议仿真，不进入 API/Worker 运行包
 ```
 
 发布时资金进入托管；一个任务目前只有一个名额。并发抢单以 Redis Lua 降低冲突、MySQL CAS 和唯一索引作最终裁决。确认、取货、送达后结算；取消走退款，争议由仲裁员处理。`availableActions` 从服务端按身份和状态计算，前端依此显示按钮。雪花 ID 在 JSON 中序列化为字符串，防止 JavaScript 精度损失。
@@ -43,7 +44,7 @@ docker compose -f docker-compose.yaml -f docker-compose.full.yaml --env-file .en
 
 默认 Web 入口为 `http://127.0.0.1:25173`，API 调试端口为 `28080`；浏览器通过 Nginx 同源访问 `/api` 和 `/ws`。演示账号为 `1001 / demo1001`（发单人）、`2001 / demo2001`、`2002 / demo2002`（跑腿者）、`9001 / demo9001`（仲裁员）。这些公开凭据仅供本机 Compose 演示；正常应用配置默认禁用演示登录。
 
-本机完整演示栈默认使用 Redis Session；[生产栈](docker/ECS_DEPLOY.md)使用 MySQL 真值的 JWT，以便 Redis 故障时仍能校验已签发令牌，并要求至少 32 个 UTF-8 字节的 `PEERGRAB_AUTH_JWT_SECRET`。已有 `peergrab-local` 数据卷升级前须按下节执行迁移；仅重建镜像不会重新运行 `init.sql`。[旧 campus-dash 栈迁移记录](docker/UPGRADE.md)仅供查阅。停止演示栈使用相同两个 `-f` 参数执行 `docker compose down`，保留数据时不要加 `-v`。
+本机完整演示栈默认使用 Redis Session；[生产栈](docker/ECS_DEPLOY.md)使用 MySQL 真值的 JWT，以便 Redis 故障时仍能校验已签发令牌，并要求至少 32 个 UTF-8 字节的 `PEERGRAB_AUTH_JWT_SECRET`。已有 `peergrab-local` 数据卷升级前须按下节执行迁移；仅重建镜像不会重新运行 `init.sql`。停止演示栈使用相同两个 `-f` 参数执行 `docker compose down`，保留数据时不要加 `-v`。
 
 ### 已有本机 PeerGrab 数据卷升级
 
@@ -84,9 +85,15 @@ java -jar peergrab-bootstrap/target/peergrab-bootstrap-1.0.0-SNAPSHOT.jar
 
 另开终端在 `peergrab-backend` 启动 `java -jar peergrab-worker/target/peergrab-worker-1.0.0-SNAPSHOT.jar`。前端从 `peergrab-frontend` 运行 `npm ci && npm run dev`。四个演示口令须各不相同，正式身份系统不在这个演示实现中。
 
+## 文档与配置口径
+
+工程文档唯一入口见 [`docs/README.md`](../docs/README.md)：[设计基准](../docs/architecture/design-benchmark.md)、[消息一致性](../docs/architecture/messaging-consistency.md)、[分片设计](../docs/architecture/sharding-design.md)、[演进与踩坑](../docs/engineering/design-evolution.md)、[压测方法论](../docs/benchmark/methodology.md)。
+
+两份进程 `application.yaml` 共享的配置键必须保持同一值，由 `peergrab-bootstrap/src/test/java/com/peergrab/config/SharedConfigConsistencyTest.java` 门禁；测试数量以同一条 `mvn -Dpeergrab.it=true test` 命令配合 [`tools/summarize_tests.py`](tools/summarize_tests.py) 输出为准，不在多个文档里各写一套。
+
 ## API 与验证
 
-REST 接口保持 `/api/auth`、`/api/errands`、`/api/wallet`、`/api/credit`、`/api/notifications`；`/ws` 提供实时推送。发布任务可带 `X-Request-Id`：同一发单人用同一键和相同内容重试返回原任务，不重复托管；未提供键时每次请求都是新发布。
+REST 接口保持 `/api/auth`、`/api/errands`、`/api/wallet`、`/api/credit`、`/api/notifications`；`/ws` 提供实时推送。发布任务必须带 `X-Request-Id`：同一发单人用同一键和相同内容重试返回原任务，不重复托管；缺少该头返回 `INVALID_ARGUMENT`，服务端不会随机补键。
 
 ```bash
 cd peergrab-backend
@@ -102,7 +109,7 @@ export PEERGRAB_TEST_DB_PASSWORD='<独立测试 MySQL 密码>'
 mvn -Dpeergrab.it=true test
 ```
 
-2026-09-27 的旧版在可丢弃 MySQL/Redis 上运行 **214 项后端测试，0 失败、0 跳过**；前端 `npm run build` 与后端 `mvn -DskipTests package` 通过。真实 RocketMQ 的普通 Topic 类型、发送和消费读回另经独立契约脚本验证。2026-09-28 优化版在全新隔离 MySQL/Redis 上运行 `mvn -Dpeergrab.it=true test`，按 Maven 各模块汇总 **223 项执行、0 失败、0 错误、0 跳过**；独立栈的 S1/S4/S5 运行验收见下文报告。2026-10 修复版在同一隔离栈（另从旧 schema 版本执行迁移后复跑一轮）合计 **298 项、0 失败、0 错误、0 跳过，其中 78 项集成测试真实执行**；同时验证 API/Worker 运行时 readiness 与保留期 SQL。
+2026-09-27 的旧版在可丢弃 MySQL/Redis 上运行 **214 项后端测试，0 失败、0 跳过**；前端 `npm run build` 与后端 `mvn -DskipTests package` 通过。真实 RocketMQ 的普通 Topic 类型、发送和消费读回另经独立契约脚本验证。2026-09-28 优化版在全新隔离 MySQL/Redis 上运行 `mvn -Dpeergrab.it=true test`，按 Maven 各模块汇总 **223 项执行、0 失败、0 错误、0 跳过**；独立栈的 S1/S4/S5 运行验收见下文报告。2026-10-19 当前版本在同一隔离栈上运行 `mvn -B -ntp -Dpeergrab.it=true clean test` 合计 **308 项、0 失败、0 错误、0 跳过，其中 78 项集成测试真实执行**（更早的 298 项属于不同提交）；同时验证 API/Worker 运行时 readiness 与保留期 SQL。测试数量以同一条命令 + [`tools/summarize_tests.py`](tools/summarize_tests.py) 汇总为唯一口径，CI 的 backend job 会输出并校验该数字。
 
 在可丢弃的本地演示库上可运行 `python3 bench/scripts/smoke_e2e.py --env-file docker/.env`；脚本验证发布、抢单、结算、退款、仲裁和通知，**会创建任务并改变演示账户余额**。只读资金不变式检查可执行：
 

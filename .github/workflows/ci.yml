@@ -42,6 +42,10 @@ jobs:
               skipped += int(suite.attrib.get('skipped', 0))
           assert tests > 0 and skipped == 0, f'Integration cases: {tests} tests, {skipped} skipped'
           PY
+      - name: Summarize executed tests
+        run: python3 tools/summarize_tests.py --root . --strict --require-it | tee -a "$GITHUB_STEP_SUMMARY"
+        working-directory: peergrab-backend
+
       - name: Remove isolated integration middleware
         if: always()
         run: docker compose -p peergrab-ci -f docker-compose.yaml down -v --remove-orphans
@@ -218,3 +222,44 @@ jobs:
           bash -n peergrab-backend/docker/init-mq.sh
           sh -n peergrab-backend/docker/init-mq-container.sh
           bash -n peergrab-backend/docker/verify-fund-topic-contract.sh
+
+  frontend-acceptance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: peergrab-frontend/package-lock.json
+      - name: Install and build frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+        working-directory: peergrab-frontend
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install acceptance dependencies
+        run: |
+          python3 -m pip install --disable-pip-version-check -r requirements-dev.txt
+          python3 -m playwright install --with-deps chromium
+      - name: Run mock UI acceptance
+        run: python3 peergrab-frontend/tests/ui_smoke.py --dist peergrab-frontend/dist --output peergrab-frontend/verification/ci
+      - name: Upload acceptance report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-acceptance-report
+          path: peergrab-frontend/verification/ci
+          if-no-files-found: warn
+
+  docs-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check documentation links and index coverage
+        run: python3 scripts/check_docs.py

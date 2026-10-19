@@ -1,0 +1,4 @@
+# Development-only Python dependencies (never used by the Java/Node runtime).
+# Browser acceptance tests, screenshot generation and tutorial PNG previews all use
+# the same pinned Playwright version so local results and CI cannot drift.
+playwright==1.64.0

@@ -1,5 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
-import { api, yuan, STATUS_TEXT, BizError } from '../api';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { api, STATUS_TEXT, BizError } from '../api';
+import { formatCents } from '../utils/money';
+import { showToast } from '../utils/toast';
+import LoadingSkeleton from '../components/LoadingSkeleton';
 import type { ErrandCard, StatusChange } from '../api';
 import ActionButtons from '../components/ActionButtons';
 import { subscribeWs } from '../ws';
@@ -42,23 +45,44 @@ export default function Detail({ errandId }: Props) {
   const [card, setCard] = useState<ErrandCard | null>(null);
   const [timeline, setTimeline] = useState<StatusChange[]>([]);
   const [detailError, setDetailError] = useState<string | null>(null);
+  const [timelineError, setTimelineError] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
   const [arbitrating, setArbitrating] = useState(false);
   const [arbitrationBusy, setArbitrationBusy] = useState(false);
+  // 迟到响应守卫：切换到另一个任务后，旧任务的响应不能覆盖当前页面。
+  const requestVersion = useRef(0);
 
   const load = useCallback(() => {
+    const version = ++requestVersion.current;
     api.detail(errandId)
-      .then((item) => { setCard(item); setDetailError(null); })
-      .catch((e: Error) => setDetailError(e.message));
-    api.timeline(errandId).then(setTimeline).catch(() => {});
+      .then((item) => {
+        if (version !== requestVersion.current) return;
+        setCard(item);
+        setDetailError(null);
+      })
+      .catch((e: Error) => {
+        if (version === requestVersion.current) setDetailError(e.message);
+      });
+    api.timeline(errandId)
+      .then((items) => {
+        if (version !== requestVersion.current) return;
+        setTimeline(items);
+        setTimelineError(null);
+      })
+      .catch((e: Error) => {
+        if (version === requestVersion.current) setTimelineError(e.message);
+      });
   }, [errandId]);
 
   useEffect(() => {
     setCard(null);
     setTimeline([]);
     setDetailError(null);
+    setTimelineError(null);
     setActionNotice(null);
     setArbitrating(false);
+    requestVersion.current += 1;
+    return () => { requestVersion.current += 1; };
   }, [errandId]);
 
   useEffect(() => {
@@ -87,10 +111,13 @@ export default function Detail({ errandId }: Props) {
       const outcome = ARBITRATE_RESULT_TEXT[r.result];
       if (outcome) {
         setActionNotice({ kind: 'success', text: `仲裁完成：${outcome}` });
+        showToast('success', `仲裁完成：${outcome}`);
         setArbitrating(false);
       } else {
         // 非成功结果按错误展示，避免把“未生效”误报成仲裁完成
-        setActionNotice({ kind: 'error', text: `仲裁未完成：${ARBITRATE_UNFINISHED_TEXT[r.result] || r.result || '未知结果'}` });
+        const message = `仲裁未完成：${ARBITRATE_UNFINISHED_TEXT[r.result] || r.result || '未知结果'}`;
+        setActionNotice({ kind: 'error', text: message });
+        showToast('error', message);
       }
       load();
     } catch (e) {
@@ -100,15 +127,22 @@ export default function Detail({ errandId }: Props) {
     }
   };
 
-  if (!card) return (
-    <div className="empty-state detail-empty" role="status">
-      <h2>{detailError ? '暂时无法打开任务' : '正在加载任务…'}</h2>
-      {detailError && <><p>{detailError}</p><button type="button" className="btn btn-secondary" onClick={load}>重试</button></>}
-    </div>
-  );
+  if (!card) {
+    return detailError ? (
+      <div className="empty-state detail-empty" role="status">
+        <h2>暂时无法打开任务</h2>
+        <p>{detailError}</p>
+        <button type="button" className="btn btn-secondary" onClick={load}>重试</button>
+      </div>
+    ) : (
+      <div className="detail-page" data-testid="detail-page">
+        <LoadingSkeleton variant="panel" rows={1} label="正在加载任务详情…" />
+      </div>
+    );
+  }
 
   return (
-    <div className="detail-page">
+    <div className="detail-page" data-testid="detail-page">
       <a className="detail-back" href="#/square">← 返回任务广场</a>
       <header className="page-intro detail-intro">
         <div className="page-intro__copy">
@@ -128,7 +162,7 @@ export default function Detail({ errandId }: Props) {
       <section className="detail-summary" aria-label="任务概览">
         <div className="detail-summary__reward">
           <span>悬赏报酬</span>
-          <strong className="reward">{yuan(card.rewardCents)}</strong>
+          <strong className="reward">{formatCents(card.rewardCents)}</strong>
           <small>发布时已托管</small>
         </div>
         <div className="detail-summary__item">
@@ -195,6 +229,12 @@ export default function Detail({ errandId }: Props) {
             <div><span className="section-heading__eyebrow">ACTIVITY</span><h2 id="detail-timeline-title">任务进度</h2>
               <p>每一步状态变化都会记录在这里。</p></div>
           </div>
+          {timelineError && (
+            <div className="banner warn" role="alert">
+              进度加载失败：{timelineError}{" "}
+              <button type="button" className="link-btn" onClick={load}>重试</button>
+            </div>
+          )}
           {timeline.length === 0 ? <p className="detail-timeline__empty">暂无进度记录。</p> : (
             <ol className="detail-timeline__list">
               {timeline.map((change, index) => (

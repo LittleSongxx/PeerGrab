@@ -32,17 +32,63 @@ admin() {
   docker exec "$BROKER_CONTAINER" sh -c "cd /home/rocketmq/rocketmq-*/bin && sh mqadmin $*"
 }
 
+# Broker 进程 healthy 不等于已向 nameserver 注册完成；初始化脚本必须等路由可用，
+# 否则第一次 updateTopic 会报 "specified clusterName exists" 且 topic 创建不完整。
+wait_for_broker() {
+  local i out
+  for i in $(seq 1 30); do
+    out=$(admin "clusterList -n $NAMESRV" 2>&1 || true)
+    if echo "$out" | grep -q 'DefaultCluster'; then
+      echo "broker 已注册（等待 ${i} 次探测）"
+      return 0
+    fi
+    sleep 3
+  done
+  echo "broker 未在 nameserver 注册，初始化失败" >&2
+  echo "$out" | tail -5 >&2
+  return 1
+}
+
+wait_for_broker || exit 1
+
+retry_admin() {
+  local i out
+  for i in $(seq 1 15); do
+    out=$(admin "$*" 2>&1)
+    if ! echo "$out" | grep -qiE 'error|exception|not exist|failed'; then
+      echo "$out" | tail -1
+      return 0
+    fi
+    sleep 3
+  done
+  echo "命令重试失败: $*" >&2
+  echo "$out" | tail -5 >&2
+  return 1
+}
+
+wait_for_topic_route() {
+  local topic="$1" i
+  for i in $(seq 1 20); do
+    if admin "topicRoute -n $NAMESRV -t $topic" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 3
+  done
+  echo "topic 路由不可用: $topic" >&2
+  return 1
+}
+
 echo "创建 DELAY topic: $TOPIC"
-admin "updateTopic -n $NAMESRV -c $CLUSTER -t $TOPIC -a +message.type=DELAY" | tail -2
+retry_admin "updateTopic -n $NAMESRV -c $CLUSTER -t $TOPIC -a +message.type=DELAY" | tail -2
 
 echo "创建 DELAY topic: $TOPIC_AUTO_SETTLE"
-admin "updateTopic -n $NAMESRV -c $CLUSTER -t $TOPIC_AUTO_SETTLE -a +message.type=DELAY" | tail -1
+retry_admin "updateTopic -n $NAMESRV -c $CLUSTER -t $TOPIC_AUTO_SETTLE -a +message.type=DELAY" | tail -1
 
 echo "创建 NORMAL topic（资金 outbox 普通消息）: $TOPIC_FUND_EVENT"
-admin "updateTopic -n $NAMESRV -c $CLUSTER -t $TOPIC_FUND_EVENT -a +message.type=NORMAL" | tail -1
+retry_admin "updateTopic -n $NAMESRV -c $CLUSTER -t $TOPIC_FUND_EVENT -a +message.type=NORMAL" | tail -1
 
 echo "创建 DELAY topic（延迟双删）: $TOPIC_CACHE_EVICT"
-admin "updateTopic -n $NAMESRV -c $CLUSTER -t $TOPIC_CACHE_EVICT -a +message.type=DELAY" | tail -1
+retry_admin "updateTopic -n $NAMESRV -c $CLUSTER -t $TOPIC_CACHE_EVICT -a +message.type=DELAY" | tail -1
 
 echo "创建消费组: $GROUP"
 admin "updateSubGroup -n $NAMESRV -c $CLUSTER -g $GROUP" | tail -1
@@ -50,6 +96,12 @@ admin "updateSubGroup -n $NAMESRV -c $CLUSTER -g peergrab-autosettle-consumer" |
 admin "updateSubGroup -n $NAMESRV -c $CLUSTER -g peergrab-fund-event-consumer" | tail -1
 admin "updateSubGroup -n $NAMESRV -c $CLUSTER -g peergrab-cache-evict-consumer" | tail -1
 # 资金事件实时推送已并入 worker 的落库消费者（经 Redis fanout 到 API），不再创建独立 push 组。
+
+# 创建成功不代表 nameserver 立刻有路由；等 4 个 topic 都可路由后再交付。
+for topic in "$TOPIC" "$TOPIC_AUTO_SETTLE" "$TOPIC_FUND_EVENT" "$TOPIC_CACHE_EVICT"; do
+  wait_for_topic_route "$topic"
+done
+echo "topic 路由已就绪: $TOPIC $TOPIC_AUTO_SETTLE $TOPIC_FUND_EVENT $TOPIC_CACHE_EVICT"
 
 echo "集群状态:"
 admin "clusterList -n $NAMESRV" | tail -3

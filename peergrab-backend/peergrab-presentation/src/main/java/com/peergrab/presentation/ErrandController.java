@@ -10,6 +10,7 @@ import com.peergrab.domain.errand.model.ErrandStatus;
 import com.peergrab.domain.errand.model.ErrandType;
 import com.peergrab.domain.errand.ports.ErrandRepository;
 import com.peergrab.presentation.auth.CurrentUser;
+import com.peergrab.shared.BizException;
 import com.peergrab.shared.ErrorCode;
 import com.peergrab.shared.Result;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -107,7 +108,10 @@ public class ErrandController {
     @PostMapping
     public Result<PublishErrandUseCase.Result> publish(
             @RequestBody PublishRequest req,
-            @RequestHeader(value = "X-Request-Id", required = false) String requestId) {
+            @RequestHeader("X-Request-Id") String requestId) {
+        if (requestId.isBlank() || requestId.length() > 128) {
+            throw new BizException(ErrorCode.INVALID_ARGUMENT, "X-Request-Id 必须为非空且不超过 128 字符");
+        }
         long userId = CurrentUser.get();
         var cmd = new PublishErrandUseCase.Command(
                 req.campusId() == null ? 1L : req.campusId(),
@@ -116,7 +120,7 @@ public class ErrandController {
                 req.title(),
                 req.rewardCents() == null ? 0L : req.rewardCents(),
                 req.slotTotal() == null ? 1 : req.slotTotal(),
-                requestId == null ? UUID.randomUUID().toString() : requestId);
+                requestId);
         return Result.ok(publishUseCase.publish(cmd));
     }
 

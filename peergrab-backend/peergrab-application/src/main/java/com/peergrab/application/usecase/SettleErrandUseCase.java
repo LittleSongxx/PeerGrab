@@ -87,7 +87,7 @@ public class SettleErrandUseCase {
         this.creditRankingPort = creditRankingPort;
         this.transactionTemplate = transactionTemplate;
         this.notifier = notifier;
-        this.commissionRate = commissionRate;
+        this.commissionRate = CommissionCalculator.requireValidRate(commissionRate);
         this.sideEffectFailures = Counter.builder("peergrab.settle.side_effect.failures")
                 .description("Committed settlements whose cache/ranking/audit/realtime side effect failed")
                 .register(meterRegistry);
@@ -354,12 +354,8 @@ public class SettleErrandUseCase {
      * 结算的事务体。由 TransactionTemplate 包裹执行（见 settle 里的注释），
      * 不依赖 @Transactional 代理——lambda 自调用场景下代理不可靠。
      */
-    /** 费率用十进制精确计算，避免 0.29 这类二进制表示偏小的费率在 Math.floor 下少 1 分。 */
     private long commissionCents(long totalCents) {
-        return java.math.BigDecimal.valueOf(totalCents)
-                .multiply(java.math.BigDecimal.valueOf(commissionRate))
-                .setScale(0, java.math.RoundingMode.DOWN)
-                .longValueExact();
+        return CommissionCalculator.commissionCents(totalCents, commissionRate);
     }
 
     boolean doSettle(long errandId, Errand errand, EscrowOrder escrow,

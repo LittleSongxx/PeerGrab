@@ -10,7 +10,3 @@ export function useHashRoute(): string {
   }, []);
   return route;
 }
-
-export function navigate(path: string) {
-  location.hash = '#' + path;
-}

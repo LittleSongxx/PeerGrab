@@ -11,6 +11,7 @@ services:
       target: app
     environment:
       JAVA_TOOL_OPTIONS: ${PEERGRAB_APP_JAVA_OPTIONS:--Xms128m -Xmx768m}
+      TZ: Asia/Shanghai
       SPRING_DATASOURCE_URL: ${PEERGRAB_JDBC_URL:?Set the shared MySQL JDBC URL}
       SPRING_DATASOURCE_USERNAME: ${PEERGRAB_DB_USER:?Set the MySQL application user}
       SPRING_DATASOURCE_PASSWORD: ${PEERGRAB_DB_PASSWORD:?Set the MySQL application password}
@@ -46,6 +47,7 @@ services:
       target: worker
     environment:
       JAVA_TOOL_OPTIONS: ${PEERGRAB_WORKER_JAVA_OPTIONS:--Xms128m -Xmx512m}
+      TZ: Asia/Shanghai
       SPRING_DATASOURCE_URL: ${PEERGRAB_JDBC_URL:?Set the shared MySQL JDBC URL}
       SPRING_DATASOURCE_USERNAME: ${PEERGRAB_DB_USER:?Set the MySQL application user}
       SPRING_DATASOURCE_PASSWORD: ${PEERGRAB_DB_PASSWORD:?Set the MySQL application password}

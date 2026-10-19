@@ -2,6 +2,13 @@
 
 本表覆盖两处 `application.yaml`：`peergrab-bootstrap`（API 进程）与 `peergrab-worker`，以及代码内 `@Value`/`@ConditionalOnProperty` 的默认值。键名与默认值均从仓库实际读取；未列出的前缀不属于 `peergrab.*`，见文末"非 peergrab 前缀"。
 
+## 单一事实来源
+
+- `peergrab-bootstrap/src/main/resources/application.yaml`（API 进程）与 `peergrab-worker/src/main/resources/application.yaml`（worker 进程）是两个独立事实源。**同名共享键必须取值一致**；只改一处会让手动/自动结算、发送端/消费端出现口径漂移。
+- **共享键**：跨进程有语义的键（`settle.*`、`mq.*`、`timeout.confirm-seconds`、`timeout.max-transfer-rounds`、`credit.*`、`cache.shards`、`cache.bloom-enabled` 等）新增或改值时**必须两处同步**。两处 yaml 都刻意保留了对侧专用键（API 保留 `settle.scan-*`、`retention.*`，worker 保留 `auth.*`、`grab.*`），这是“对称保留”，不代表该进程读取它们。
+- **门禁**：共享键一致性由 `peergrab-bootstrap/src/test/java/com/peergrab/config/SharedConfigConsistencyTest.java` 守。它解析两份 `application.yaml`，对**交集键**做值相等断言（`PROCESS_SPECIFIC_KEYS` 是白名单，只放真实的进程差异：`worker-id`、`application.name`、`server.port`、`ws.enabled`、readiness 组成、连接池大小、连接串），并断言 `MUST_SHARE_KEYS` 中的键在两侧都存在。新增“允许不同”的键必须显式加白并写明原因，不能靠改测试悄悄放过。注意：`credit.min-score`/`credit.max-ongoing` 目前不在 `MUST_SHARE_KEYS` 里（worker yaml 未显式列出），属门禁尚未覆盖的隐式共享键。
+- **判定标准**：同一键在两处取值不同、且不属于“进程专属键”，即视为缺陷，而不是“以某一侧为准”。
+
 ## 约定
 
 - **默认值**：代码内建默认值；yaml 显式设置时以 yaml 为准（表中与 yaml 一致的直接写值，环境变量占位符除外）。
@@ -12,6 +19,34 @@
 - **yaml 对称保留**：API 的 yaml 也保留 `credit.calibration.*`、`settle.scan-*`、`cache.bloom-refresh-interval-ms` 等 worker 专用键，但 API 进程不读取；改行为只对 worker 生效。
 - **环境变量**按 Spring 宽松绑定映射，例如 `PEERGRAB_AUTH_MODE` 对应 `peergrab.auth.mode`。
 - **不在 Spring 配置里**的运行时项：容器时区、Redis `allkeys-lru`、compose 端口与卷，见[单机部署说明](../../peergrab-backend/docker/ECS_DEPLOY.md)。
+
+## 共享键矩阵
+
+### 必须一致（同一键、同一值）
+
+| 键组 | 键 | 为什么必须一致 | 两处应相同的值 |
+| --- | --- | --- | --- |
+| 结算口径 | `peergrab.settle.commission-rate`、`peergrab.settle.auto-settle-seconds` | 手动结算与自动结算同一分账口径；自动结算扫描与 deadline 修复按同一期限回填 | `0.05`、`86400` |
+| 消息 Topic | `peergrab.mq.topic.confirm-timeout`、`.auto-settle`、`.cache-evict`、`.fund-event` | 发送端与消费端必须同源，否则“发到 A、订阅 B”，主通道失效只剩扫描 | `errand-confirm-timeout`、`errand-auto-settle`、`errand-cache-evict`、`errand-fund-event-v2` |
+| 消息开关与地址 | `peergrab.mq.enabled`、`peergrab.mq.endpoints` | API 发、worker 收；一端关闭即退化为纯扫描 | `true`、`127.0.0.1:8081` |
+| 超时规则 | `peergrab.timeout.confirm-seconds`、`peergrab.timeout.max-transfer-rounds` | API 写 `confirm_deadline_at`、worker 判到期，必须同一期限；递补上限不同会让“第 N 轮”语义分裂 | `300`、`5` |
+| 资格规则 | `peergrab.credit.min-score`、`peergrab.credit.max-ongoing` | 抢单与递补都按同一门槛复核；worker yaml 未显式列出，依赖代码默认值，属**隐式共享键** | `40`、`5` |
+| 信用校准 | `peergrab.credit.calibration-cron`、`.calibration-batch-size` | 只在 worker 生效，但 API yaml 也保留；仍按“一致”管理，避免误读为两侧都跑 | `0 0 3 * * ?`、`1000` |
+| 缓存结构 | `peergrab.cache.shards`、`peergrab.cache.bloom-enabled`、`peergrab.cache.bloom-refresh-interval-ms` | 缓存键结构与 Bloom 就绪语义必须两进程一致，否则一侧写、另一侧读不到或误判 | `1`、`true`、`1800000` |
+
+### 允许不同（进程专属）
+
+| 键 | API | worker | 原因 |
+| --- | --- | --- | --- |
+| `peergrab.worker-id` | `1` | `2` | 雪花节点号必须不同，否则可能产生重复 ID |
+| `peergrab.ws.enabled` | `true` | `false` | 只有 API 持有 WebSocket；worker 关闭后装配 `RedisFanoutRealtimeNotifier` |
+| `peergrab.scheduler.*-pool-size` | 未配置 | `fast=3`、`maintenance=3`、`mq-send=2` | 只有 worker 有 Spring 调度池 |
+| `peergrab.timeout.scan-*`、`settle.scan-*`、`retention.*`、`message.*`、`fund-outbox.*`、`deadline-repair.*` | 部分保留但不读取 | 读取 | worker 专属后台任务 |
+| `peergrab.auth.*`（除 `arbitrator-id`、`jwt-secret`、`session-ttl-minutes`、`refresh-ttl-minutes`、`resolve-cache-ms`） | 读取 | 不读 | 登录、demo 口令、登录限速只在 API |
+| `peergrab.grab.limit.*`、`peergrab.web.cors-origins` | 读取 | 不读 | 抢单入口与 CORS 只在 API |
+| `server.port` | `8080` | `8082` | 两进程同机部署，端口必须分开 |
+| `spring.datasource.hikari.maximum-pool-size` | `20` | `10` | 在线请求与后台批量的并发模型不同 |
+| readiness 组成 | `db,redis,snowflakeLease` | 追加 `workerScheduler` | worker 的就绪还取决于调度线程池是否可用 |
 
 ## 身份与鉴权（auth.*）
 
@@ -154,6 +189,7 @@
 
 | 键 | 默认值 | 作用 | 生效进程 |
 | --- | --- | --- | --- |
+| `peergrab.deadline-repair.initial-delay-ms` | `30000` | 修复任务首次执行延迟 | worker |
 | `peergrab.deadline-repair.interval-ms` | `300000` | NULL 截止时间数据修复周期 | worker |
 | `peergrab.retention.enabled` | `true` | 保留期清理开关 | worker |
 | `peergrab.retention.cron` | `0 30 4 * * ?` | 清理 cron（按容器 TZ 解释） | worker |
@@ -172,7 +208,7 @@
 | `peergrab.worker-id` | API `1`、worker `2` | 雪花节点号，两进程必须不同 | 两者 |
 | `peergrab.worker-lease.seconds` | `30` | 发号节点租约时长 | 两者 |
 | `peergrab.worker-lease.renew-interval-ms` | `5000` | 续租周期 | 两者 |
-| `peergrab.worker-lease.close-on-loss` | `false` | 租约丢失时是否关闭进程 | 两者 |
+| `peergrab.worker-lease.close-on-loss` | `true` | 确认租约丢失时是否关闭进程（DB 瞬时失败不会触发） | 两者 |
 | `peergrab.recon.cron` | `0 0 2 * * ?` | 资金对账 cron | worker |
 
 ## Web（web.*）
@@ -191,4 +227,4 @@
 | `management.endpoints.web.exposure.include` | `health,prometheus` | 暴露健康与指标端点 |
 | `logging.level.com.peergrab` | `INFO` | 业务日志级别 |
 
-> 本表键数：`peergrab.*` 共 103 个（97 个由 `@Value` 读取，另 6 个为开关/选择型键 `auth.mode`、`cache.enabled`、`mq.enabled`、`ws.enabled`、`timeout.scan.enabled`、`grab.limit.type`）。如与代码不一致，以 `application.yaml` 与 `@Value` 为准。
+> 本表键数：`peergrab.*` 共 104 个。口径：98 个由 `@Value` 读取 + 6 个只由 `@ConditionalOnProperty` 判断的开关/选择型键（`auth.mode`、`cache.enabled`、`mq.enabled`、`ws.enabled`、`timeout.scan.enabled`、`grab.limit.type`）。交叉核对：两处 yaml 的 `peergrab.*` 叶子键共 84 个（其中 4 个属于上述开关），代码内有默认值但 yaml 未出现的 `@Value` 键 18 个，yaml 未出现的开关 2 个。原文记 103 个，差在漏计 `peergrab.deadline-repair.initial-delay-ms`（worker，默认 `30000`），本次已补入“数据保留”表。如与代码不一致，以 `application.yaml` 与 `@Value` 为准。

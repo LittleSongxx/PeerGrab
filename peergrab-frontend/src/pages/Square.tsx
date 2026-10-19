@@ -3,10 +3,13 @@ import { newRequestId } from '../utils/requestId';
 import { api, getRole } from '../api';
 import type { ErrandCard } from '../api';
 import ErrandCardView from '../components/ErrandCard';
+import LoadingSkeleton from '../components/LoadingSkeleton';
 import UiIcon from '../components/UiIcon';
 import { issueDemoCredentials, revokeCredentials } from '../api';
 import type { DemoCredentials } from '../api';
 import { demoPasswordFor } from '../identity';
+import { showToast } from '../utils/toast';
+import { subscribeWs } from '../ws';
 
 interface GrabResultRow {
   label: string;
@@ -16,7 +19,6 @@ interface GrabResultRow {
 }
 
 type Filter = 'all' | 'available';
-type Notice = { kind: 'success' | 'error'; text: string };
 
 /**
  * 任务广场：列表 + 抢单 + 两个已配置跑腿身份的并发演示。
@@ -33,7 +35,6 @@ type Notice = { kind: 'success' | 'error'; text: string };
 export default function Square() {
   const [cards, setCards] = useState<ErrandCard[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<Notice | null>(null);
   const [grabLog, setGrabLog] = useState<GrabResultRow[]>([]);
   const [grabbing, setGrabbing] = useState(false);
   const [runner2001Password, setRunner2001Password] = useState(() => demoPasswordFor(2001));
@@ -45,6 +46,8 @@ export default function Square() {
   const [filter, setFilter] = useState<Filter>('all');
   const [expandedDemoId, setExpandedDemoId] = useState<string | null>(null);
   const targetRef = useRef<string | null>(null);
+  // 前台加载（首次/手动刷新/加载更多）的版本号；后台静默刷新不参与，
+  // 否则 30s 轮询或 WS 事件会把 loading 与分页游标一起重置。
   const requestVersionRef = useRef(0);
 
   const load = useCallback(() => {
@@ -67,6 +70,38 @@ export default function Square() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  /**
+   * 后台静默刷新：WS 事件和 30s 轮询共用。
+   * 按 id 合并第一页，保留已加载的后续分页；既不重置 nextCursor，也不动前台 loading。
+   */
+  const silentRefresh = useCallback(() => {
+    api.listByCursor(1)
+      .then((page) => {
+        setCards((current) => {
+          const firstPageIds = new Set(page.items.map((card) => card.id));
+          return [...page.items, ...current.filter((card) => !firstPageIds.has(card.id))];
+        });
+        setNextCursor((current) => current || page.nextCursor);
+        setLoadError(null);
+      })
+      .catch(() => {
+        // 后台刷新失败不打断当前列表，下一轮再试。
+      });
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') silentRefresh();
+    }, 30000);
+    const unsubscribe = subscribeWs((event) => {
+      if (event.type === 'errand.status' || event.type === 'notification.new') silentRefresh();
+    });
+    return () => {
+      window.clearInterval(timer);
+      unsubscribe();
+    };
+  }, [silentRefresh]);
 
   const loadMore = async () => {
     if (!nextCursor || loading || loadingMore) return;
@@ -108,7 +143,6 @@ export default function Square() {
     targetRef.current = errandId;
     setGrabbing(true);
     setGrabLog([]);
-    setNotice(null);
     const users = [2001, 2002];
     const passwords = [runner2001Password, runner2002Password];
     const credentials: DemoCredentials[] = [];
@@ -118,36 +152,41 @@ export default function Square() {
       }
 
       // 对齐释放：所有请求同时发出
-      const t0 = performance.now();
+      const startedAt = performance.now();
       const results = await Promise.all(
-        credentials.map(async (credential, i) => {
+        credentials.map(async (credential, index) => {
           const start = performance.now();
           try {
             const resp = await fetch(`/api/errands/${errandId}/grab`, {
               method: 'POST',
               // 每次并发抢单是独立请求，各自带幂等键（同一请求重试才复用）
-              headers: { 'Authorization': `Bearer ${credential.token}`, 'X-Request-Id': newRequestId() },
+              headers: {
+                Authorization: `Bearer ${credential.token}`,
+                'X-Request-Id': newRequestId(),
+              },
             });
             const body = await resp.json();
             return {
-              label: `跑腿 ${users[i]}`,
+              label: `跑腿 ${users[index]}`,
               ok: body.code === 'OK',
               code: body.code,
               ms: Math.round(performance.now() - start),
             };
           } catch {
-            return { label: `跑腿 ${users[i]}`, ok: false, code: 'NETWORK', ms: 0 };
+            return { label: `跑腿 ${users[index]}`, ok: false, code: 'NETWORK', ms: 0 };
           }
-        })
+        }),
       );
       setGrabLog(results.sort((a, b) => Number(b.ok) - Number(a.ok)));
-      const winners = results.filter((r) => r.ok).length;
-      setNotice(winners === 1
-        ? { kind: 'success', text: `并发演示完成：两人同时抢单，一人成功。总耗时 ${Math.round(performance.now() - t0)} ms。` }
-        : { kind: 'error', text: `两人中有 ${winners} 人抢单成功，请查看演示结果和任务状态。` });
+      const winners = results.filter((result) => result.ok).length;
+      if (winners === 1) {
+        showToast('success', `并发演示完成：一人抢中，总耗时 ${Math.round(performance.now() - startedAt)} ms。`);
+      } else {
+        showToast('error', `两人中有 ${winners} 人抢单成功，请查看演示结果与任务状态。`);
+      }
       load();
-    } catch (e) {
-      setNotice({ kind: 'error', text: `并发演示失败：${e instanceof Error ? e.message : '网络错误'}` });
+    } catch (error) {
+      showToast('error', `并发演示失败：${error instanceof Error ? error.message : '网络错误'}`);
     } finally {
       await Promise.all(credentials.map(revokeCredentials));
       setGrabbing(false);
@@ -155,7 +194,7 @@ export default function Square() {
   };
 
   return (
-    <div className="square-page">
+    <div className="square-page" data-testid="square-page">
       <header className="page-intro square-intro">
         <div className="page-intro__copy">
           <span className="page-eyebrow">PEERGRAB MARKETPLACE</span>
@@ -163,7 +202,7 @@ export default function Square() {
           <p>看看校园里正在等待帮忙的事，找到适合自己的任务。</p>
         </div>
         <div className="page-intro__actions">
-          <button type="button" className="btn btn-secondary" onClick={load} disabled={loading || loadingMore}>
+          <button type="button" className="btn btn-secondary" data-testid="square-refresh" onClick={load} disabled={loading || loadingMore}>
             <UiIcon name="refresh" size={16} /> {loading ? '正在刷新…' : '刷新任务'}
           </button>
           {!isArbitrator && <a className="btn btn-primary" href="#/publish"><UiIcon name="plus" size={16} /> 发布任务</a>}
@@ -188,9 +227,6 @@ export default function Square() {
       </div>
 
       {loadError && <div className="banner warn" role="alert">任务加载失败：{loadError}</div>}
-      {notice && (
-        <div className={`banner ${notice.kind === 'error' ? 'warn' : 'info'}`} role="status">{notice.text}</div>
-      )}
       {targetRef.current && grabLog.length > 0 && (
         <div className="race-result section-card" role="status">
           <div className="race-result__head">
@@ -221,7 +257,8 @@ export default function Square() {
         <div className="square-toolbar">
           <label className="square-search">
             <span className="square-search__icon" aria-hidden="true">⌕</span>
-            <input type="search" value={query} onChange={(event) => setQuery(event.target.value)}
+            <input type="search" data-testid="square-search" value={query}
+              onChange={(event) => setQuery(event.target.value)}
               placeholder="搜索已加载任务" aria-label="搜索已加载任务标题或编号" />
           </label>
           <div className="square-filter" aria-label="任务筛选">
@@ -236,7 +273,7 @@ export default function Square() {
         </p>
 
         {loading && cards.length === 0 ? (
-          <div className="empty-state square-empty" role="status">正在加载任务…</div>
+          <LoadingSkeleton variant="cards" rows={4} label="正在加载任务…" />
         ) : loadError && cards.length === 0 ? (
           <div className="empty-state square-empty">
             <h3>暂时无法加载任务</h3>
@@ -255,18 +292,15 @@ export default function Square() {
               : <button type="button" className="btn btn-secondary" onClick={() => { setQuery(''); setFilter('all'); }}>清除筛选</button>}
           </div>
         ) : (
-          <div className="card-grid square-grid">
+          <div className="card-grid square-grid" data-testid="square-list">
             {visibleCards.map((card) => (
               <div key={card.id} className="square-item">
-                <ErrandCardView card={card} onChanged={() => {
-                  setNotice({ kind: 'success', text: '任务状态已更新，可在“我的任务”中查看进度。' });
-                  load();
-                }} />
+                <ErrandCardView card={card} onChanged={() => load()} />
                 {card.status === 'PUBLISHED' && (
                   <div className="race-demo">
                     <button type="button" className="race-demo__trigger"
                       aria-expanded={expandedDemoId === card.id}
-                      onClick={() => { setExpandedDemoId(expandedDemoId === card.id ? null : card.id); setNotice(null); }}>
+                      onClick={() => { setExpandedDemoId(expandedDemoId === card.id ? null : card.id); setGrabLog([]); }}>
                       <span>体验双人同时抢单</span>
                       <span aria-hidden="true">{expandedDemoId === card.id ? '−' : '+'}</span>
                     </button>

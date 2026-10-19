@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import type { ErrandCard } from '../api';
 import ErrandCardView from '../components/ErrandCard';
+import LoadingSkeleton from '../components/LoadingSkeleton';
+import { subscribeWs } from '../ws';
 
 type MineTab = 'PUBLISHED_BY_ME' | 'GRABBED_BY_ME';
 const PAGE_SIZE = 20;
@@ -65,11 +67,21 @@ export default function Mine() {
 
   useEffect(() => {
     void load();
-    return () => { requestId.current += 1; };
+    const unsubscribe = subscribeWs((event) => {
+      if (event.type === 'errand.status' || event.type === 'notification.new') void load();
+    });
+    const poll = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void load();
+    }, 30000);
+    return () => {
+      unsubscribe();
+      window.clearInterval(poll);
+      requestId.current += 1;
+    };
   }, [load]);
 
   return (
-    <div className="mine-page page-stack">
+    <div className="mine-page page-stack" data-testid="mine-page">
       <header className="page-intro">
         <div>
           <span className="page-eyebrow">我的校园跑腿</span>
@@ -95,7 +107,7 @@ export default function Mine() {
         </div>
 
         <div className="mine-results">
-          {loading && <div className="loading-state" role="status">正在加载任务…</div>}
+          {loading && <LoadingSkeleton variant="cards" rows={4} label="正在加载任务…" />}
           {!loading && error && (
             <div className="empty-state" role="alert">
               <span className="empty-state-icon" aria-hidden="true">!</span>

@@ -52,7 +52,7 @@ public class ArbitrateSettleStep {
         this.idGenerator = idGenerator;
         this.creditRepository = creditRepository;
         this.fundEventPort = fundEventPort;
-        this.commissionRate = commissionRate;
+        this.commissionRate = CommissionCalculator.requireValidRate(commissionRate);
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -104,8 +104,8 @@ public class ArbitrateSettleStep {
         return true;
     }
 
-    /** 事件通知与实际过账共用同一个净额算法。 */
+    /** 事件通知与实际过账共用同一个净额算法（与普通结算完全一致）。 */
     public long runnerNetCents(long totalCents) {
-        return totalCents - (long) Math.floor(totalCents * commissionRate);
+        return totalCents - CommissionCalculator.commissionCents(totalCents, commissionRate);
     }
 }

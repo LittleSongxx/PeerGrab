@@ -21,6 +21,7 @@
     <module>peergrab-worker</module>
     <module>peergrab-bench</module>
     <module>peergrab-sharding-lab</module>
+    <module>peergrab-txmsg-lab</module>
   </modules>
 
   <properties>

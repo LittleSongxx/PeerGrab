@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api, yuan } from '../api';
+import { api } from '../api';
+import type { LedgerEntry } from '../api';
+import { formatCents } from '../utils/money';
+import type { Cents } from '../utils/money';
+import LoadingSkeleton from '../components/LoadingSkeleton';
+import { subscribeWs } from '../ws';
 
 const REF_TYPE_TEXT: Record<string, string> = {
   ESCROW: '发布托管', SETTLE: '结算', REFUND: '退款',
@@ -12,8 +17,8 @@ const ACCOUNT_TYPE_TEXT: Record<string, string> = {
 };
 
 export default function Wallet() {
-  const [balance, setBalance] = useState<{ availableCents: number; frozenCents: number } | null>(null);
-  const [ledger, setLedger] = useState<Awaited<ReturnType<typeof api.ledger>>>([]);
+  const [balance, setBalance] = useState<{ availableCents: Cents; frozenCents: Cents } | null>(null);
+  const [ledger, setLedger] = useState<LedgerEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [nextCursor, setNextCursor] = useState('');
@@ -45,7 +50,21 @@ export default function Wallet() {
 
   useEffect(() => {
     void load();
-    return () => { requestVersion.current += 1; };
+    const unsubscribe = subscribeWs((event) => {
+      // 结算/退款会改变余额与流水；资金事件与任务状态事件都触发一次静默重载。
+      if (event.type === 'notification.new' || event.type === 'errand.status') void load();
+    });
+    const onWalletChanged = () => void load();
+    const poll = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void load();
+    }, 30000);
+    window.addEventListener('peergrab:wallet-changed', onWalletChanged);
+    return () => {
+      unsubscribe();
+      window.removeEventListener('peergrab:wallet-changed', onWalletChanged);
+      window.clearInterval(poll);
+      requestVersion.current += 1;
+    };
   }, [load]);
 
   const loadMore = async () => {
@@ -72,7 +91,7 @@ export default function Wallet() {
   };
 
   return (
-    <div className="wallet-page page-stack">
+    <div className="wallet-page page-stack" data-testid="wallet-page">
       <header className="page-intro">
         <div>
           <span className="page-eyebrow">收支概览</span>
@@ -93,12 +112,12 @@ export default function Wallet() {
       <section className="wallet-overview" aria-label="账户余额">
         <div className="wallet-balance-primary">
           <span className="wallet-balance-label">可用余额</span>
-          <strong>{balance ? yuan(balance.availableCents) : '—'}</strong>
+          <strong>{balance ? formatCents(balance.availableCents) : '—'}</strong>
           <span className="wallet-balance-caption">可用于发布并托管新任务</span>
         </div>
         <div className="wallet-balance-secondary section-card">
           <span className="wallet-balance-label">冻结资金</span>
-          <strong>{balance ? yuan(balance.frozenCents) : '—'}</strong>
+          <strong>{balance ? formatCents(balance.frozenCents) : '—'}</strong>
           <span className="wallet-balance-caption">账户内冻结余额，不含已转入平台托管的悬赏</span>
         </div>
       </section>
@@ -113,7 +132,7 @@ export default function Wallet() {
           {!loading && !error && <span className="section-count">已显示 {ledger.length} 笔记录</span>}
         </div>
 
-        {loading && !balance && <div className="loading-state" role="status">正在加载钱包…</div>}
+        {loading && !balance && <LoadingSkeleton variant="table" rows={4} label="正在加载钱包…" />}
         {!loading && !error && ledger.length === 0 && (
           <div className="empty-state wallet-empty">
             <span className="empty-state-icon" aria-hidden="true">◎</span>
@@ -137,7 +156,7 @@ export default function Wallet() {
                       <td className="wallet-ledger-time">{new Date(entry.time).toLocaleString('zh-CN')}</td>
                       <td><span className={incoming ? 'wallet-direction is-credit' : 'wallet-direction is-debit'}>{incoming ? '入账' : '转出'}</span></td>
                       <td className={incoming ? 'wallet-amount credit' : 'wallet-amount debit'}>
-                        {incoming ? '+' : '-'}{yuan(entry.amountCents)}
+                        {incoming ? '+' : '-'}{formatCents(entry.amountCents)}
                       </td>
                       <td>
                         <span className={`wallet-account${accountType ? ` is-${accountType.toLowerCase()}` : ''}`}>

@@ -35,7 +35,9 @@ public class QueryErrandListUseCase {
         String normalized = status == null || status.isBlank()
                 ? ErrandStatus.PUBLISHED.name()
                 : ErrandStatus.valueOf(status.toUpperCase()).name();
-        return queryPort.list(campusId, normalized, Math.max(page, 0), Math.min(Math.max(size, 1), 50));
+        // 深 offset 会放大排序成本：与钱包游标一样限制到有界页深。
+        int boundedPage = Math.min(Math.max(page, 0), 1000);
+        return queryPort.list(campusId, normalized, boundedPage, Math.min(Math.max(size, 1), 50));
     }
 
     public CursorPage<Errand> listByCursor(long campusId, String status, String cursor, int size) {
@@ -73,6 +75,9 @@ public class QueryErrandListUseCase {
     private Cursor decode(String cursor) {
         if (cursor == null || cursor.isBlank()) {
             return new Cursor(null, null);
+        }
+        if (cursor.length() > 128) {
+            throw new IllegalArgumentException("非法游标");
         }
         String raw = new String(Base64.getUrlDecoder().decode(cursor), StandardCharsets.UTF_8);
         String[] parts = raw.split(":", 2);

@@ -1,4 +1,5 @@
-import { ErrandCard as Card, STATUS_TEXT, yuan } from '../api';
+import { ErrandCard as Card, STATUS_TEXT } from '../api';
+import { formatCents } from '../utils/money';
 import ActionButtons from './ActionButtons';
 
 interface Props {
@@ -12,7 +13,7 @@ const TYPE_TEXT: Record<string, string> = {
 
 export default function ErrandCardView({ card, onChanged }: Props) {
   return (
-    <article className="errand-card">
+    <article className="errand-card" data-testid="errand-card" data-errand-id={card.id}>
       <div className="errand-card__top">
         <span className="errand-card__type">{TYPE_TEXT[card.type] ?? card.type}</span>
         <span className={`status status-${card.status}`}>{STATUS_TEXT[card.status] ?? card.status}</span>
@@ -23,7 +24,7 @@ export default function ErrandCardView({ card, onChanged }: Props) {
       <div className="errand-card__body">
         <div className="errand-card__reward">
           <span>悬赏报酬</span>
-          <strong className="reward">{yuan(card.rewardCents)}</strong>
+          <strong className="reward">{formatCents(card.rewardCents)}</strong>
           <small>发布时托管</small>
         </div>
         <div className="errand-card__capacity">

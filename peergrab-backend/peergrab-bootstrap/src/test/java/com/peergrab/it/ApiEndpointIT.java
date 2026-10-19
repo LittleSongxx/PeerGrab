@@ -77,6 +77,7 @@ class ApiEndpointIT {
         HttpHeaders h = new HttpHeaders();
         h.setBearerAuth(token);
         h.set("Content-Type", "application/json");
+        h.set("X-Request-Id", java.util.UUID.randomUUID().toString());
         return new HttpEntity<>(body, h);
     }
 

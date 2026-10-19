@@ -75,8 +75,13 @@ public class JdbcCreditRepository implements CreditRepository {
         // for another transaction on the same user's score row.
         long acquireStart = System.nanoTime();
         try {
-            jdbc.update("INSERT IGNORE INTO credit_score (user_id, score, version) VALUES (?, ?, 0)",
-                    event.userId(), CreditEventType.BASE_SCORE);
+            // 与 JdbcRunnerQuotaAdapter 相同的锁策略：INSERT IGNORE 在行已存在时
+            // 先取共享锁，再 SELECT ... FOR UPDATE 升级排他锁，两个并发事务会互相等待。
+            // ON DUPLICATE KEY UPDATE 直接取得排他锁。
+            jdbc.update("""
+                    INSERT INTO credit_score (user_id, score, version) VALUES (?, ?, 0)
+                    ON DUPLICATE KEY UPDATE user_id = user_id
+                    """, event.userId(), CreditEventType.BASE_SCORE);
             jdbc.queryForObject("SELECT score FROM credit_score WHERE user_id = ? FOR UPDATE",
                     Integer.class, event.userId());
         } finally {

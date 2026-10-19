@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
-import { api, BizError, getRole, getUserId, yuan } from '../api';
+import { api, BizError, getRole, getUserId } from '../api';
+import { formatCents, parseYuanToCents } from '../utils/money';
+import { showToast } from '../utils/toast';
 import { newRequestId } from '../utils/requestId';
 
 const PENDING_PUBLISH_KEY = 'peergrab_pending_publish';
@@ -34,8 +36,9 @@ export default function Publish() {
   // 仲裁员身份不参与交易；后端也会返回 ROLE_NOT_ALLOWED，这里提前禁用入口
   const isArbitrator = getRole() === 'ARBITRATOR';
 
-  const parsedReward = Number(reward);
-  const rewardCents = Number.isFinite(parsedReward) && parsedReward > 0 ? Math.round(parsedReward * 100) : 0;
+  const parsedReward = parseYuanToCents(reward);
+  const rewardCents = parsedReward.cents;
+  const rewardError = parsedReward.error;
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -45,13 +48,13 @@ export default function Publish() {
     try {
       if (!title.trim()) throw new Error('请填写任务标题');
       if (title.trim().length > 64) throw new Error('任务标题最多 64 个字');
-      if (!rewardCents || rewardCents <= 0) throw new Error('悬赏金额必须大于 0');
-      if (!Number.isSafeInteger(rewardCents)) throw new Error('悬赏金额过大，请调整后重试');
+      if (rewardError) throw new Error(rewardError);
       const payload = { title: title.trim(), rewardCents, slotTotal: 1, type };
       const r = await api.publish(payload, requestIdFor(payload));
       try { sessionStorage.removeItem(PENDING_PUBLISH_KEY); } catch { /* Browser storage is optional. */ }
       window.dispatchEvent(new Event('peergrab:wallet-changed'));
-      setResult({ kind: 'success', text: `发布成功，${yuan(rewardCents)} 已托管，等待跑腿接单。`, id: String(r.errandId) });
+      setResult({ kind: 'success', text: `发布成功，${formatCents(rewardCents)} 已托管，等待跑腿接单。`, id: String(r.errandId) });
+      showToast("success", "任务已发布并完成资金托管");
       setTitle('');
     } catch (e) {
       setResult({ kind: 'error', text: e instanceof BizError ? `${e.message}（${e.code}）` : (e as Error).message });
@@ -61,7 +64,7 @@ export default function Publish() {
   };
 
   return (
-    <div className="publish-page page-stack">
+    <div className="publish-page page-stack" data-testid="publish-page">
       <header className="page-intro">
         <div>
           <span className="page-eyebrow">发起校园互助</span>
@@ -110,11 +113,14 @@ export default function Publish() {
               <label htmlFor="publish-reward">悬赏金额 <span className="required-mark">*</span></label>
               <div className="publish-money-input">
                 <span aria-hidden="true">¥</span>
-                <input id="publish-reward" type="number" min="0.01" step="0.01" inputMode="decimal"
+                <input id="publish-reward" type="text" inputMode="decimal" autoComplete="off"
+                       data-testid="publish-reward"
                        value={reward} required onChange={(event) => { setReward(event.target.value); setResult(null); }} />
                 <span>元</span>
               </div>
-              <span className="publish-field-hint">发布时从可用余额托管，完成后结算给跑腿</span>
+              {rewardError
+                ? <span className="publish-field-hint is-error" role="alert">{rewardError}</span>
+                : <span className="publish-field-hint">发布时从可用余额托管，完成后结算给跑腿</span>}
             </div>
           </div>
 
@@ -128,7 +134,8 @@ export default function Publish() {
 
           <div className="publish-form-footer">
             <p>点击发布即确认将悬赏金额用于任务托管。</p>
-            <button className="btn btn-primary publish-submit" type="submit" disabled={submitting || isArbitrator}>
+            <button className="btn btn-primary publish-submit" type="submit" data-testid="publish-submit"
+                    disabled={submitting || isArbitrator || Boolean(rewardError)}>
               {submitting ? '发布中…' : '发布并托管'} <span aria-hidden="true">↗</span>
             </button>
           </div>
@@ -138,7 +145,7 @@ export default function Publish() {
           <div className="section-card publish-summary">
             <span className="section-kicker">发布预览</span>
             <h2>本次悬赏</h2>
-            <strong className="publish-summary-amount">{yuan(rewardCents)}</strong>
+            <strong className="publish-summary-amount">{formatCents(rewardCents)}</strong>
             <div className="publish-summary-row"><span>任务类型</span><strong>{TYPE_TEXT[type]}</strong></div>
             <div className="publish-summary-row"><span>接单名额</span><strong>1 人</strong></div>
             <p>发布后，同学可以在任务广场看到并抢接任务。</p>
