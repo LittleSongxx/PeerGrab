@@ -266,7 +266,7 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 
 **验证与数字**
 
-- README 当前口径：`mvn -Dpeergrab.it=true test` 合计 **315 项、0 失败、0 错误、0 跳过，其中 81 项集成测试真实执行**；另验证 API/Worker readiness、保留期 SQL、迁移脚本幂等性。
+- README 当前口径：`mvn -Dpeergrab.it=true test` 合计 **318 项、0 失败、0 错误、0 跳过，其中 81 项集成测试真实执行**；另验证 API/Worker readiness、保留期 SQL、迁移脚本幂等性。
 - 第二轮记录为 **289 项、0 失败/0 跳过**；第一轮分析报告记录为 **267 项、1 跳过（73 项 IT）**；更早的 2026-09-25 冒烟为 141 项、2026-09-27 上线为 214 项、2026-09-28 为 223 项。这些是不同时间点的快照，不是互相矛盾。
 - 旧库升级路径：用改动前 `init.sql` 建库 → 执行两个迁移脚本 → 全量 289 项测试通过，校验 `transfer_count`、9001 账户、5 个新索引。
 - 当前 HEAD `3be9723` 的修复**没有在 README 中声明已部署**；生产仍记录为 `5ace500`。
@@ -443,7 +443,7 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 | 代码基线 | `3be9723`（2026-10-19） | `git rev-parse --short HEAD` |
 | 工作区 | 有未提交改动：前端（`App.tsx`、`api.ts`、`ws.ts` 等）与 2026-10 每单账户模型（后端账户/用例/`init.sql`/迁移脚本） | `git status --short` |
 | 账户拓扑 | 每单 `ESCROW`/`COMMISSION`（`owner_id=errandId`），`ensureAccount` 幂等开户；旧 `-1`/`-2` 仅作历史/迁移数据；工作区未提交 | `WalletRepository`、`PublishErrandUseCase`、`Settle/Refund/Arbitrate`、`docker/init.sql`；[ADR](../architecture/wallet-account-topology.md) |
-| 后端测试 | **315 项、0 失败、0 错误、0 跳过；81 项 IT 真实执行** | [README](../../README.md) |
+| 后端测试 | **318 项、0 失败、0 错误、0 跳过；81 项 IT 真实执行** | [README](../../README.md) |
 | 前端构建 | `npm run build` 通过 | 分析报告 §7；README 上线记录 |
 | 生产版本 | `5ace500`（2026-09-28 部署） | [后端 README](../../peergrab-backend/README.md) |
 | 当前 HEAD 是否上线 | README 未声明 `3be9723` 已部署 | README 上线段落 |
@@ -459,7 +459,7 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 - **223**：2026-09-28 优化版。
 - **267 / 1 跳过 / 73 IT**：分析报告 §0 的实跑快照。
 - **289 / 0 跳过**：第二轮审计后的快照（§9.4）。
-- **315 / 81 IT**：2026-10-22 当前口径（新增每单账户相关测试）；更早的 308/78 IT 为第三轮审计后口径。
+- **318 / 81 IT**：2026-10-22 当前口径（新增每单账户相关测试）；更早的 308/78 IT 为第三轮审计后口径。
 
 这些数字对应不同代码与测试集，不能拿来算“测试增长”或“覆盖率提升”。
 

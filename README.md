@@ -1,89 +1,131 @@
-# PeerGrab
+<p align="center">
+  <img src="docs/assets/logo.svg" alt="PeerGrab" width="88" />
+</p>
 
-校园跑腿交易平台：发布悬赏、资金托管、并发抢单、履约结算、退款与仲裁。
+<h1 align="center">PeerGrab</h1>
 
-[在线体验：www.peergrab.cn](https://www.peergrab.cn)
+<p align="center">
+  <b>校园里的 C2C 任务交易与履约平台</b><br/>
+  发布任务 → 资金托管 → 抢单履约 → 结算 / 退款 / 仲裁，把一次互助跑成完整交易闭环
+</p>
 
-## 核心流程
+<p align="center">
+  <img src="https://img.shields.io/badge/Java-21-3776AB?style=flat-square&logo=openjdk&logoColor=white" />
+  <img src="https://img.shields.io/badge/Spring%20Boot-3.5-6DB33F?style=flat-square&logo=springboot&logoColor=white" />
+  <img src="https://img.shields.io/badge/MySQL-8-4479A1?style=flat-square&logo=mysql&logoColor=white" />
+  <img src="https://img.shields.io/badge/Redis-7-DC382D?style=flat-square&logo=redis&logoColor=white" />
+  <img src="https://img.shields.io/badge/RocketMQ-5-D77310?style=flat-square" />
+  <img src="https://img.shields.io/badge/React-18-61DAFB?style=flat-square&logo=react&logoColor=white" />
+  <img src="https://img.shields.io/badge/Docker%20Compose-9%20services-2496ED?style=flat-square&logo=docker&logoColor=white" />
+  <img src="https://img.shields.io/badge/tests-318%20passed-2ea44f?style=flat-square" />
+</p>
 
-| 发布与托管 | 抢单与履约 | 结算与争议 |
-| --- | --- | --- |
-| 发单人发布任务，悬赏同步托管 | 多人竞争一个名额；跑腿确认、取货、送达，超时可递补 | 发单人确认结算；取消则退款，争议交由仲裁员处理 |
+<p align="center">
+  <img src="docs/assets/screenshots/square.png" alt="PeerGrab 任务广场" width="100%" />
+</p>
+
+---
+
+**PeerGrab 是一个可运行的 C2C 任务交易与履约演示平台。** 发单人发布任务并把赏金托管到平台，跑腿抢单、确认、取货、送达；平台按状态机推进，完成后结算，异常时退款或由仲裁员裁决。发布、资金、异步事件、通知与对账在同一条链路里闭环。
+
+在线演示：<https://www.peergrab.cn> · 文档入口：[docs/README.md](docs/README.md) · 快速开始：[↓](#快速开始)
+
+---
+
+## 一场任务如何走完
+
+**① 发布与托管**
+
+填写任务标题、类型和赏金，提交后在同一个数据库事务里完成：任务落库、托管单创建、本任务托管账户开户、发单人扣款、复式分录写入。发单人余额不足时整笔回滚，不会留下半成品任务。
+
+<p align="center">
+  <img src="docs/assets/screenshots/publish.png" alt="发布任务" width="100%" />
+</p>
+
+**② 抢单与履约**
+
+任务广场展示待抢任务与赏金。多人同时抢一个名额时，先用 Redis Lua 原子预占，再由 MySQL 状态/版本 CAS 与唯一索引最终裁决；Redis 异常时退回数据库裁决。抢中后依次确认、取货、送达，每一步都由后端状态机决定可执行动作。
+
+<p align="center">
+  <img src="docs/assets/screenshots/detail.png" alt="任务详情与履约进度" width="100%" />
+</p>
+
+**③ 结算、退款与仲裁**
+
+发单人确认完成即结算；取消则原路退款；争议进入仲裁，由仲裁员根据双方证据决定资金去向。资金流水、消息通知、信用分和任务时间线同步更新；结算与退款都可重复重试，不会重复入账。
+
+<p align="center">
+  <img src="docs/assets/screenshots/arbitration.png" alt="争议仲裁" width="100%" />
+</p>
+
+## 能力地图
+
+<table>
+<tr>
+<td width="50%"><img src="docs/assets/screenshots/wallet.png" /><br/><b>钱包与流水</b> — 托管、结算、退款逐笔记账，余额与流水可对账</td>
+<td width="50%"><img src="docs/assets/screenshots/credit.png" /><br/><b>信用分</b> — 成交加分、超时/争议扣分，影响抢单资格与排名</td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/assets/screenshots/notifications.png" /><br/><b>站内消息</b> — 结算、退款、递补结果持久化通知，WebSocket 实时推送</td>
+<td width="50%"><img src="docs/assets/screenshots/login.png" /><br/><b>身份与角色</b> — 发单人 / 跑腿 / 仲裁员三端工作台，演示密码一键切换</td>
+</tr>
+</table>
+
+## 核心设计
+
+| | |
+|---|---|
+| **发布即托管** | 任务、托管单、账户扣款与复式记账在同一 MySQL 本地事务提交；金额以整数分存储，不引入浮点误差。 |
+| **一单一户** | 每个任务拥有独立的托管户与佣金户，把资金锁粒度从“全局系统户”降到任务级；结算、退款、仲裁和批量结算只读写本任务账户。 |
+| **抢单防超卖** | Redis Lua 原子预占削峰，MySQL 状态/版本 CAS 与唯一索引最终裁决；Redis 不可用时数据库仍能兜底。 |
+| **状态机驱动交互** | 领域层约束任务状态，后端按状态和身份计算 `availableActions`，前端只渲染后端允许的动作，不另写一套规则。 |
+| **可靠异步** | 超时递补、自动结算、资金事件先与业务同事务写入本地消息表 / Outbox，再由 Worker 投递或扫描补偿；消费端幂等。 |
+| **缓存只加速** | 详情读使用 Cache Aside + 逻辑过期 + 互斥回填 + 布隆过滤防穿透；缓存不参与抢单与资金裁决，故障时回源或返回旧值。 |
+| **资金对账** | 后台检查借贷平衡、每单账户快照与托管闭环；结算/退款同一业务号只允许入账一次。 |
 
 ## 架构
 
 ```mermaid
 flowchart LR
-    U[React / TypeScript] --> N[Nginx]
+    U[React 18 / TypeScript] --> N[Nginx]
     N -->|REST / WebSocket| P[Spring Boot API]
     P --> A[应用用例]
     A --> D[领域模型与状态规则]
     A --> I[基础设施适配器]
-    I --> M[(MySQL)]
-    I --> R[(Redis)]
-    I --> Q[RocketMQ]
+    I --> M[(MySQL 8)]
+    I --> R[(Redis 7)]
+    I --> Q[RocketMQ 5]
     Q --> W[独立 Worker]
     W --> A
 ```
 
-API 与 Worker 复用应用用例；领域层定义状态规则和端口，基础设施层实现 MySQL、Redis、MQ 适配。ArchUnit 在测试中检查依赖边界。当前资金链路基于单 MySQL 本地事务。
+API 与 Worker 复用应用用例；领域层定义状态规则和端口，基础设施层实现 MySQL、Redis、RocketMQ 适配。资金链路基于单 MySQL 本地事务，跨进程一致性交给本地消息表 / Outbox；ArchUnit 在测试中检查依赖边界。
 
-- **发布即托管**：任务、托管单、账户扣款和复式分录在同一事务提交；金额以整数分保存；发布必须携带 `X-Request-Id`（缺失或超长返回参数错误），防止网络重试重复建单与二次扣款。
-- **并发抢单**：鉴权后先做热点限流，再校验信用与在途资格；Redis Lua 原子预占名额，MySQL 状态与版本 CAS 加唯一索引最终裁决；Redis 不可用时仍可由数据库裁决。
-- **状态机驱动交互**：领域层约束任务流转，后端按状态和当前身份计算 `availableActions`；前端据此显示按钮，不另写一套状态规则。
-- **资金防重与对账**：结算以任务状态 CAS、托管单状态 CAS、流水业务号唯一约束防重复入账；账户按固定顺序更新，后台核对借贷平衡、余额快照和托管闭环。
-- **每单账户**：发布事务内为任务创建独立的托管户与佣金户（`owner_id=errand_id`），结算/退款/仲裁与批量结算只读写本任务账户，不再争用全局共享系统户；旧库须执行 `migrate-wallet-per-errand.sql`，旧 `-1/-2` 行只作历史流水归属。
-- **可靠异步**：超时递补和自动结算同事务登记本地消息，再交给 RocketMQ 定时投递；发送失败重试、Worker 扫描兜底，版本与轮次拦住过期消息。资金事件与账务同事务写入 outbox，MQ 恢复后由 Worker 投递。
-- **缓存与通知**：详情采用 Cache Aside、逻辑过期和互斥回填；布隆判否短路防穿透（就绪标记 fail-open、1% 判否抽样审计与巡检补登记兜底）；缓存不参与抢单裁决。WebSocket 经 Redis Pub/Sub 跨 API 副本分发，持久消息与定期轮询补齐实时事件的丢失。
-- **身份与角色**：没有用户表，仲裁员由 `peergrab.auth.arbitrator-id` 指定（演示为 `9001`）；仲裁员不能发布或抢单，仲裁用例再校验其不是当事人，裁决方向严格枚举 `RUNNER`/`PUBLISHER`；登录失败按 IP 与 userId 限速，登录响应带 `role`。
-- **可观测性**：API 与 Worker 暴露 Prometheus 指标；本机可用 [`docker-compose.observability.yaml`](peergrab-backend/docker/docker-compose.observability.yaml) overlay（`--profile observability`）启动 Prometheus `127.0.0.1:29090` 与 Grafana `127.0.0.1:23000`，含 11 条告警规则。暂未接入 tracing、日志聚合与 Alertmanager，生产也尚未部署持续看板。
+```text
+peergrab-backend/
+├── peergrab-domain/          领域模型、状态规则、仓储端口
+├── peergrab-application/     发布、抢单、履约、结算、退款、仲裁用例
+├── peergrab-infrastructure/  MySQL / Redis / MQ 适配器与对账
+├── peergrab-presentation/    REST 控制器、鉴权与统一返回
+├── peergrab-bootstrap/       Spring Boot API 启动与配置
+├── peergrab-worker/          MQ 消费、定时任务、outbox 投递
+└── docker/                   MySQL / Redis / RocketMQ / Nginx / Compose
+peergrab-frontend/
+├── src/pages/                广场、发布、我的任务、详情、钱包、信用、消息
+├── src/components/           导航、任务卡、动作按钮、Toast、骨架屏
+└── tests/                    mock UI、live smoke、截图与验收
+```
 
 ## 技术栈
 
-| 部分 | 技术 |
-| --- | --- |
-| 前端 | React 18 · TypeScript · Vite 5 · WebSocket |
-| 后端 | Java 21 · Spring Boot 3.5.8 · Maven |
-| 数据与消息 | MySQL 8 · Redis 7 · RocketMQ 5 |
-
-[当前镜像 JMeter ECS 复测](peergrab-backend/bench/reports/peergrab-current/report-ecs-jmeter-20260928.md)、[工具迁移前 ECS 六类场景实测](peergrab-backend/bench/reports/peergrab-current/report-ecs-spectrum-20260928.md)及[按版本归档的历史评测](peergrab-backend/bench/reports/README.md)分别说明工具、负载和结果；[评测资产目录](peergrab-backend/bench/ASSET_CATALOG.md)说明现行入口、私有证据哈希和保留规则。
-
-## 上线与实测
-
-2026-09-27 首次上线版本为 `2370c45`（压测夹具随后修正为 `7da0a92`）：旧库经备份、独立恢复和迁移演练后升级；一笔虚拟交易从发布到结算完成，资金事件进入 v2 普通消息 Topic、持久通知落库，资金不变量全部通过。当时隔离 MySQL/Redis 的后端测试 **214 项通过、0 跳过**，前端与后端生产包构建通过。
-
-2026-09-28 已部署优化版 `5ace500`，独立 MySQL/Redis 上的 223 项后端测试全部通过。2026-10-22 当前版本在隔离 MySQL/Redis 上运行 `mvn -B -ntp -Dpeergrab.it=true clean test` 合计 **315 项、0 失败、0 错误、0 跳过（其中 81 项集成测试真实执行）**（更早的 308/298/223/214 等数字属于不同版本，见历史提交与报告）；并额外验证 API/Worker 启动 readiness、保留期 SQL 与迁移脚本幂等性。测试数量由 [`tools/summarize_tests.py`](peergrab-backend/tools/summarize_tests.py) 从同一批 surefire 报告汇总，CI 以该口径为准。[工具迁移前 ECS 六类场景实测](peergrab-backend/bench/reports/peergrab-current/report-ecs-spectrum-20260928.md)由 Vegeta、Java 客户端和 Python 探针取得，包含公网偶发超时、热点抢单的秒级尾延迟、MQ／扫描到期流转以及 Broker 暂停时“结算已提交、客户端却超时”的故障反例；保留原工具和计时口径。
-
-随后在同一业务镜像上完成[独立的 JMeter ECS 复测](peergrab-backend/bench/reports/peergrab-current/report-ecs-jmeter-20260928.md)：广场游标首屏经异机公网 HTTPS，在 **500 目标 RPS × 180 秒 × 3 轮**中实际启动 **269,608 次，全部通过 HTTP 和业务断言**，最差轮 P99 **255 ms**；600 目标 RPS 长档第二轮出现 **1 次连接超时**，按门禁停止第三轮。2,000 个 JMeter 用户线程同单抢 1 名额恰好 1 人成功、0 超卖，但实际请求开始横跨 2.228 秒、P99 **8.735 秒**；**旧共享系统户模型**下结算 200 单／32 线程短批次为 **34.72 持久化 TPS**，资金校验通过；2026-10 起已改为每单托管户/佣金户，旧数字仅作历史口径。不同工具的连接复用与到达模型不同，不能用两份报告直接计算优化收益或全站容量。
-
-所有指标均按镜像、工具、请求路径、负载窗口和错误分母分开记录；这些有限窗口实验不是全站容量或生产 SLA 承诺。
-
-当前 HTTP 发压入口是 [JMeter 5.6.3 场景计划](peergrab-backend/bench/jmeter/README.md)；S5 的 Worker 定时事件仍由专用探针测量。API 与 Worker 已暴露 Micrometer/Prometheus 指标，生产尚未部署持续看板、告警或分布式追踪。
-
-## 工程文档
-
-- 文档唯一入口：[docs/README.md](docs/README.md)（含单一事实来源表与文档地图）
-- 设计基准：[design-benchmark](docs/architecture/design-benchmark.md)；演进与踩坑：[design-evolution](docs/engineering/design-evolution.md)
-- 压测方法论：[benchmark/methodology](docs/benchmark/methodology.md)
-
-> 教程、架构图、功能截图与本地验收证据属于本机个人物料，默认不纳入仓库（见 `.gitignore`）。
-
-## 验证与验收
-
-```bash
-# 后端单测（不需要中间件）
-cd peergrab-backend && mvn -B -ntp test
-# 后端全量（隔离 MySQL/Redis；CI 强制 IT 真执行）
-mvn -B -ntp -Dpeergrab.it=true clean test
-# 前端构建 + mock UI 验收（不需要后端）
-cd ../peergrab-frontend && npm ci && npm run build
-python3 -m pip install --user -r ../requirements-dev.txt && python3 -m playwright install chromium
-python3 tests/ui_smoke.py --dist dist
-# 文档链接/索引/教程资源检查
-cd .. && python3 scripts/check_docs.py
-```
-
-真实验收（浏览器全链路、API/MQ 并发与幂等、资金不变式 SQL）见 [peergrab-frontend/tests/README.md](peergrab-frontend/tests/README.md) 与 CI 的 `frontend-acceptance`、`acceptance-live` 工作流；本地验收证据默认生成在 `peergrab-frontend/verification/`，不纳入仓库。
+| | |
+|---|---|
+| **后端** | Java 21 · Spring Boot 3.5 · Spring JDBC · Sentinel · JWT |
+| **数据与消息** | MySQL 8 · Redis 7 · RocketMQ 5 · 本地消息表 / Outbox |
+| **前端** | React 18 · TypeScript · Vite 5 · WebSocket |
+| **可观测性** | Micrometer · Prometheus · Actuator |
+| **部署** | Docker Compose · Nginx |
+| **测试与压测** | JUnit 5 · ArchUnit · Playwright · JMeter 5.6 |
 
 ## 快速开始
 
@@ -95,4 +137,65 @@ cp -n .env.example .env
 docker compose -f docker-compose.yaml -f docker-compose.full.yaml --env-file .env up -d --build
 ```
 
-打开 `http://127.0.0.1:25173`。演示身份：发单人 `1001 / demo1001`、跑腿 `2001 / demo2001` 或 `2002 / demo2002`、仲裁员 `9001 / demo9001`。开发与测试命令见[后端](peergrab-backend/README.md)和[前端](peergrab-frontend/README.md)文档；已有 `peergrab-local` 数据卷请先按[本机卷升级步骤](peergrab-backend/README.md#已有本机-peergrab-数据卷升级)迁移。
+打开 <http://127.0.0.1:25173>。演示身份（密码见 `.env`）：
+
+| 身份 | 账号 | 密码 |
+|---|---|---|
+| 发单人 | `1001` | `demo1001` |
+| 跑腿 | `2001` / `2002` | `demo2001` / `demo2002` |
+| 仲裁员 | `9001` | `demo9001` |
+
+API 健康检查：<http://127.0.0.1:28080/api/health>。已有 `peergrab-local` 数据卷请先按[本机卷升级步骤](peergrab-backend/README.md#已有本机-peergrab-数据卷升级)执行迁移，不要直接复用旧库。
+
+## 怎么验证它真的能跑
+
+```bash
+# 后端单测（不需要中间件）
+cd peergrab-backend && mvn -B -ntp test
+
+# 后端全量：单元 + 真实 MySQL/Redis IT
+mvn -B -ntp -Dpeergrab.it=true clean test
+
+# 前端构建 + mock UI 契约回归
+cd ../peergrab-frontend
+npm ci
+npm run build
+python3 tests/ui_smoke.py --dist dist
+
+# 真实浏览器链路 / 真实 API+MQ（只连可丢弃隔离栈）
+python3 tests/live_smoke.py --base http://127.0.0.1:25173 --api-base http://127.0.0.1:28080
+python3 tests/live_api_smoke.py --base http://127.0.0.1:28080 --timeout-flow --auto-settle-flow
+```
+
+当前基线：**318 项后端测试，0 失败、0 错误、0 跳过；其中 81 项 IT 真实执行**。测试数量由 [`tools/summarize_tests.py`](peergrab-backend/tools/summarize_tests.py) 从同一批 surefire 报表汇总，CI 使用同一口径。
+
+## 实测与边界
+
+这些数字只代表注明的工具、负载窗口和隔离栈，不是生产容量或 SLA：
+
+- **任务广场**：JMeter 500 目标 RPS × 180 秒 × 3 轮，实际开始 **269,608** 次请求，0 请求错误；最差轮客户端 P99 **255 ms**。
+- **同单抢名额**：2,000 个 JMeter 用户线程同抢 1 个名额，恰好 **1 人成功、0 超卖**。
+- **资金正确性**：200 并发重复结算只入账一次；1,000 单同刻到期最终排空，无重复结算；Broker 暂停窗口内 32 笔结算全部成功。
+- **结算吞吐**：旧共享系统户模型下 200 单 / 32 线程短批次约 **32–39 TPS**（历史口径）；改为每任务独立账户后，本机隔离 IT 500 任务 / 64 线程单笔结算约 **118–119 TPS**。两者负载和环境不同，不能直接算提升倍数，也没有做 ECS 复测。
+
+> 截图来自本地 Compose 真实栈，数据是一次性演示任务，不是生产数据；页面里的余额和任务与截图生成时的本地库一致。
+
+## 这个仓库里没有什么
+
+- **没有真实支付/托管资质**：全程虚拟资金，不接真实支付渠道，不构成二清或持牌托管能力。
+- **没有生产级高可用**：单机 MySQL / Redis / RocketMQ 演示栈，没有多可用区、跨城容灾和长期稳定性验证。
+- **没有自助注册**：只保留四个固定演示身份，方便复现完整业务链路。
+- **没有密钥**：`.env` 与任何口令都不进版本控制；仓库只保留 `.env.example`。
+- **没有生产运营后台**：当前聚焦交易、资金、异步和前端工作台，运营/风控/清结算后台不在范围内。
+
+## 工程文档
+
+- 文档唯一入口：[docs/README.md](docs/README.md)
+- 设计基准与取舍：[design-benchmark](docs/architecture/design-benchmark.md)
+- 账户拓扑与迁移：[wallet-account-topology](docs/architecture/wallet-account-topology.md)
+- 工程演进与踩坑：[design-evolution](docs/engineering/design-evolution.md)
+- 压测方法与历史报告：[benchmark/methodology](docs/benchmark/methodology.md)
+
+## 截图
+
+所有页面截图都在 [`docs/assets/screenshots/`](docs/assets/screenshots/)：桌面 1440×900，包含登录、广场、发布、详情、钱包、信用、消息、仲裁；另有三张 390×844 移动端截图。

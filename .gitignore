@@ -20,5 +20,4 @@ peergrab-backend/bench/reports/peergrab-current/report-resume-*
 
 # 个人本地物料：教程、架构图/教程图、功能截图、真实验收证据，不随仓库分发。
 docs/tutorial/
-docs/assets/screenshots/
 peergrab-frontend/verification/
