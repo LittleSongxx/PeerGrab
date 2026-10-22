@@ -90,6 +90,8 @@ compose=(docker compose --env-file .env.prod -f docker-compose.prod.yaml)
   'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysql -uroot peer_grab' < migrate-runtime.sql
 "${compose[@]}" exec -T mysql sh -c \
   'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysql -uroot peer_grab' < migrate-query-indexes.sql
+"${compose[@]}" exec -T mysql sh -c \
+  'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysql -uroot peer_grab' < migrate-wallet-per-errand.sql
 "${compose[@]}" run --rm --no-deps mq-init
 "${compose[@]}" up -d --build app worker frontend
 "${compose[@]}" ps
@@ -105,6 +107,8 @@ compose=(docker compose --env-file .env.prod -f docker-compose.prod.yaml)
 
 重复执行迁移脚本应保持安全；正式执行前仍要在可丢弃的恢复副本上走一遍。停止栈时用 `docker compose ... down`，**不要加 `-v`**。公开演示只使用虚拟资金，压测必须使用独立库和卷。
 
+账户模型迁移：`migrate-wallet-per-errand.sql` 把旧共享 `ESCROW(-1)` 余额迁移到每单 `owner_id=errand_id` 的托管户，并为每单创建佣金户；只处理 `status='HELD'` 的托管单，旧 `-1/-2` 行保留作历史流水归属。新库由 `init.sql` 初始化，不再预置系统户。脚本可重复执行；执行前须停 app/worker、备份，并在恢复副本上先演练；执行后核对 `verify_fund.sql` 的 L1/L2/L3 和一次发布/结算 smoke。
+
 容器就绪检查现在访问内部 `/actuator/health/readiness`：生产 API 核验 MySQL 和雪花节点发号租约，Worker 还核验 Redis、调度心跳及发号租约；公开 `/api/health` 仍只表示进程存活。`/actuator/prometheus` 仅在容器网络内提供，包括 JVM、HTTP、Hikari、`Result.code` 业务结果计数，以及资金 outbox、延迟消息、对账差异和缓存失效失败指标。建议至少告警：就绪失败、资金 outbox 最老 PENDING 持续增长、到期任务处理滞后、对账差异非零，并定期做独立恢复演练，实测记录 RPO/RTO 后再承诺可用性目标。
 
 ### 2026-10 升级追加项
@@ -112,6 +116,7 @@ compose=(docker compose --env-file .env.prod -f docker-compose.prod.yaml)
 本次版本在上述迁移之外还有以下变更，仍需先停写、备份，再按顺序执行：
 
 - `migrate-runtime.sql` 追加 `errand.transfer_count`（本轮连续递补计数，回退后归零，用于修复"达到轮次上限后候选永久失效"）与 9001 仲裁员的零余额 `wallet_account` 行（`INSERT IGNORE`）。后者只保证账户模型一致，仲裁员在应用层已被禁止参与交易。
+- `migrate-wallet-per-errand.sql` 为每单托管户/佣金户迁移脚本；已有 HELD 托管单的旧卷必须执行，否则新代码会因每单账户缺失而拒绝结算。
 - `migrate-query-indexes.sql` 追加 5 个索引：`grab_record.idx_runner_errand`、`publish_request.idx_publish_created`、`notification.idx_read_time`、`local_message.idx_status_updated`、`fund_event_outbox.idx_outbox_status_updated`，服务于 runner 任务列表与保留期清理；两个脚本都可重复执行。
 - app / worker 容器新增 `TZ=Asia/Shanghai`：`credit.calibration-cron`、`recon.cron`、`retention.cron` 改按东八区解释。升级后须执行 `up -d --build` 重建容器，只重启进程不会更新环境变量。
 - Redis 由 `noeviction` 改为 `allkeys-lru`（`--maxmemory 512mb --maxmemory-samples 10`）：缓存、名额、布隆、榜单都可从 MySQL 重建，名额键被淘汰时抢单回退到数据库 CAS。

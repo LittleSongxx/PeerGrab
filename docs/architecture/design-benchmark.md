@@ -27,6 +27,7 @@ PeerGrab 已有三类文档：架构结论（[架构设计与技术选型.md](�
 | [PeerGrab 全面深度分析报告](../analysis/PeerGrab-全面深度分析报告.md) | 曾经有哪些问题、修了什么 | 本文把其 §9/§10 的修复记录当作"已解决"的证据引用，不重复叙述缺陷细节 |
 | [压测运行手册](../../peergrab-backend/bench/README.md) / [评测方法论](../benchmark/methodology.md) | 数字怎么测出来的 | 本文 §9 只引用结果与窗口，不重新解释方法论 |
 | [设计演进](../engineering/design-evolution.md) | 方案是怎么一步步变成现在这样的 | 本文给"当前态 + 候选方案"，演进叙事在那篇 |
+| [wallet-account-topology.md](wallet-account-topology.md) | 每单 ESCROW/COMMISSION 账户的动机、模型、锁序、收益/代价、迁移与回滚 | 本文 §5.1–§5.6 的账户口径以该 ADR 为决策记录 |
 
 ### 0.3 四条写作纪律
 
@@ -54,7 +55,7 @@ grep -rhoE '\$\{peergrab\.[a-zA-Z0-9._-]+' --include=*.java peergrab-backend | s
 
 PeerGrab 是**校园跑腿悬赏交易平台**：发单人发布悬赏并同步托管资金，跑腿者竞争唯一名额，履约后结算，取消走退款，争议由仲裁员二元裁决。它的技术内核不是"跑腿业务"，而是三件事的组合：
 
-1. **发布即托管**：任务、托管单、扣款、复式分录在同一个 MySQL 本地事务里提交（`PublishErrandUseCase`）。
+1. **发布即托管**：任务、本任务一对 ESCROW/COMMISSION 账户、托管单、扣款、复式分录在同一个 MySQL 本地事务里提交（`PublishErrandUseCase`）。
 2. **并发抢单的零超卖**：Redis Lua 预占削峰 + MySQL CAS 与双唯一索引终裁（`GrabErrandUseCase` / `GrabTransactionalStep`）。
 3. **可补偿的异步**：延迟消息主通道 + 本地消息表/outbox + 数据库扫描兜底，MQ 故障时资金事务照常提交（`local_message` / `fund_event_outbox`）。
 
@@ -68,7 +69,7 @@ PeerGrab 是**校园跑腿悬赏交易平台**：发单人发布悬赏并同步�
 | 跑腿者（演示 `2001`/`2002`） | 同上 | 信用分 ≥ `credit.min-score`、在途任务 < `credit.max-ongoing`、同一轮只能占一个名额 | `GrabErrandUseCase`、`grab_record` 双唯一索引 |
 | 仲裁员（演示 `9001`） | 配置 `peergrab.auth.arbitrator-id` | 禁止发布与抢单；不得是争议当事人 | `ActorRolePolicy.requireTradable` / `isArbitrator`、`ArbitrateErrandUseCase` |
 
-**没有用户表**：身份来自 token，钱包账户按需幂等开通（`WalletRepository.ensureUserAccount`）。这是整个数据模型里最容易被误读的一点——"用户"在这里只是 ID 加上若干幂等登记。
+**没有用户表**：身份来自 token，钱包账户按需幂等开通（`WalletRepository.ensureAccount`：`USER` 账户按用户 ID；`ESCROW`/`COMMISSION` 账户按 `errandId`，每任务一对）。这是整个数据模型里最容易被误读的一点——"用户"在这里只是 ID 加上若干幂等登记。
 
 ### 1.3 主链路时序
 
@@ -84,7 +85,7 @@ sequenceDiagram
     participant W as worker
 
     P->>API: POST /api/errands（X-Request-Id）
-    API->>DB: 单事务：publish_request 占位 → 扣款+ESCROW 入账+复式分录 → escrow HELD → errand DRAFT→PUBLISHED → 状态日志
+    API->>DB: 单事务：publish_request 占位 → 每单 ESCROW/COMMISSION 幂等开户 → 扣款+ESCROW 入账+复式分录 → escrow HELD → errand DRAFT→PUBLISHED → 状态日志
     API-->>RD: 提交后：名额键初始化 + Bloom 登记（3 次退避）
     API-->>P: 201（errandId, status=PUBLISHED）
 
@@ -160,7 +161,7 @@ flowchart LR
 
 上下文之间**不做同步 RPC**，只有两种通信方式：
 
-1. **同库事务**：发布时 errand + wallet + escrow 在一个事务里；结算时 errand CAS + escrow CAS + 账本 + outbox 在一个事务里。
+1. **同库事务**：发布时 errand + 每单 ESCROW/COMMISSION 开户 + wallet + escrow 在一个事务里；结算时 errand CAS + escrow CAS + 本任务账户过账 + outbox 在一个事务里。
 2. **异步事件**：资金事件 outbox → 普通 Topic → worker 落库通知 → Redis Pub/Sub → API 推 WebSocket。
 
 这是"不拆微服务"的直接技术后果：只要上下文之间允许同库事务，就不需要分布式事务；一旦拆开，发布链路立刻变成 TCC/Saga 问题（见 §10）。
@@ -304,21 +305,25 @@ UPDATE errand
 3. **`DEAD` 之后没有自动处置**：`local_message` 重试 1000 次后转 `DEAD`，只暴露指标 `peergrab.delay.outbox.dead`，需要人工介入。当前没有死信重放工具。
 4. **`worker_scan_retry` 无终态**：失败项无限重试（退避），避免误丢可恢复项；代价是长期失败项会一直占扫描名额。
 5. **扫描分片后是全片广播**：扫描按 `status + deadline` 查，没有 `campus_id`，分片后必然广播所有分片；属于低频后台任务，当前接受。
-6. **批量结算的取舍**：一页 100 单在一个事务里，吞吐上去了，但共享 ESCROW/COMMISSION 行锁持有时间也上去了；冲突时整页回滚（`BatchConflictException`），再由单笔幂等路径重放。
+6. **批量结算的取舍**：离线自动结算仍把一页 100 单合进一个事务（`settleAutoBatch`），但锁的对象已从两个全局系统户变成**本页每单自己的 ESCROW/COMMISSION 账户 + 收款跑腿的 USER 账户**，按账户 ID 升序一次锁齐；同页重复出现同一跑腿钱包、或与在线确认结算/退款撞上同一用户钱包时仍会等待。冲突时整页回滚（`BatchConflictException`），再由单笔幂等路径重放；在线确认结算（`settle`）与离线批量是两条独立路径，批量不改变单笔的三道闸门。新账户模型的批量结算尚无独立压测；§9 的本机 S4 IT（500 任务/64 线程、约 118–119 TPS）走的是单笔 `settle` 路径，不是 `settleAutoBatch`，两者不能混算。历史 32–39 TPS 见 §9 并带"共享系统户时期"标注。
 
 ## 5. 链路 L3：资金托管、结算与对账
 
 ### 5.1 账户模型
 
+每个任务一对独立系统账户：`ESCROW`/`COMMISSION` 的 `owner_id` 都是 `errandId`。发布事务内用 `WalletRepository.ensureAccount(errandId, type)` 幂等开户（`uk_owner` 兜住重复/并发），结算/退款/仲裁/批量都只读写本任务的账户。
+
 | 账户 | `owner_id` | 用途 | 不变量 |
 | --- | --- | --- | --- |
 | `USER` | 用户 ID | 用户可用余额 | `available >= 0`（`ck_balance`） |
-| `ESCROW` | `-1` | 托管总户 | 余额 = 所有 HELD 托管单之和 |
-| `COMMISSION` | `-2` | 平台佣金户 | 余额 = 所有已结算佣金之和 |
+| `ESCROW` | `errandId` | 本任务托管户，接收发单人转入的悬赏 | 余额 = 本任务 HELD 托管金额；结算/退款后归零 |
+| `COMMISSION` | `errandId` | 本任务佣金户，结算/仲裁时入账平台佣金 | 余额 = 本任务已结算佣金（佣金为 0 时保持 0） |
 
 金额一律 `BIGINT` 存**整数分**，不用 `DECIMAL`/`DOUBLE`；余额是快照，`wallet_ledger` 是事实来源；`uk_account_version(account_id, account_version)` 保证"账户版本 ↔ 流水"一一对应，`uk_biz_direction(biz_no, account_id, direction)` 保证同一业务同一账户同一方向只记一次。
 
-**只转移不冻结**：`WalletAccount` 只做余额转移，不做预授权冻结。发布时钱从发单人转到 ESCROW，结算时从 ESCROW 转给跑腿与佣金。这是担保交易（转移）而不是预授权（冻结）的建模选择，注释里记录了修正过程。
+**没有全局系统户**：`init.sql` 不再预置固定 `-1`/`-2` 账户，运行代码里也没有 `ESCROW_ACCOUNT_OWNER`/`COMMISSION_ACCOUNT_OWNER` 常量；旧库中的 `-1`/`-2` 两行只作为历史/迁移数据保留，新代码不再读写。迁移细节见 [账户拓扑 ADR](wallet-account-topology.md)。
+
+**只转移不冻结**：`WalletAccount` 只做余额转移，不做预授权冻结。发布时钱从发单人转到本任务的 `ESCROW`，结算时从本任务 `ESCROW` 转给跑腿与本任务 `COMMISSION`；退款、仲裁同理，资金动作闭环在本任务账户内。这是担保交易（转移）而不是预授权（冻结）的建模选择，注释里记录了修正过程。
 
 ### 5.2 三道闸门与锁序
 
@@ -330,18 +335,22 @@ UPDATE errand
 
 三道闸门互相独立：即使前一道被绕过（理论上不可能），后一道仍会拒绝。锁序上，资金终态一律"先锁任务、再锁托管单"，多账户过账按账户 ID 升序 `SELECT ... FOR UPDATE`（`ORDER BY id`），消除 A→B 与 B→A 的环。
 
-结算/退款/仲裁/发布路径的 `ensureUserAccount` 被刻意移到事务外：ODKU 对已存在行取 X 锁，若放在事务内、公共账户加锁之前，会与发布/退款形成 `wallet→escrow` 与 `escrow→wallet` 的环（分析报告 §10 已修）。抢单事务内仍保留 `ensureUserAccount`，因为它的位置在额度锁与任务 CAS 之后（`quota → errand → wallet`），不会与结算的 `escrow → wallet` 反向成环。佣金用 `BigDecimal` 十进制计算后向下取整，余数归跑腿，保证"跑腿 + 佣金 == 托管"恒等。
+结算/退款/仲裁/批量路径的 `ensureUserAccount` 仍刻意放在事务外：ODKU 对已存在行取 X 锁，若放在事务内、其它钱包账户加锁之前，会形成 `wallet→escrow` 与 `escrow→wallet` 的环（分析报告 §10 已修）。发布路径只对发单人 USER 账户做存在性校验，并在同一事务内用 `ensureAccount(errandId, …)` 创建本任务的 ESCROW/COMMISSION——它们是全新行，其它事务尚不可见，不会与已有账户形成环。抢单事务内仍保留 `ensureUserAccount`，因为它的位置在额度锁与任务 CAS 之后（`quota → errand → wallet`）。佣金用 `BigDecimal` 十进制计算后向下取整，余数归跑腿，保证"跑腿 + 佣金 == 托管"恒等。
+
+**每单账户改变了争用面，但没有消除钱包竞争**：结算/退款/仲裁只锁本任务的 ESCROW/COMMISSION 与相关用户钱包，不再有"所有结算排队等 `-1`/`-2` 两行"的全局串行点；剩下的竞争点是同一跑腿/发单人的 USER 账户（一个跑腿多单、在线结算与退款并发、`shared` 压测模式）与批量页内重复出现的用户钱包（§5.6）。
 
 ### 5.3 四个资金动作的事务边界
 
 | 动作 | 同一事务内 | 事务外/提交后 | 代码 |
 | --- | --- | --- | --- |
-| 发布 | 扣款分录、ESCROW 入账、`escrow_order` HELD、`errand` DRAFT→PUBLISHED、`publish_request` 完成 | 名额键、Bloom、缓存失效 | `PublishErrandUseCase.publish` |
+| 发布 | 本任务 ESCROW/COMMISSION 开户、扣款分录、本任务 ESCROW 入账、`escrow_order` HELD、`errand` DRAFT→PUBLISHED、`publish_request` 完成 | 名额键、Bloom、缓存失效 | `PublishErrandUseCase.publish` |
 | 结算 | `errand` CAS、`escrow_order` CAS、两条/三条分录、信用事件、`fund_event_outbox` | 审计、榜单、缓存、实时推送 | `SettleErrandUseCase.settle` |
 | 退款 | `errand` CAS、escrow CAS、退款分录、outbox | 同上 | `RefundErrandUseCase` |
 | 仲裁 | escrow CAS、按 favor 单向释放、outbox | 同上 | `ArbitrateSettleStep` |
 
 提交后的副作用逐项 `try/catch` 并计数（`peergrab.settle.side_effect.failures`）：资金已提交的事实不能因为审计或推送失败而被误报为失败。
+
+**在线/离线两条结账路径仍分离**：发单人确认走在线 `settle` 单笔事务；worker 的自动结算走 `settleAutoBatch` 的离线页事务（一页一个事务，锁本页各任务账户，冲突整页回滚交回单笔幂等重放）。两条路径共用同一套三道闸门与过账规则，但事务粒度不同。
 
 ### 5.4 消息一致性方案矩阵
 
@@ -360,18 +369,21 @@ UPDATE errand
 | 层级 | 校验 | 差异主体 | 判定 |
 | --- | --- | --- | --- |
 | L1 | 全局 `SUM(DEBIT) == SUM(CREDIT)` | `GLOBAL` | 不为 0 即代码 bug |
-| L2 | 系统户 `available + frozen` == 流水净额；用户户用"最新流水 vs 快照 + 版本" | 账户 ID | 账目对但余额显示错 |
+| L2 | 每单系统账户（`ESCROW`/`COMMISSION`，`owner_id=errandId`）`available + frozen` == 该账户流水净额；用户户用"最新流水 vs 快照 + 版本" | 账户 ID | 账目对但余额显示错 |
 | L3 | 每张 `RELEASED/REFUNDED` 托管单都有对应结算/退款流水；已终态任务不得仍有 HELD | `errand_id` | 托管闭环断裂 |
 
 差异写 `recon_diff`，`uk_date_type_subject(check_date, check_type, subject)` 保证重复跑不产生重复记录；`recon_diff` 不被保留期任务删除（审计证据）。资金审计 `fund_audit_log` 用 `REQUIRES_NEW` 独立事务：资金回滚了审计也要留痕。
 
 ### 5.6 边界与已知代价
 
-1. **共享系统账户行锁是吞吐天花板**：所有结算都锁 `ESCROW(-1)`/`COMMISSION(-2)` 两行。短批次实测 32.04–39.52 TPS（各报告口径见 §9），P99 秒级；批量越大锁持有越久。行业解法（影子账户、缓冲记账、汇总明细）本项目**没做**。
-2. **只有内部账账对账**：没有支付渠道回单、没有 T+1 外部对账、没有资金熔断。自建虚户不是持牌托管，存在二清边界，这是产品定位问题，不是实现缺陷。
-3. **流水归属语义**：托管两条腿都记 `user_id=发单人`，所以用户账单里会出现"托管 +X/−X"这类平台账户动作；接口用 `accountType`（`USER`/`ESCROW`/`COMMISSION`）标注，前端提示"平台账户动作不代表个人余额变动"。
-4. **退款/仲裁的资金方向由 `ArbitrationFavor.fromWire` 严格解析**：非法值返回 `INVALID_ARGUMENT`，不再默认判给跑腿（历史 H3 已修）。
-5. **秒级窗口仍存在**：延迟双删缩小但不消除缓存与 DB 的不一致窗口；资金链路不读缓存，所以影响的是展示而不是裁决。
+1. **每单账户消除了系统户热点，但没有消除全部钱包竞争**：结算/退款/仲裁不再锁全局 `ESCROW`/`COMMISSION`，系统户串行点消失；剩余竞争来自 ① 同一跑腿/发单人的 `USER` 账户（一个跑腿多单、在线结算与退款并发、`shared` 压测模式）② 批量页内重复出现的用户钱包（按账户 ID 升序一次锁齐，冲突整页回滚）③ 发布时发单人钱包。旧模型短批次 32.04–39.52 TPS 是**共享系统户时期**的实测（§9 带版本标注）。新模型本机 IT 的 S4-a（500 个不同任务、64 工作线程、单轮）观测约 118–119 TPS；这是本地隔离 MySQL/Redis 的 IT 观测，不是 ECS 稳态、也不是全站容量，旧数字不能与新数字混算。
+2. **账户行随任务数增长**：每任务固定新增 2 行 `wallet_account`（ESCROW/COMMISSION）且不删除，`wallet_ledger` 同步增长；对账、账户查询与巡检成本随任务数上涨。当前没有账户归档/清理策略，也没有大账户量下的对账耗时实测 `[待补充]`。
+3. **对账按账户**：L2 从"两个系统户"变成"逐个每单系统账户校验快照 == 流水净额"，账户越多扫描越大；语义不变——系统账户初始为 0，结算/退款后必须回到 0（见 [不变式文档](invariants-and-control-experiments.md) §1.6）。`verify_fund.sql` 口径不变。
+4. **迁移要求**：新代码不再读写 `-1`/`-2`。旧库升级必须把在途 HELD 任务的托管余额迁到 `(errandId, ESCROW)` 账户并为 `(errandId, COMMISSION)` 建户，否则结算/退款会因查不到本任务账户而失败；迁移脚本、执行顺序（停写→备份→迁移→发布新版本）与回滚方式见 [单机部署说明](../../peergrab-backend/docker/ECS_DEPLOY.md) 与 [账户拓扑 ADR](wallet-account-topology.md)。旧行保留作历史，不做反向脚本。
+5. **只有内部账账对账**：没有支付渠道回单、没有 T+1 外部对账、没有资金熔断。自建虚户不是持牌托管，存在二清边界，这是产品定位问题，不是实现缺陷。
+6. **流水归属语义**：托管腿记 `user_id=发单人`，佣金腿记平台标记 `-2`（`PLATFORM_LEDGER_USER_ID`，只是流水归属标记，不是账户 owner）；接口用 `accountType`（`USER`/`ESCROW`/`COMMISSION`）标注，前端提示"平台账户动作不代表个人余额变动"。每单账户让系统账户流水能按 `ref_id=errandId` 归到具体任务。
+7. **退款/仲裁的资金方向由 `ArbitrationFavor.fromWire` 严格解析**：非法值返回 `INVALID_ARGUMENT`，不再默认判给跑腿（历史 H3 已修）。
+8. **秒级窗口仍存在**：延迟双删缩小但不消除缓存与 DB 的不一致窗口；资金链路不读缓存，所以影响的是展示而不是裁决。
 
 ## 6. 链路 L4：缓存与数据同步
 
@@ -516,7 +528,7 @@ stateDiagram-v2
 | `grab_record` | `uk_errand_round_user(errand_id, round, runner_id)` | INV-2：同一轮同一人只占一个名额 |
 | `grab_record` | `uk_errand_request(errand_id, request_id)` | INV-3：同一请求只落一条记录 |
 | `escrow_order` | `uk_errand(errand_id)` | 一个任务只有一张托管单 |
-| `wallet_account` | `uk_owner(owner_id, owner_type)` | 一个身份一种账户只有一行 |
+| `wallet_account` | `uk_owner(owner_id, owner_type)` | 一个 owner 一种账户只有一行：`USER` 按用户，`ESCROW`/`COMMISSION` 按 `errandId`（每单开户幂等的落点） |
 | `wallet_ledger` | `uk_biz_direction(biz_no, account_id, direction)` | 业务幂等：同一业务同一账户同一方向只记一次 |
 | `wallet_ledger` | `uk_account_version(account_id, account_version)` | 账户版本与流水一一对应 |
 | `local_message` | `uk_msg_key(msg_key)` | 同一轮超时消息只登记一次 |
@@ -543,12 +555,13 @@ stateDiagram-v2
 | 广场游标首屏 P99（公网 HTTPS） | 异机固定到达率，600 目标 RPS × 180 秒 × 3 轮，每轮 108,000 次；客户端 P99 | 后端 README、频谱报告 | 46.919 / 52.332 / 47.839 ms；第三轮 4 次传输超时，因此没有该档零错误稳态容量结论 |
 | 广场游标首屏 P99（JMeter） | 500 目标 RPS × 180 秒 × 3 轮，实际 269,608 次全部通过 HTTP 与业务断言 | 根 README、JMeter 报告 | 最差轮 P99 255 ms；600 目标 RPS 长档第二轮 1 次连接超时后按门禁停止 |
 | 缓存对数据库读的削减 | 开/关缓存两个独立栈、同负载下 MySQL `Com_select` 与详情回源次数 | 后端 README S3 | 热态详情回源 0；三批累计 `Com_select` 较关缓存少 49.5%；冷态 P99 更高，不能宣称稳定吞吐提升 |
-| 结算短批次吞吐 | 200 个独立任务、32 工作线程；分子是数据库持久 `SETTLED` 数，分母是该批次耗时 | 频谱报告、JMeter 报告、[remediation 报告](../../peergrab-backend/bench/reports/peergrab-current/report-ecs-remediation-20260929.md) | 39.52 / 36.09（频谱两轮）、34.72（JMeter）、32.04（v1 共享钱包）/ 33.27（v2 分散）/ 32.86（v3 优化）TPS；均为约 5–6 秒短批次，不是稳态容量 |
+| 结算短批次吞吐（旧模型） | 200 个独立任务、32 工作线程；分子是数据库持久 `SETTLED` 数，分母是该批次耗时 | 频谱报告、JMeter 报告、[remediation 报告](../../peergrab-backend/bench/reports/peergrab-current/report-ecs-remediation-20260929.md) | 39.52 / 36.09（频谱两轮）、34.72（JMeter）、32.04（v1 共享钱包）/ 33.27（v2 分散）/ 32.86（v3 优化）TPS；均为约 5–6 秒短批次，不是稳态容量。**以上均为共享系统户时期口径，不得与新模型混算** |
+| 结算短批次吞吐（每单账户模型） | 500 个不同任务、64 工作线程、单轮；分子是数据库持久 `SETTLED` 数，分母是批次耗时 | 本机隔离 MySQL/Redis 的 `SettleConcurrencyIT` / `bench_run` | 约 118–119 TPS（两轮 IT 观测）；这是本地 IT 观测，不是 ECS 稳态或容量承诺 |
 | 到期流转时延 | 1,000 单同刻到期；到期时刻 → 事务内状态日志写入的 P99 | 后端 README S5 | MQ 通道 9.512 秒、纯扫描通道 25.100 秒；两栈均最终排空 |
 | Redis 故障读降级 | 暂停 Redis 容器后连续详情读 | 后端 README S6 | 250/250 成功，P95 2.013 秒 |
 | Broker 故障下资金正确性 | 暂停 Broker 时发起结算，比对 HTTP 结果与数据库资金事实 | 后端 README S6 | 结算已在数据库提交，但客户端 8 秒超时；另起新栈关闭延迟双删后约 0.095 秒返回（仅定位对照，非默认配置） |
-| 资金/一致性差异 | `recon_diff`、`sync_diff` 行数（目标恒为 0） | 各轮 S4 的 SQL 校验 | 各轮资金借贷差额、系统户快照、托管闭环均为 0；`sync_diff` 正常为空 |
-| 后端测试门禁 | `mvn -Dpeergrab.it=true test` 的 surefire 汇总（隔离 MySQL/Redis） | 后端 README（2026-10） | 298 项、0 失败、0 错误、0 跳过，其中 78 项集成测试真实执行；2026-09-28 为 223 项 |
+| 资金/一致性差异 | `recon_diff`、`sync_diff` 行数（目标恒为 0） | 各轮 S4 的 SQL 校验 | 各轮资金借贷差额、每单系统账户快照、托管闭环均为 0；`sync_diff` 正常为空 |
+| 后端测试门禁 | `mvn -Dpeergrab.it=true test` 的 surefire 汇总（隔离 MySQL/Redis） | 后端 README（2026-10） | 2026-10-22 为 315 项、0 失败、0 错误、0 跳过，其中 81 项集成测试真实执行；2026-09-28 为 223 项 |
 | 分片规则验证 | `peergrab-sharding-lab` 单测：任务共片、用户维度路由、生产 SQL 不按 `errand_id` 单查 | `peergrab-sharding-lab` | 规则层测试通过；分片后的容量、跨片事务表现 `[待补充]` |
 | 事务消息协议对照 | `peergrab-txmsg-lab` 的 6 个场景：半消息可见性、commit/rollback 幂等、三态回查、半消息失败短路 | `peergrab-txmsg-lab`（`TransactionMessageLabTest`） | 离线测试通过（`mvn -o -pl peergrab-txmsg-lab test`）；真实 Broker 对照 `[待补充]` |
 
@@ -573,13 +586,13 @@ peergrab-monolith
 | 结算：errand CAS + escrow CAS + 账本同事务 | 两库两事务 | 分布式事务 + 对账兜底 + 更复杂的失败补偿 |
 | 直接方法调用 | RPC | 超时、重试、熔断、限流、链路追踪 |
 | 一次部署 | 多服务版本兼容 | 注册中心、配置中心、灰度 |
-| 共享 `ESCROW`/`COMMISSION` 行锁 | 各自库 | 热点账户问题不消失，只是换到 wallet-service 内部 |
+| 每单 `ESCROW`/`COMMISSION` 账户 + 用户钱包行锁 | 各自库 | 全局系统户热点已随 2026-10 每单账户模型消失；剩余用户钱包竞争与账户行增长仍随 wallet-service 走 |
 
 ### 10.3 TCO 判断
 
 **当前不拆**，理由是三条可验证的事实：① 单 ECS + 单 MySQL/Redis/Broker 还没有被真实流量顶到拐点（压测是短窗口，没有稳态容量结论）；② 资金链路的价值恰恰来自"同库事务"，拆开要用分布式事务换回来；③ 没有 tracing、日志聚合与 Alertmanager，拆完排障成本会指数上升。
 
-**什么时候值得拆**（判断项，不是实测阈值）：结算锁竞争成为主要瓶颈且影子账户方案已用尽；抢单流量需要独立于资金链路扩容；团队具备独立的可观测与值班能力。三者同时成立再拆，否则先做 §5.6 与 §6.4 里列的容量项。
+**什么时候值得拆**（判断项，不是实测阈值）：结算锁竞争仍是主要瓶颈（全局系统户热点已由每单账户消除，剩余为同一用户钱包与批量页内竞争）；抢单流量需要独立于资金链路扩容；团队具备独立的可观测与值班能力。三者同时成立再拆，否则先做 §5.6 与 §6.4 里列的容量项。
 
 ## 11. 明确不做什么
 
@@ -622,6 +635,7 @@ peergrab-monolith
 | [后端 README](../../peergrab-backend/README.md) | 启动、测试、实验记录与边界 | 跑起来 |
 | [压测运行手册](../../peergrab-backend/bench/README.md) | 隔离栈、场景入口、清理与证据 | 自己复测 |
 | [单机部署说明](../../peergrab-backend/docker/ECS_DEPLOY.md) | 生产 compose、迁移、备份 | 部署/升级 |
+| [wallet-account-topology.md](wallet-account-topology.md) | 每单托管户/佣金户的动机、模型、锁序、迁移与回滚 | 改账户拓扑/升级旧库 |
 
 > 注：`docs/README.md`、`docs/engineering/design-evolution.md`、`docs/benchmark/methodology.md` 由并行任务创建；在它们落盘前，上述链接指向约定路径。
 
@@ -630,7 +644,7 @@ peergrab-monolith
 改任何一条主链路时，按这个顺序走：
 
 1. 先确认改的是哪条不变式（§3.1/§4.2/§5.2/§6.2），以及它对应的唯一索引或 CAS 是否仍成立。
-2. 同步更新本文对应小节的"代码落点"与"边界"，再更新 [config-reference.md](config-reference.md)（若新增/改动键）。
+2. 同步更新本文对应小节的"代码落点"与"边界"，再更新 [config-reference.md](config-reference.md)（若新增/改动键）；改动账户拓扑时还要同步 §5.1–§5.6、[账户拓扑 ADR](wallet-account-topology.md) 与迁移脚本。
 3. 若改动影响数字口径，更新 §9 并注明新的工具/环境/窗口，旧数字保留版本标签，不覆盖。
 4. 跑门禁：`mvn -Dpeergrab.it=true test`（IT 必须真实执行）、`ArchUnit`、以及 `peergrab-sharding-lab` 的规则测试（若动了 SQL 的 `campus_id` 条件）。
 5. 文档与代码冲突时，**先改文档**，让文档重新可被代码核对；不允许"文档先写成目标态、代码以后再追"。

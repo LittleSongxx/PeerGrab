@@ -56,8 +56,7 @@ class SettlementIT {
         jdbc.update("DELETE FROM escrow_order");
         jdbc.update("UPDATE wallet_account SET available = 100000, frozen = 0 WHERE owner_id = 1001 AND owner_type = 'USER'");
         jdbc.update("UPDATE wallet_account SET available = 5000, frozen = 0 WHERE owner_id = 2001 AND owner_type = 'USER'");
-        jdbc.update("UPDATE wallet_account SET available = 0, frozen = 0 WHERE owner_type = 'ESCROW'");
-        jdbc.update("UPDATE wallet_account SET available = 0, frozen = 0 WHERE owner_type = 'COMMISSION'");
+        jdbc.update("DELETE FROM wallet_account WHERE owner_type IN ('ESCROW','COMMISSION')");
         jdbc.update("DELETE FROM recon_diff");
     }
 
@@ -85,8 +84,8 @@ class SettlementIT {
 
         // 验证余额
         long runnerAvailable = walletRepository.findByOwner(2001L, AccountType.USER).orElseThrow().available().cents();
-        long commissionAvailable = walletRepository.findByOwner(-2L, AccountType.COMMISSION).orElseThrow().available().cents();
-        long escrowAvailable = walletRepository.findByOwner(-1L, AccountType.ESCROW).orElseThrow().available().cents();
+        long commissionAvailable = walletRepository.findByOwner(errandId, AccountType.COMMISSION).orElseThrow().available().cents();
+        long escrowAvailable = walletRepository.findByOwner(errandId, AccountType.ESCROW).orElseThrow().available().cents();
 
         // 佣金 = 2000 * 0.05 = 100，跑腿 = 2000 - 100 = 1900
         assertEquals(5000 + 1900, runnerAvailable, "跑腿余额");
@@ -139,7 +138,7 @@ class SettlementIT {
         assertEquals(100000L, available, "退款后余额应恢复到初始值");
 
         // 托管账户清零
-        long escrow = walletRepository.findByOwner(-1L, AccountType.ESCROW).orElseThrow().available().cents();
+        long escrow = walletRepository.findByOwner(errandId, AccountType.ESCROW).orElseThrow().available().cents();
         assertEquals(0L, escrow);
 
         // 对账零差异

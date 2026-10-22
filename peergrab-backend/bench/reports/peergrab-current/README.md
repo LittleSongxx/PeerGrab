@@ -14,6 +14,7 @@ JMeter 游标首屏以固定用户池和吞吐定时器做 500 目标 RPS × 180
 | 2026-09-28 | [优化分析与复测](performance-optimization-analysis-20260929.md) | 自动结算扫描、钱包锁路径和详情预热的阶段性单轮结果 |
 | 2026-09-28 | [当前镜像 ECS 六类场景实测](report-ecs-spectrum-20260928.md) | `5ace500`，8 vCPU／100 Mbps ECS 停站后逐场景独立栈；含游标首屏完整公网 HTTPS、S1–S5 及 Redis／Broker 暂停的 S6 冒烟，附生产恢复与私有证据校验和 |
 | 2026-09-28 | [JMeter ECS 复测](report-ecs-jmeter-20260928.md) | 同业务镜像，JMeter S1/S2/S3/S4 及 Redis 故障详情读；S5 Worker 计时探针和 MQ 单笔故障未重跑，保留私有 JTL／资源证据 |
+| 2026-10-22 | [每单账户模型本机 IT 观测](report-wallet-topology-local-20261022.md) | 每任务独立 ESCROW/COMMISSION 账户；本机隔离 MySQL/Redis 的 315 项测试与 S4-a 500 任务/64 线程约 118–119 TPS；非 ECS 容量 |
 
 各 ECS 报告的生产负载、带宽、CPU 配额、代码、请求路径或发压位置不同，不能合并成一条容量曲线。2026-09-27 旧镜像的完整 HTTPS 专项在 600 RPS 档三轮各 108,000/108,000 HTTP 200，650 RPS 长档出现 23 次传输超时；当前镜像改用真实广场游标首屏，在 600 RPS 长档的第三轮出现 4 次传输超时。两者不能直接计算优化增益，也都没有测出最大稳定容量。4 vCPU 窗口、回环 API 和 SSH 转发的结果另有各自限定条件，详见对应报告。
 

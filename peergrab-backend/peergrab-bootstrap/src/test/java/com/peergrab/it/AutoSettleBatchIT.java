@@ -56,8 +56,7 @@ class AutoSettleBatchIT {
         jdbc.update("DELETE FROM escrow_order");
         jdbc.update("UPDATE wallet_account SET available = 100000, frozen = 0 WHERE owner_id = ? AND owner_type = 'USER'", PUBLISHER);
         jdbc.update("UPDATE wallet_account SET available = 5000, frozen = 0 WHERE owner_id = ? AND owner_type = 'USER'", RUNNER);
-        jdbc.update("UPDATE wallet_account SET available = 0, frozen = 0 WHERE owner_type = 'ESCROW'");
-        jdbc.update("UPDATE wallet_account SET available = 0, frozen = 0 WHERE owner_type = 'COMMISSION'");
+        jdbc.update("DELETE FROM wallet_account WHERE owner_type IN ('ESCROW','COMMISSION')");
         jdbc.update("DELETE FROM recon_diff");
     }
 
@@ -85,10 +84,14 @@ class AutoSettleBatchIT {
         // 每单 2000 分、佣金 5%：跑腿净得 1900，佣金 100
         long runnerCents = walletRepository.findByOwner(RUNNER, AccountType.USER).orElseThrow().available().cents();
         assertEquals(5000L + 2 * 1900L, runnerCents, "批量结算必须给跑腿入账两笔净额");
-        long commission = walletRepository.findByOwner(-2L, AccountType.COMMISSION).orElseThrow().available().cents();
+        long commission = 0L;
+        long escrow = 0L;
+        for (long id : List.of(first, second)) {
+            commission += walletRepository.findByOwner(id, AccountType.COMMISSION).orElseThrow().available().cents();
+            escrow += walletRepository.findByOwner(id, AccountType.ESCROW).orElseThrow().available().cents();
+        }
         assertEquals(2 * 100L, commission);
-        long escrow = walletRepository.findByOwner(-1L, AccountType.ESCROW).orElseThrow().available().cents();
-        assertEquals(0L, escrow, "批量结算后托管账户必须清零");
+        assertEquals(0L, escrow, "批量结算后每单托管账户必须清零");
 
         assertEquals(0L, reconRepository.debitMinusCredit(), "L1 借贷平衡");
         assertTrue(reconRepository.findSnapshotDiffs().isEmpty(), "L2 系统户快照一致");

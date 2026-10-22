@@ -31,6 +31,15 @@ public interface WalletRepository {
     Optional<WalletAccount> findByOwner(long ownerId, AccountType type);
 
     /**
+     * 确保某个 owner 存在指定类型账户，返回已存在或新建的账户。
+     *
+     * <p>USER 账户用于用户余额；ESCROW/COMMISSION 账户的 ownerId 是 errandId，
+     * 每个任务一对独立系统账户，避免所有资金动作争用同一行。开通只写零余额账户，
+     * 不改变任何余额或流水；重复调用/并发调用由 uk_owner 唯一约束保证幂等。</p>
+     */
+    WalletAccount ensureAccount(long ownerId, AccountType type);
+
+    /**
      * 确保某个用户存在自己的 USER 钱包账户。
      *
      * <p>没有账户的身份一旦抢单成功，结算时找不到收款账户就会让任务永久卡在 DELIVERED。

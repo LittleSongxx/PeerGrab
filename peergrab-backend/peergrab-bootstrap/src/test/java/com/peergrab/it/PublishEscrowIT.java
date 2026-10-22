@@ -42,8 +42,8 @@ class PublishEscrowIT {
 
     @BeforeEach
     void reset() {
+        jdbc.update("DELETE FROM wallet_account WHERE owner_type IN ('ESCROW','COMMISSION')");
         jdbc.update("UPDATE wallet_account SET available = 100000, frozen = 0 WHERE owner_id = 1001 AND owner_type = 'USER'");
-        jdbc.update("UPDATE wallet_account SET available = 0, frozen = 0 WHERE owner_type = 'ESCROW'");
     }
 
     @Test
@@ -62,7 +62,7 @@ class PublishEscrowIT {
         assertEquals(0L, account.frozen().cents(), "转移模型不写 frozen");
 
         // 托管账户余额增加
-        var escrowAccount = walletRepository.findByOwner(-1L, AccountType.ESCROW).orElseThrow();
+        var escrowAccount = walletRepository.findByOwner(result.errandId(), AccountType.ESCROW).orElseThrow();
         assertEquals(1500L, escrowAccount.available().cents());
 
         // 托管单已 HELD

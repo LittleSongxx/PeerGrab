@@ -25,6 +25,8 @@ import java.util.Map;
  * Independent DELIVERED -> SETTLED natural-expiry probe. It does not measure S5
  * confirmation timeout, HTTP delivery, or the application's local-message sender.
  * The combined mode deliberately reports MQ plus the always-on auto-settle scan.
+ * The fixture writes ledger rows directly, so it provisions the per-errand
+ * ESCROW/COMMISSION account pair itself instead of relying on shared system accounts.
  */
 public final class AutoSettleTimelineProbe {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -92,7 +94,7 @@ public final class AutoSettleTimelineProbe {
             }
             long base = ID_PREFIX + (System.currentTimeMillis() % 100_000_000L) * 100_000L;
             String runId = recorder.startRun("BENCH", "AUTO-SETTLE-" + cfg.mode(), cfg.count(),
-                    "direct DELIVERED/HELD fixture with balanced escrow ledger; "
+                    "direct DELIVERED/HELD fixture with per-errand escrow/commission accounts; "
                             + "source=DB status_log; no HTTP delivery/local-message sender");
             Map<String, Object> summary = new LinkedHashMap<>();
             boolean pass = false;
@@ -138,20 +140,27 @@ public final class AutoSettleTimelineProbe {
                 throw new IllegalStateException("Auto-settle probe needs a fresh disposable stack: " + table);
             }
         }
-        if (scalar(db, "SELECT COUNT(*) FROM wallet_account") != 5
-                || scalar(db, "SELECT COALESCE(SUM(available + frozen + version),0) "
-                    + "FROM wallet_account WHERE owner_type IN ('ESCROW','COMMISSION')") != 0) {
+        // init.sql seeds exactly the four demo USER wallets and no shared system
+        // accounts: the per-errand model opens one ESCROW/COMMISSION pair inside the
+        // publication transaction, so a fresh stack must not contain system-account rows.
+        if (scalar(db, "SELECT COUNT(*) FROM wallet_account") != 4
+                || scalar(db, "SELECT COUNT(*) FROM wallet_account WHERE owner_type <> 'USER'") != 0) {
             throw new IllegalStateException("Expected untouched benchmark seed wallets");
         }
     }
 
-    /** Seed each HELD escrow with balanced publication ledger and enough escrow funds. */
+    /**
+     * Seed each HELD escrow with a publication ledger plus the per-errand
+     * ESCROW/COMMISSION accounts that publication normally opens. The fixture writes
+     * ledger rows directly, so it must create that account pair itself: escrow is
+     * credited the full reward and the commission account starts empty.
+     */
     private static void seed(Connection db, String runId, long base, int count) throws SQLException {
         boolean oldAutoCommit = db.getAutoCommit();
         db.setAutoCommit(false);
         try (PreparedStatement account = db.prepareStatement("""
                 INSERT INTO wallet_account (id, owner_id, owner_type, available, frozen, version)
-                VALUES (?, ?, 'USER', ?, 0, ?)
+                VALUES (?, ?, ?, ?, 0, ?)
                 """);
              PreparedStatement errand = db.prepareStatement("""
                 INSERT INTO errand (id, campus_id, publisher_id, grabber_id, type, title,
@@ -175,21 +184,38 @@ public final class AutoSettleTimelineProbe {
             long publisher = base + 5_000;
             account.setLong(1, publisher);
             account.setLong(2, publisher);
-            account.setLong(3, (long) count * REWARD_CENTS);
-            account.setLong(4, 0);
+            account.setString(3, "USER");
+            account.setLong(4, (long) count * REWARD_CENTS);
+            account.setLong(5, 0);
             account.executeUpdate();
             for (int n = 0; n < count; n++) {
                 long runner = base + 5_001 + n;
                 account.setLong(1, runner);
                 account.setLong(2, runner);
-                account.setLong(3, 0);
+                account.setString(3, "USER");
                 account.setLong(4, 0);
+                account.setLong(5, 0);
                 account.addBatch();
             }
             account.executeBatch();
             for (int n = 0; n < count; n++) {
                 long id = base + n;
                 long runner = base + 5_001 + n;
+                // One system-account pair per task, mirroring the publication transaction.
+                long escrowAccount = base + 30_000 + n;
+                long commissionAccount = base + 40_000 + n;
+                account.setLong(1, escrowAccount);
+                account.setLong(2, id);
+                account.setString(3, "ESCROW");
+                account.setLong(4, REWARD_CENTS);
+                account.setLong(5, 1);
+                account.addBatch();
+                account.setLong(1, commissionAccount);
+                account.setLong(2, id);
+                account.setString(3, "COMMISSION");
+                account.setLong(4, 0);
+                account.setLong(5, 0);
+                account.addBatch();
                 errand.setLong(1, id);
                 errand.setLong(2, publisher);
                 errand.setLong(3, runner);
@@ -212,22 +238,28 @@ public final class AutoSettleTimelineProbe {
                 ledger.setInt(8, n + 1);
                 ledger.setLong(9, id);
                 ledger.addBatch();
+                // Publication credits this task's own escrow account once with version 1.
                 ledger.setLong(1, base + 20_001 + 2L * n);
-                ledger.setLong(3, 1);
+                ledger.setLong(3, escrowAccount);
                 ledger.setLong(4, publisher);
                 ledger.setString(5, "CREDIT");
-                ledger.setLong(7, (long) (n + 1) * REWARD_CENTS);
+                ledger.setInt(6, REWARD_CENTS);
+                ledger.setLong(7, REWARD_CENTS);
+                ledger.setInt(8, 1);
+                ledger.setLong(9, id);
                 ledger.addBatch();
                 item.setString(1, runId);
                 item.setLong(2, id);
                 item.addBatch();
                 if (n % 200 == 199) {
+                    account.executeBatch();
                     errand.executeBatch();
                     escrow.executeBatch();
                     ledger.executeBatch();
                     item.executeBatch();
                 }
             }
+            account.executeBatch();
             errand.executeBatch();
             escrow.executeBatch();
             ledger.executeBatch();
@@ -238,9 +270,6 @@ public final class AutoSettleTimelineProbe {
                 update.setInt(2, count);
                 update.setLong(3, publisher);
                 if (update.executeUpdate() != 1) throw new SQLException("Publisher wallet update failed");
-                update.setLong(1, (long) count * REWARD_CENTS);
-                update.setLong(3, 1);
-                if (update.executeUpdate() != 1) throw new SQLException("Escrow wallet update failed");
             }
             db.commit();
         } catch (SQLException e) {
@@ -357,21 +386,23 @@ public final class AutoSettleTimelineProbe {
                 SELECT e.id,
                        COUNT(DISTINCT l.id) AS legs,
                        COALESCE(SUM(CASE WHEN l.direction = 'DEBIT' THEN l.amount ELSE -l.amount END),0) AS net,
-                       SUM(CASE WHEN l.account_id = 1 AND l.direction = 'DEBIT'
+                       SUM(CASE WHEN l.account_id = esc.id AND l.direction = 'DEBIT'
                                  AND l.amount = ? THEN 1 ELSE 0 END) AS escrow_debits,
                        SUM(CASE WHEN l.account_id = e.grabber_id AND l.direction = 'CREDIT'
                                  AND l.amount = ? THEN 1 ELSE 0 END) AS runner_credits,
-                       SUM(CASE WHEN l.account_id = 2 AND l.direction = 'CREDIT'
+                       SUM(CASE WHEN l.account_id = com.id AND l.direction = 'CREDIT'
                                  AND l.amount = ? THEN 1 ELSE 0 END) AS commission_credits,
                        COUNT(DISTINCT c.id) AS credit_events, COUNT(DISTINCT f.biz_no) AS outbox_events
                   FROM bench_run_item i JOIN errand e ON e.id = i.entity_id
+                  LEFT JOIN wallet_account esc ON esc.owner_id = e.id AND esc.owner_type = 'ESCROW'
+                  LEFT JOIN wallet_account com ON com.owner_id = e.id AND com.owner_type = 'COMMISSION'
                   LEFT JOIN wallet_ledger l ON l.biz_no = CONCAT('settle:', e.id)
                   LEFT JOIN credit_event c ON c.biz_no = CONCAT('settle:', e.id)
                        AND c.user_id = e.grabber_id AND c.type = 'SETTLE' AND c.delta = 2
                   LEFT JOIN fund_event_outbox f ON f.biz_no = CONCAT('settle:', e.id)
                        AND f.event_type = 'SETTLED'
                  WHERE i.run_id = ? AND i.entity_type = 'ERRAND'
-                 GROUP BY e.id
+                 GROUP BY e.id, esc.id, com.id
                 """)) {
             ps.setInt(1, REWARD_CENTS);
             ps.setInt(2, RUNNER_CENTS);

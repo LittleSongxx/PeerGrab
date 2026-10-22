@@ -61,11 +61,23 @@ class PublishCacheEvictionTest {
         when(requests.complete(eq(1001L), anyString(), anyLong())).thenReturn(1);
         when(wallets.findByOwner(1001, AccountType.USER))
                 .thenReturn(Optional.of(account(1001, 1001, AccountType.USER, 1_000)));
-        when(wallets.findByOwner(-1, AccountType.ESCROW))
-                .thenReturn(Optional.of(account(1, -1, AccountType.ESCROW, 0)));
-        when(wallets.lockAccountsInOrder(any(long[].class))).thenReturn(Map.of(
-                1L, account(1, -1, AccountType.ESCROW, 0),
-                1001L, account(1001, 1001, AccountType.USER, 1_000)));
+        // 发布时按 errandId 幂等开通每单 ESCROW/COMMISSION 账户（ownerId = errandId），
+        // 托管户接收悬赏金，佣金户留待结算/仲裁入账，二者都不再是全局固定系统户。
+        when(wallets.ensureAccount(anyLong(), eq(AccountType.ESCROW))).thenAnswer(invocation ->
+                account(1, invocation.<Long>getArgument(0), AccountType.ESCROW, 0));
+        when(wallets.ensureAccount(anyLong(), eq(AccountType.COMMISSION))).thenAnswer(invocation ->
+                account(2, invocation.<Long>getArgument(0), AccountType.COMMISSION, 0));
+        when(wallets.lockAccountsInOrder(any(long[].class))).thenAnswer(invocation -> {
+            // vararg long... 在 Mockito 调用点被展开成多个 Long 实参，逐个还原账户 ID。
+            Map<Long, WalletAccount> locked = new java.util.LinkedHashMap<>();
+            for (Object raw : invocation.getArguments()) {
+                long accountId = ((Number) raw).longValue();
+                locked.put(accountId, accountId == 1L
+                        ? account(1, 0, AccountType.ESCROW, 0)
+                        : account(1001, 1001, AccountType.USER, 1_000));
+            }
+            return locked;
+        });
         when(wallets.casDebit(eq(1001L), any())).thenReturn(1);
         when(wallets.casCredit(eq(1L), any())).thenReturn(1);
         when(errands.casPublish(anyLong(), eq(0L))).thenReturn(1);

@@ -223,6 +223,13 @@ jobs:
           bash -n peergrab-backend/docker/init-mq.sh
           sh -n peergrab-backend/docker/init-mq-container.sh
           bash -n peergrab-backend/docker/verify-fund-topic-contract.sh
+      - name: Lint benchmark claim wording
+        run: |
+          python3 peergrab-backend/bench/scripts/lint_metrics.py --strict \
+            peergrab-backend/bench/reports/peergrab-current/README.md \
+            peergrab-backend/bench/reports/TEMPLATE.md \
+            peergrab-backend/bench/README.md \
+            docs/benchmark/methodology.md
 
   frontend-acceptance:
     runs-on: ubuntu-latest

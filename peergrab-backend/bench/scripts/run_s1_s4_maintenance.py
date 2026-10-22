@@ -150,6 +150,10 @@ def snapshot(container_id):
     """).split("\t")
     if len(fields) != 12 or any(not value.isdecimal() for value in fields):
         raise Stopped("Unexpected S2 fixture/fund snapshot")
+    # walletAccountRows is observation-only. The per-errand ESCROW/COMMISSION model
+    # opens two system accounts per published task, so this count grows with the
+    # fixture lifecycle and must never become a gate; walletTotal and ledgerDifference
+    # stay the hard funds gates in fixture_gate().
     return {"s2Rows": count, "s2Published": int(fields[0]),
             "s2Sha256": hashlib.sha256(rows.encode()).hexdigest(),
             "walletTotal": int(fields[1]), "ledgerDifference": int(fields[2]),

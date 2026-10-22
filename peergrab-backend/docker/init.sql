@@ -115,7 +115,7 @@ CREATE TABLE IF NOT EXISTS grab_record (
 
 CREATE TABLE IF NOT EXISTS wallet_account (
   id         BIGINT      NOT NULL,
-  owner_id   BIGINT      NOT NULL COMMENT '用户 ID；系统户用固定值',
+  owner_id   BIGINT      NOT NULL COMMENT '用户 ID；ESCROW/COMMISSION 账户为 errand_id',
   owner_type VARCHAR(16) NOT NULL COMMENT 'USER/ESCROW/COMMISSION',
   available  BIGINT      NOT NULL DEFAULT 0 COMMENT '可用余额，单位分',
   frozen     BIGINT      NOT NULL DEFAULT 0 COMMENT '冻结余额，单位分',
@@ -163,12 +163,8 @@ CREATE TABLE IF NOT EXISTS escrow_order (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='资金托管单';
 
 -- ---------- 初始数据 ----------
--- 系统户：托管账户与佣金账户
-INSERT INTO wallet_account (id, owner_id, owner_type, available, frozen, version) VALUES
-  (1, -1, 'ESCROW', 0, 0, 0),
-  (2, -2, 'COMMISSION', 0, 0, 0)
-ON DUPLICATE KEY UPDATE id = id;
-
+-- 每笔任务在发布事务内创建独立的 ESCROW/COMMISSION 账户（owner_id=errand_id），
+-- 不再预置全局共享系统户。
 -- 演示账户：1001 发单人，2001/2002 跑腿；独立压测栈按场景另行造数。
 INSERT INTO wallet_account (id, owner_id, owner_type, available, frozen, version) VALUES
   (1001, 1001, 'USER', 100000, 0, 0),

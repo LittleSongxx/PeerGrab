@@ -96,7 +96,7 @@ S4 的分子必须是**数据库中最终 `SETTLED` 的独立任务数**，不�
 
 现行 JMeter 轮：200 个不同任务 / 32 线程，**34.72 持久化 TPS**，P50/P95/P99 = 604/983/1,081 ms；201 个任务持久结算、201 个托管释放；同任务 8 次并发尝试只有 1 次成功、7 次业务拒绝。窗口内 `Innodb_row_lock_waits` 增 205、`Innodb_row_lock_time` 增 68,442 ms，包含准备、不同任务结算和重复尝试，不能除以 200 当单请求锁等待。
 
-历史原工具两轮 39.52/36.09 TPS、分散钱包 33.27 TPS、共享钱包 32.04 TPS 只用于同工具、同批次对照。共享 `ESCROW`/`COMMISSION` 行锁仍是串行点；34.72 TPS 不是长期稳定容量。
+历史原工具两轮 39.52/36.09 TPS、分散钱包 33.27 TPS、共享钱包 32.04 TPS 只用于同工具、同批次对照。以上均为**旧共享系统户模型**的历史口径；2026-10 已改为每单托管户/佣金户，旧串行点不再代表当前模型。34.72 TPS 不是长期稳定容量。
 
 ### 2.5 S5：到期事件
 
@@ -173,6 +173,32 @@ Little's Law：`并发请求数 N ≈ 吞吐 X × 平均延迟 R`。用途是反
 | 固定请求数批次 | S3 5,000 次、S4 200 单 | 批次完成时间与正确性 | 长期稳态 QPS/TPS |
 
 JMeter 的 Constant Throughput Timer 是“尝试目标速率”，不是严格开放模型；S2 必须同时报告实际开始率。固定到达率客户端也要区分 `offered/sent/completed`，`schedulerMissed` 与 `capacityRejected` 不是服务端错误。
+
+### 3.7 多轮统计与 canonical 汇总
+
+单轮只能说明“这一次”，不能说明“稳定”。同一档位至少 **3 轮**，并在报告里同时给：
+
+- 轮次数 `n`、中位数、min-max；只有一轮必须显式标“单轮，不作稳定结论”。
+- 每轮实发/完成 RPS、成功数、HTTP/传输/业务/本地拒绝分类，以及 P50/P95/P99（有则 P999）。
+- 预热窗口与正式窗口分开；首轮冷启动（JIT、连接池、缓存）单独解释，不能只取最好一轮。
+- 客户端与服务端延迟分开：JMeter 客户端 P99 不能替代服务端 `$request_time`；客户端先饱和时不能判服务端容量。
+- 宿主 CPU/iowait/内存、Hikari pending、InnoDB 行锁、慢 SQL 等资源水位；没有资源采样就不能下“CPU/IO 瓶颈”结论。
+- 同一档位不混用工具；不同工具的结果只能并列，不能合并或计算“提升”。
+
+本仓库提供两个只读工具（单元测试已纳入 `benchmark-assets` CI）：
+
+```bash
+python3 peergrab-backend/bench/scripts/canonicalize.py \
+  --input peergrab-backend/bench/runs/<run-dir> --format markdown --details
+python3 peergrab-backend/bench/scripts/lint_metrics.py \
+  peergrab-backend/bench/reports/peergrab-current/*.md
+```
+
+`canonicalize.py` 统一解析 JMeter S2 summary、Vegeta stage summary、S2 knee
+manifest/result，输出 n/中位数/min-max、错误分类、资源水位和警告（单轮、P99
+轮间离散、目标/实发偏差、缺资源、只有客户端延迟、success>requests 等）。
+`lint_metrics.py` 拦截“极限压测/全站容量/SLA/百万级/裸 QPS/缓存提升 X%”等表述，
+caveat 行、代码块和多引用示例会跳过。
 
 ## 4. 拐点判定与容量结论
 
@@ -283,6 +309,7 @@ JMeter 的 Constant Throughput Timer 是“尝试目标速率”，不是严格�
 
 ### 6.2 不要这样写
 
+- “极限压测 / 全站容量 / SLA”：当前是单机隔离栈的有限窗口，不是生产容量或长期 SLA；这类词没有可核对的边界。
 - “支持 500 QPS / 600 QPS 零错误”：500 是目标与实际约 499–500，600 长档有 1 次连接超时且没有第三轮。
 - “结算 35 TPS”：这是 200 单短批次、共享钱包热点，不是稳定容量。
 - “2,000 并发 TPS 225”：`2,000 ÷ 8.869` 不是 TPS。
@@ -313,6 +340,8 @@ JMeter 的 Constant Throughput Timer 是“尝试目标速率”，不是严格�
 
 ## 8. 执行前检查清单
 
+- [ ] 正式报告同一档位至少 3 轮；`canonicalize.py` 已运行并贴出 n/中位数/min-max 与警告。
+- [ ] 报告已跑 `lint_metrics.py`，没有“极限/全站容量/SLA/裸 QPS/缓存提升 X%”等无口径表述。
 - [ ] 新 `peergrab-bench-*` 项目、新卷、独立端口；生产已停或使用独立目标机。
 - [ ] `preflight.py` 通过；数据库 `bench_guard`、容器/卷标签、回环端口均匹配。
 - [ ] 业务表与 `bench_run` 为空（S2/S3/S5/S6 的入口有明确要求）。
@@ -322,3 +351,16 @@ JMeter 的 Constant Throughput Timer 是“尝试目标速率”，不是严格�
 - [ ] 资源采样与 JTL/JSONL 输出目录已创建，权限 0700/0600。
 - [ ] SQL 校验脚本准备好；失败轮也要保存证据。
 - [ ] 清理脚本只销毁本轮项目；不删生产备份。
+- [ ] 报告里单轮结果显式标“单轮”；首轮冷启动、客户端先饱和、缺资源采样时不得写成稳定容量。
+
+## 9. 待补测的 canonical 矩阵（本地已准备，执行仍需要隔离栈）
+
+| 补测 | 目标配置 | 轮次/窗口 | 验收 | 当前状态 |
+| --- | --- | --- | --- | --- |
+| S2 容量曲线 | 8 vCPU/100 Mbps、独立发压机、650/900/1200/1350 offered | 3 轮×180 s，预热 30 s | 最高“全部轮次零请求错误且 P99<500 ms”的档位；每档给 n/中位/min-max/P999/CPU | 只有单轮阶梯 |
+| S4 结算 canonical | 8 vCPU、32 线程、200 个独立任务、共享钱包 | 3 轮，每轮同配置 | 中位 TPS + P99 + InnoDB row lock waits/order；轮间偏差 ≤10% 才可引用 | 15–57 TPS 多口径并存 |
+| S3 缓存高负载 | 300–500 RPS 详情读，开/关缓存 | 3 轮×300 s | 命中率、回源 QPS、Com_select、P99/P999；冷/热分开 | 只有 5,000 次固定批次 |
+| S6 故障长时 | Redis 暂停 60 s@100 RPS；Broker 暂停 120 s + 持续结算 | 各 3 轮 | 错误率、P95/P99、outbox 积压/排空时间 | 单轮、低负载 |
+| 30–60 min 长稳 | 450–500 RPS 混合（5–10% 写） | 1 轮≥30 min | P99 漂移、GC、内存、连接池、资金差 0 | 只有 100 RPS×30 min |
+
+当前 `run_s2_knee.py` 的 `--rates` 白名单是 50/100/200/400/800，且一次只跑一轮；650/900/1200/1350 的公网容量曲线用 `run_remote_s2_vegeta.py`（支持 1–5000 的递增档位），同一配置执行三次（每次独立 run 目录），再用 `canonicalize.py` 按档位合并出 n/中位/min-max。

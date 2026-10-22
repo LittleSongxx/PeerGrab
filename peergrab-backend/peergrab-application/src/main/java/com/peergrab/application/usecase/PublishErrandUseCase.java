@@ -47,7 +47,6 @@ public class PublishErrandUseCase {
     private static final Logger log = LoggerFactory.getLogger(PublishErrandUseCase.class);
     /** 名额键 TTL 给足，避免任务还没被抢完 Redis 键就过期了；回退重开时复用同一 TTL。 */
     private static final long SLOT_TTL_SECONDS = GrabSlotPort.DEFAULT_SLOT_TTL_SECONDS;
-    private static final long ESCROW_ACCOUNT_OWNER = -1L;
 
     private final ErrandRepository errandRepository;
     private final PublishRequestRepository publishRequests;
@@ -140,15 +139,14 @@ public class PublishErrandUseCase {
         // Same-key competitors wait for this transaction, then replay its committed ID.
         long errandId = idGenerator.nextId();
 
-        // 账户开通不放事务内：ensure 会对已存在账户行取 X 锁，放在领取发布登记/公共账户之前
-        // 会与退款/结算的 escrow->wallet 锁序相互等待成环。发布方身份来自受控账户体系，
-        // 缺失账户应在注册/初始化时建好；这里只做存在性校验。
+        // 发布方账户来自受控账户体系，缺失账户应在注册/初始化时建好；这里只做存在性校验。
         WalletAccount publisherAccount = walletRepository
                 .findByOwner(cmd.publisherId(), AccountType.USER)
                 .orElseThrow(() -> new BizException(ErrorCode.ACCOUNT_NOT_FOUND, "publisher=" + cmd.publisherId()));
-        WalletAccount escrowAccount = walletRepository
-                .findByOwner(ESCROW_ACCOUNT_OWNER, AccountType.ESCROW)
-                .orElseThrow(() -> new BizException(ErrorCode.ACCOUNT_NOT_FOUND, "escrow account missing"));
+        // 每个任务一对独立系统账户：托管户接收本任务资金，佣金户在结算/仲裁时入账。
+        // 两者都在发布事务内幂等创建，新账户尚未被其它事务看见，不会形成锁序环。
+        WalletAccount escrowAccount = walletRepository.ensureAccount(errandId, AccountType.ESCROW);
+        walletRepository.ensureAccount(errandId, AccountType.COMMISSION);
 
         // 同一事务中按 ID 锁账户，再转账和写借贷流水。
         String bizNo = LedgerEntry.escrowBizNo(errandId);

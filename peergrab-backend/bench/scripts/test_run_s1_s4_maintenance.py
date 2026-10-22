@@ -105,6 +105,10 @@ class MaintenanceRunnerTest(unittest.TestCase):
         with self.assertRaisesRegex(runner.Stopped, "not exactly"):
             runner.fixture_gate({**BASE, "s2Rows": 9999}, BASE)
 
+    def test_wallet_account_rows_are_observation_only(self):
+        # Per-errand ESCROW/COMMISSION accounts make this count fixture-dependent.
+        runner.fixture_gate(BASE, {**BASE, "walletAccountRows": 20004})
+
     def test_stage_counts_follow_published_lifecycle(self):
         s4 = {**BASE, "errandRows": BASE["errandRows"] + 23,
               "escrowRows": BASE["escrowRows"] + 23,

@@ -284,6 +284,30 @@ class S6SafetyTest(unittest.TestCase):
                 s6.fresh_stack(CONTAINER_ID)
             scalar.assert_not_called()
 
+    def test_fresh_stack_gate_rejects_shared_system_accounts(self):
+        for accounts in (1, 2):
+            with self.subTest(system_accounts=accounts), \
+                    patch.object(s6, "one_row", return_value=["0"] * 9), \
+                    patch.object(s6, "scalar", side_effect=[100000, 1, accounts]):
+                with self.assertRaisesRegex(s6.Refused, "system"):
+                    s6.fresh_stack(CONTAINER_ID)
+        with patch.object(s6, "one_row", return_value=["0"] * 9), \
+                patch.object(s6, "scalar", side_effect=[100000, 1, 0]):
+            s6.fresh_stack(CONTAINER_ID)
+
+    def test_published_task_must_own_per_errand_accounts(self):
+        with patch.object(s6, "one_row", return_value=["2", "1", "1", "2"]):
+            s6.assert_per_errand_accounts(CONTAINER_ID, 42)
+        for values in (["1", "1", "0", "2"], ["2", "1", "1", "1"],
+                       ["2", "0", "1", "2"]):
+            with self.subTest(values=values), \
+                    patch.object(s6, "one_row", return_value=values):
+                with self.assertRaisesRegex(s6.Refused, "per-errand"):
+                    s6.assert_per_errand_accounts(CONTAINER_ID, 42)
+        for bad in ("42", 0, -1, None, True):
+            with self.subTest(bad=bad), self.assertRaises(s6.Refused):
+                s6.assert_per_errand_accounts(CONTAINER_ID, bad)
+
     def test_dry_run_does_not_create_running_manifest_or_inject(self):
         with tempfile.TemporaryDirectory() as directory, \
                 patch.object(s6, "RUNS", Path(directory)), \

@@ -68,7 +68,7 @@ PeerGrab 的抢单同步链路是**四层**，不是五层：
 | 层 | 校验 | 代码落点 | 差异落点 |
 | --- | --- | --- | --- |
 | L1 | 全局借贷平衡：`SUM(DEBIT) == SUM(CREDIT)` | `ReconRepository.debitMinusCredit()`；`ReconciliationJob.run` | `recon_diff(DEBIT_CREDIT)` |
-| L2 | 系统户快照 = 流水净额；用户户“最新流水 vs 快照 + 版本” | `findSnapshotDiffs()`、`findUserBalanceDiffs()`；`ReconciliationJob.run` | `recon_diff(SNAPSHOT/USER_SNAPSHOT)` |
+| L2 | 每单系统账户（ESCROW/COMMISSION，owner_id=errandId）快照 = 该账户流水净额；用户户“最新流水 vs 快照 + 版本” | `findSnapshotDiffs()`、`findUserBalanceDiffs()`；`ReconciliationJob.run` | `recon_diff(SNAPSHOT/USER_SNAPSHOT)` |
 | L3 | 托管闭环：`RELEASED/REFUNDED` 托管单有对应结算/退款流水；任务已结算/退款但托管仍 `HELD` 也是差异 | `findEscrowClosureDiffs()`；`ReconciliationJob.run` | `recon_diff(ESCROW_CLOSURE)` |
 
 `recon_diff` 有记录就说明代码有 bug，不是“允许的小误差”；同一天重复跑由 `uk_date_type_subject(check_date, check_type, subject)` 去重。`recon_diff` 是审计证据，**不参与保留期自动清理**。

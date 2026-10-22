@@ -47,8 +47,8 @@ import java.util.Map;
 public class SettleErrandUseCase {
 
     private static final Logger log = LoggerFactory.getLogger(SettleErrandUseCase.class);
-    private static final long ESCROW_ACCOUNT_OWNER = -1L;
-    private static final long COMMISSION_ACCOUNT_OWNER = -2L;
+    /** 平台动作在流水中的归属标记；不是账户 owner。 */
+    private static final long PLATFORM_LEDGER_USER_ID = -2L;
 
     private final ErrandRepository errandRepository;
     private final WalletRepository walletRepository;
@@ -279,28 +279,29 @@ public class SettleErrandUseCase {
                     }
                     if (applied.isEmpty()) return new BatchResult(0, transactionSkipped);
 
-                    List<WalletRepository.OwnerRef> refs = new ArrayList<>(applied.size() + 2);
-                    refs.add(new WalletRepository.OwnerRef(ESCROW_ACCOUNT_OWNER, AccountType.ESCROW));
-                    refs.add(new WalletRepository.OwnerRef(COMMISSION_ACCOUNT_OWNER, AccountType.COMMISSION));
+                    List<WalletRepository.OwnerRef> refs = new ArrayList<>(applied.size() * 3);
                     for (AutoSettlement item : applied) {
-                        refs.add(new WalletRepository.OwnerRef(item.errand().grabberId(), AccountType.USER));
+                        Errand refErrand = item.errand();
+                        refs.add(new WalletRepository.OwnerRef(refErrand.id(), AccountType.ESCROW));
+                        refs.add(new WalletRepository.OwnerRef(refErrand.id(), AccountType.COMMISSION));
+                        refs.add(new WalletRepository.OwnerRef(refErrand.grabberId(), AccountType.USER));
                     }
                     Map<WalletRepository.OwnerRef, WalletAccount> accounts = walletRepository.findByOwners(refs);
                     List<WalletPosting.BatchTransfer> transfers = new ArrayList<>(applied.size());
                     for (AutoSettlement item : applied) {
                         Errand errand = item.errand();
-                        WalletAccount escrowAccount = accountOrFallback(accounts,
-                                new WalletRepository.OwnerRef(ESCROW_ACCOUNT_OWNER, AccountType.ESCROW));
-                        WalletAccount runnerAccount = accountOrFallback(accounts,
+                        WalletAccount escrowAccount = requiredAccount(accounts,
+                                new WalletRepository.OwnerRef(errand.id(), AccountType.ESCROW));
+                        WalletAccount runnerAccount = requiredAccount(accounts,
                                 new WalletRepository.OwnerRef(errand.grabberId(), AccountType.USER));
-                        WalletAccount commissionAccount = accountOrFallback(accounts,
-                                new WalletRepository.OwnerRef(COMMISSION_ACCOUNT_OWNER, AccountType.COMMISSION));
+                        WalletAccount commissionAccount = requiredAccount(accounts,
+                                new WalletRepository.OwnerRef(errand.id(), AccountType.COMMISSION));
                         List<WalletPosting.Leg> legs = new ArrayList<>();
                         legs.add(WalletPosting.Leg.debit(escrowAccount.id(), errand.publisherId(), item.escrow().amount()));
                         legs.add(WalletPosting.Leg.credit(runnerAccount.id(), errand.grabberId(), item.runnerAmount()));
                         if (item.commissionAmount().cents() > 0) {
                             legs.add(WalletPosting.Leg.credit(commissionAccount.id(),
-                                    COMMISSION_ACCOUNT_OWNER, item.commissionAmount()));
+                                    PLATFORM_LEDGER_USER_ID, item.commissionAmount()));
                         }
                         transfers.add(new WalletPosting.BatchTransfer(item.bizNo(), LedgerEntry.RefType.SETTLE,
                                 errand.id(), legs));
@@ -379,24 +380,22 @@ public class SettleErrandUseCase {
                 com.peergrab.domain.errand.model.ErrandStatus.SETTLED,
                 errand.round(), operatorId);
 
-        // 资金转移：托管账户 -> 跑腿 + 佣金（账户已在事务外幂等开通）
-        var escrowRef = new WalletRepository.OwnerRef(ESCROW_ACCOUNT_OWNER, AccountType.ESCROW);
+        // 资金转移：本任务托管户 -> 跑腿 + 本任务佣金户（发布时已幂等开户）
+        var escrowRef = new WalletRepository.OwnerRef(errandId, AccountType.ESCROW);
         var runnerRef = new WalletRepository.OwnerRef(errand.grabberId(), AccountType.USER);
-        var commissionRef = new WalletRepository.OwnerRef(COMMISSION_ACCOUNT_OWNER, AccountType.COMMISSION);
+        var commissionRef = new WalletRepository.OwnerRef(errandId, AccountType.COMMISSION);
         Map<WalletRepository.OwnerRef, WalletAccount> accounts = walletRepository.findByOwners(
                 List.of(escrowRef, runnerRef, commissionRef));
-        // Keep the legacy lookups as a compatibility fallback for alternate adapters and
-        // older test doubles; JdbcWalletRepository uses one indexed query for all three.
-        WalletAccount escrowAccount = accountOrFallback(accounts, escrowRef);
-        WalletAccount runnerAccount = accountOrFallback(accounts, runnerRef);
-        WalletAccount commissionAccount = accountOrFallback(accounts, commissionRef);
+        WalletAccount escrowAccount = requiredAccount(accounts, escrowRef);
+        WalletAccount runnerAccount = requiredAccount(accounts, runnerRef);
+        WalletAccount commissionAccount = requiredAccount(accounts, commissionRef);
 
         var legs = new ArrayList<WalletPosting.Leg>();
         legs.add(WalletPosting.Leg.debit(escrowAccount.id(), errand.publisherId(), escrow.amount()));
         legs.add(WalletPosting.Leg.credit(runnerAccount.id(), errand.grabberId(), runnerAmount));
         if (commissionAmount.cents() > 0) {
             legs.add(WalletPosting.Leg.credit(commissionAccount.id(),
-                    COMMISSION_ACCOUNT_OWNER, commissionAmount));
+                    PLATFORM_LEDGER_USER_ID, commissionAmount));
         }
         WalletPosting.post(walletRepository, idGenerator, bizNo, LedgerEntry.RefType.SETTLE,
                 errandId, legs);
@@ -420,10 +419,13 @@ public class SettleErrandUseCase {
         }
     }
 
-    private WalletAccount accountOrFallback(Map<WalletRepository.OwnerRef, WalletAccount> accounts,
-                                            WalletRepository.OwnerRef ref) {
+    private WalletAccount requiredAccount(Map<WalletRepository.OwnerRef, WalletAccount> accounts,
+                                          WalletRepository.OwnerRef ref) {
         WalletAccount account = accounts == null ? null : accounts.get(ref);
-        if (account != null) return account;
-        return walletRepository.findByOwner(ref.ownerId(), ref.type()).orElseThrow();
+        if (account == null) {
+            throw new BizException(ErrorCode.ACCOUNT_NOT_FOUND,
+                    "wallet account missing owner=" + ref.ownerId() + " type=" + ref.type());
+        }
+        return account;
     }
 }

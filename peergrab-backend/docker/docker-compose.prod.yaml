@@ -128,6 +128,8 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
+      mq-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/actuator/health/readiness"]
       interval: 10s
@@ -156,6 +158,8 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
+      mq-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8082/actuator/health/readiness"]
       interval: 10s

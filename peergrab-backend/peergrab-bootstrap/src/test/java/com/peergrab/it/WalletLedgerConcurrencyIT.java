@@ -37,8 +37,8 @@ class WalletLedgerConcurrencyIT {
         MiddlewareAvailable.require();
         long userId = ThreadLocalRandom.current().nextLong(8_000_000_000L, 9_000_000_000L);
         long openingUser = 1_000_000L;
-        long openingEscrow = balance(1);
-        long openingEscrowVersion = version(1);
+        // 每单账户模型下没有全局 ESCROW(-1) 单行链；本用例改为验证发单人 USER 账户
+        // 在“发布-退款-再发布”并发下仍保持一条严格的版本/余额链。
         jdbc.update("""
                 INSERT INTO wallet_account (id, owner_id, owner_type, available, frozen, version)
                 VALUES (?, ?, 'USER', ?, 0, 0)
@@ -75,9 +75,7 @@ class WalletLedgerConcurrencyIT {
         }
 
         assertAccountChain(userId, openingUser, 0, 36);
-        assertAccountChain(1, openingEscrow, openingEscrowVersion, 36);
         assertEquals(openingUser - 1_200, balance(userId));
-        assertEquals(openingEscrow + 1_200, balance(1));
     }
 
     private void assertAccountChain(long accountId, long opening, long openingVersion, int count) {

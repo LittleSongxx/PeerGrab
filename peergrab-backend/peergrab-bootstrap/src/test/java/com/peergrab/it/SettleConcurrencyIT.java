@@ -77,11 +77,11 @@ class SettleConcurrencyIT {
         jdbc.update("DELETE FROM wallet_ledger WHERE ref_id >= ? AND ref_id < ?", base, base + 1_000_000);
         jdbc.update("DELETE FROM escrow_order WHERE errand_id >= ? AND errand_id < ?", base, base + 1_000_000);
         jdbc.update("DELETE FROM errand WHERE id >= ? AND id < ?", base, base + 1_000_000);
+        jdbc.update("DELETE FROM wallet_account WHERE owner_id >= ? AND owner_id < ? "
+                + "AND owner_type IN ('ESCROW','COMMISSION')", base, base + 1_000_000);
 
         Long pubAccount = jdbc.queryForObject(
                 "SELECT id FROM wallet_account WHERE owner_id = ? AND owner_type = 'USER'", Long.class, PUBLISHER);
-        Long escrowAccount = jdbc.queryForObject(
-                "SELECT id FROM wallet_account WHERE owner_id = -1 AND owner_type = 'ESCROW'", Long.class);
 
         List<Object[]> errands = new java.util.ArrayList<>();
         List<Object[]> escrows = new java.util.ArrayList<>();
@@ -94,7 +94,9 @@ class SettleConcurrencyIT {
             escrows.add(new Object[]{base + 100_000 + n, 1L, id, PUBLISHER, REWARD, "HELD"});
             ledgers.add(new Object[]{base + 200_000 + n, "escrow:" + id, pubAccount, PUBLISHER,
                     "DEBIT", REWARD, 0L, "ESCROW", id});
-            ledgers.add(new Object[]{base + 300_000 + n, "escrow:" + id, escrowAccount, PUBLISHER,
+            var taskEscrow = walletRepository.ensureAccount(id, AccountType.ESCROW);
+            walletRepository.ensureAccount(id, AccountType.COMMISSION);
+            ledgers.add(new Object[]{base + 300_000 + n, "escrow:" + id, taskEscrow.id(), PUBLISHER,
                     "CREDIT", REWARD, 0L, "ESCROW", id});
         }
         jdbc.batchUpdate("""
@@ -122,6 +124,13 @@ class SettleConcurrencyIT {
         jdbc.update("UPDATE wallet_account SET available = 0 WHERE owner_id = ? AND owner_type='USER'", RUNNER);
     }
 
+    private long sumSystem(AccountType type) {
+        Long value = jdbc.queryForObject(
+                "SELECT COALESCE(SUM(available),0) FROM wallet_account WHERE owner_type = ?",
+                Long.class, type.name());
+        return value == null ? 0L : value;
+    }
+
     private long snapshotTotal() {
         Long v = jdbc.queryForObject("SELECT SUM(available + frozen) FROM wallet_account", Long.class);
         return v == null ? 0 : v;
@@ -134,7 +143,7 @@ class SettleConcurrencyIT {
         seed(BASE, COUNT);
         long totalBefore = snapshotTotal();
         long runnerBefore = walletRepository.findByOwner(RUNNER, AccountType.USER).orElseThrow().available().cents();
-        long commissionBefore = walletRepository.findByOwner(-2L, AccountType.COMMISSION).orElseThrow().available().cents();
+        long commissionBefore = sumSystem(AccountType.COMMISSION);
 
         // 这里刻意不用"CountDownLatch 对齐瞬时释放"（S1 抢单那套）。
         // 原因有两个：一是数据库连接池只有 20，500 个线程同时发起也会立刻排队，
@@ -203,8 +212,7 @@ class SettleConcurrencyIT {
         // 期望 50000 实际 50100，多的 100 是 ApiEndpointIT 全链路测试结算的佣金）
         long runnerDelta = walletRepository.findByOwner(RUNNER, AccountType.USER).orElseThrow().available().cents()
                 - runnerBefore;
-        long commissionDelta = walletRepository.findByOwner(-2L, AccountType.COMMISSION).orElseThrow().available().cents()
-                - commissionBefore;
+        long commissionDelta = sumSystem(AccountType.COMMISSION) - commissionBefore;
         // 成功结算数以 DB 流水为准，不用客户端计数器：
         // 客户端响应超时会让"结算成功但计数器没记上"（钱到账了但客户端没收到响应），
         // 实测踩过（计数器 499 但实际 500 个都到账了）。DB 流水才是事实。

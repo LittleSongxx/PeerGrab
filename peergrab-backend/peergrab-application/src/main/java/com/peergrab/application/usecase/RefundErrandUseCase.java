@@ -34,7 +34,6 @@ import java.util.List;
 public class RefundErrandUseCase {
 
     private static final Logger log = LoggerFactory.getLogger(RefundErrandUseCase.class);
-    private static final long ESCROW_ACCOUNT_OWNER = -1L;
 
     private final ErrandRepository errandRepository;
     private final WalletRepository walletRepository;
@@ -177,7 +176,9 @@ public class RefundErrandUseCase {
 
         errandRepository.appendStatusLog(errandId, from, to, errand.round(), operatorId);
 
-        WalletAccount escrowAccount = walletRepository.findByOwner(ESCROW_ACCOUNT_OWNER, AccountType.ESCROW).orElseThrow();
+        // 每单独立托管户：发布时创建，退款只退本任务托管户。
+        WalletAccount escrowAccount = walletRepository.findByOwner(errandId, AccountType.ESCROW)
+                .orElseThrow(() -> new BizException(ErrorCode.ACCOUNT_NOT_FOUND, "escrow=" + errandId));
         WalletAccount publisherAccount = walletRepository.findByOwner(escrow.publisherId(), AccountType.USER).orElseThrow();
 
         WalletPosting.post(walletRepository, idGenerator, bizNo, LedgerEntry.RefType.REFUND,

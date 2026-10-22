@@ -28,6 +28,7 @@ import org.springframework.transaction.TransactionStatus;
 import org.springframework.transaction.support.SimpleTransactionStatus;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.util.LinkedHashMap;
 import java.util.Optional;
 import java.util.Map;
 import java.util.List;
@@ -36,7 +37,23 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
+/**
+ * 结算/退款/仲裁资金工作流的应用层单测。
+ *
+ * <p>账户拓扑按“每任务独立账户”建模：ESCROW/COMMISSION 账户的 owner 是 errandId，
+ * USER 账户的 owner 是用户 ID。服务层按 errandId 查系统账户，测试桩也按 ref 动态生成
+ * 账户，不再依赖固定的 -1/-2 系统户。</p>
+ */
 class FundWorkflowUseCaseTest {
+
+    private static final long PUBLISHER = 1001L;
+    private static final long RUNNER = 2001L;
+    private static final long SECOND_RUNNER = 2002L;
+    private static final long ESCROW_ACCOUNT_BASE = 10_000L;
+    private static final long COMMISSION_ACCOUNT_BASE = 20_000L;
+    private static final long PUBLISHER_ACCOUNT = 20L;
+    private static final long RUNNER_ACCOUNT = 30L;
+    private static final long SECOND_RUNNER_ACCOUNT = 31L;
 
     private final ErrandRepository errands = mock(ErrandRepository.class);
     private final WalletRepository wallets = mock(WalletRepository.class);
@@ -119,7 +136,7 @@ class FundWorkflowUseCaseTest {
         when(wallets.casEscrowStatus(eq(1L), eq(44L), any(), any())).thenReturn(1);
         when(errands.casSettle(44, 3)).thenReturn(1);
         stubAccounts();
-        when(wallets.casDebit(10, Money.ofCents(1000))).thenReturn(0);
+        when(wallets.casDebit(escrowAccountId(44), Money.ofCents(1000))).thenReturn(0);
 
         BizException ex = assertThrows(BizException.class, () -> settle.settle(44, 1001));
 
@@ -135,9 +152,9 @@ class FundWorkflowUseCaseTest {
         when(errands.casSettle(55, 3)).thenReturn(1);
         when(wallets.casEscrowStatus(eq(1L), eq(55L), any(), any())).thenReturn(1);
         stubAccounts();
-        when(wallets.casDebit(10, Money.ofCents(1000))).thenReturn(1);
-        when(wallets.casCredit(30, Money.ofCents(950))).thenReturn(1);
-        when(wallets.casCredit(40, Money.ofCents(50))).thenReturn(1);
+        when(wallets.casDebit(escrowAccountId(55), Money.ofCents(1000))).thenReturn(1);
+        when(wallets.casCredit(RUNNER_ACCOUNT, Money.ofCents(950))).thenReturn(1);
+        when(wallets.casCredit(commissionAccountId(55), Money.ofCents(50))).thenReturn(1);
         when(credits.scoreOf(2001)).thenReturn(62, 64);
 
         assertEquals(SettleErrandUseCase.Result.SETTLED, settle.settle(55, 1001));
@@ -160,20 +177,8 @@ class FundWorkflowUseCaseTest {
         when(errands.casAutoSettle(56, 3)).thenReturn(1);
         when(errands.casAutoSettle(57, 3)).thenReturn(1);
         when(wallets.casEscrowStatus(eq(1L), anyLong(), any(), any())).thenReturn(1);
-        when(wallets.findByOwners(anyList())).thenReturn(Map.of(
-                new WalletRepository.OwnerRef(-1, AccountType.ESCROW),
-                account(10, -1, AccountType.ESCROW, 2_000),
-                new WalletRepository.OwnerRef(-2, AccountType.COMMISSION),
-                account(40, -2, AccountType.COMMISSION, 0),
-                new WalletRepository.OwnerRef(2001, AccountType.USER),
-                account(30, 2001, AccountType.USER, 0),
-                new WalletRepository.OwnerRef(2002, AccountType.USER),
-                account(31, 2002, AccountType.USER, 0)));
-        when(wallets.lockAccountsInOrder(any(long[].class))).thenReturn(Map.of(
-                10L, account(10, -1, AccountType.ESCROW, 2_000),
-                30L, account(30, 2001, AccountType.USER, 0),
-                31L, account(31, 2002, AccountType.USER, 0),
-                40L, account(40, -2, AccountType.COMMISSION, 0)));
+        // 每单一对独立系统账户：56 -> (escrow 10056, commission 20056)，57 同理。
+        stubAccounts();
 
         SettleErrandUseCase.BatchResult result = settle.settleAutoBatch(List.of(first, second));
 
@@ -218,8 +223,8 @@ class FundWorkflowUseCaseTest {
         when(errands.casCancel(45, 3)).thenReturn(1);
         when(wallets.casEscrowStatus(eq(1L), eq(45L), any(), any())).thenReturn(1);
         stubAccounts();
-        when(wallets.casDebit(10, Money.ofCents(1000))).thenReturn(1);
-        when(wallets.casCredit(20, Money.ofCents(1000))).thenReturn(1);
+        when(wallets.casDebit(escrowAccountId(45), Money.ofCents(1000))).thenReturn(1);
+        when(wallets.casCredit(PUBLISHER_ACCOUNT, Money.ofCents(1000))).thenReturn(1);
         doThrow(new IllegalStateException("outbox insert failed"))
                 .when(events).append(any());
 
@@ -252,8 +257,8 @@ class FundWorkflowUseCaseTest {
         when(errands.casCancel(47, 3)).thenReturn(1);
         when(wallets.casEscrowStatus(eq(1L), eq(47L), any(), any())).thenReturn(1);
         stubAccounts();
-        when(wallets.casDebit(10, Money.ofCents(1000))).thenReturn(1);
-        when(wallets.casCredit(20, Money.ofCents(1000))).thenReturn(1);
+        when(wallets.casDebit(escrowAccountId(47), Money.ofCents(1000))).thenReturn(1);
+        when(wallets.casCredit(PUBLISHER_ACCOUNT, Money.ofCents(1000))).thenReturn(1);
 
         assertEquals(RefundErrandUseCase.Result.REFUNDED, refund.cancelAndRefund(47, 1001));
 
@@ -271,8 +276,8 @@ class FundWorkflowUseCaseTest {
         when(errands.casRefundFromDispute(51, 3)).thenReturn(1);
         when(wallets.casEscrowStatus(eq(1L), eq(51L), any(), any())).thenReturn(1);
         stubAccounts();
-        when(wallets.casDebit(10, Money.ofCents(1000))).thenReturn(1);
-        when(wallets.casCredit(20, Money.ofCents(1000))).thenReturn(1);
+        when(wallets.casDebit(escrowAccountId(51), Money.ofCents(1000))).thenReturn(1);
+        when(wallets.casCredit(PUBLISHER_ACCOUNT, Money.ofCents(1000))).thenReturn(1);
 
         assertEquals(RefundErrandUseCase.Result.REFUNDED, refund.arbitrateRefund(51, 9001));
 
@@ -288,8 +293,8 @@ class FundWorkflowUseCaseTest {
         when(errands.casRefundFromDispute(52, 3)).thenReturn(1);
         when(wallets.casEscrowStatus(eq(1L), eq(52L), any(), any())).thenReturn(1);
         stubAccounts();
-        when(wallets.casDebit(10, Money.ofCents(1000))).thenReturn(1);
-        when(wallets.casCredit(20, Money.ofCents(1000))).thenReturn(1);
+        when(wallets.casDebit(escrowAccountId(52), Money.ofCents(1000))).thenReturn(1);
+        when(wallets.casCredit(PUBLISHER_ACCOUNT, Money.ofCents(1000))).thenReturn(1);
         when(credits.applyEvent(any())).thenThrow(new IllegalStateException("credit db unavailable"));
 
         assertThrows(IllegalStateException.class, () -> refund.arbitrateRefund(52, 9001));
@@ -318,9 +323,9 @@ class FundWorkflowUseCaseTest {
         when(errands.casSettleFromDispute(54, 3)).thenReturn(1);
         when(wallets.casEscrowStatus(eq(1L), eq(54L), any(), any())).thenReturn(1);
         stubAccounts();
-        when(wallets.casDebit(10, Money.ofCents(1000))).thenReturn(1);
-        when(wallets.casCredit(30, Money.ofCents(950))).thenReturn(1);
-        when(wallets.casCredit(40, Money.ofCents(50))).thenReturn(1);
+        when(wallets.casDebit(escrowAccountId(54), Money.ofCents(1000))).thenReturn(1);
+        when(wallets.casCredit(RUNNER_ACCOUNT, Money.ofCents(950))).thenReturn(1);
+        when(wallets.casCredit(commissionAccountId(54), Money.ofCents(50))).thenReturn(1);
 
         assertTrue(step.settleFromDispute(54, errand(54, ErrandStatus.DISPUTED),
                 escrow(54), "settle:54", 9001));
@@ -350,20 +355,79 @@ class FundWorkflowUseCaseTest {
         verifyNoInteractions(events);
     }
 
+    /**
+     * 每单系统账户桩：ESCROW/COMMISSION 账户按 ref.ownerId（即 errandId）动态生成，
+     * USER 账户按用户 ID 生成。资金用例的账户查询全部从这份桩取数。
+     */
     private void stubAccounts() {
-        when(wallets.findByOwner(-1, AccountType.ESCROW))
-                .thenReturn(Optional.of(account(10, -1, AccountType.ESCROW, 1000)));
-        when(wallets.findByOwner(1001, AccountType.USER))
-                .thenReturn(Optional.of(account(20, 1001, AccountType.USER, 0)));
-        when(wallets.findByOwner(2001, AccountType.USER))
-                .thenReturn(Optional.of(account(30, 2001, AccountType.USER, 0)));
-        when(wallets.findByOwner(-2, AccountType.COMMISSION))
-                .thenReturn(Optional.of(account(40, -2, AccountType.COMMISSION, 0)));
-        when(wallets.lockAccountsInOrder(any(long[].class))).thenReturn(Map.of(
-                10L, account(10, -1, AccountType.ESCROW, 1000),
-                20L, account(20, 1001, AccountType.USER, 0),
-                30L, account(30, 2001, AccountType.USER, 0),
-                40L, account(40, -2, AccountType.COMMISSION, 0)));
+        when(wallets.findByOwners(anyList())).thenAnswer(invocation -> {
+            List<WalletRepository.OwnerRef> refs = invocation.getArgument(0);
+            Map<WalletRepository.OwnerRef, WalletAccount> accounts = new LinkedHashMap<>();
+            for (WalletRepository.OwnerRef ref : refs) {
+                accounts.put(ref, accountFor(ref));
+            }
+            return accounts;
+        });
+        when(wallets.findByOwner(anyLong(), any(AccountType.class))).thenAnswer(invocation ->
+                Optional.of(accountFor(new WalletRepository.OwnerRef(
+                        invocation.getArgument(0), invocation.getArgument(1)))));
+        when(wallets.lockAccountsInOrder(any(long[].class))).thenAnswer(invocation -> {
+            // vararg long... 在 Mockito 调用点被展开成多个 Long 实参，逐个还原账户 ID。
+            Map<Long, WalletAccount> locked = new LinkedHashMap<>();
+            for (Object raw : invocation.getArguments()) {
+                long accountId = ((Number) raw).longValue();
+                locked.put(accountId, lockedAccount(accountId));
+            }
+            return locked;
+        });
+    }
+
+    /** 每单托管户 ID：errandId + 10_000，便于断言具体是哪一单的账户。 */
+    private static long escrowAccountId(long errandId) {
+        return ESCROW_ACCOUNT_BASE + errandId;
+    }
+
+    /** 每单佣金户 ID：errandId + 20_000。 */
+    private static long commissionAccountId(long errandId) {
+        return COMMISSION_ACCOUNT_BASE + errandId;
+    }
+
+    private static WalletAccount accountFor(WalletRepository.OwnerRef ref) {
+        return switch (ref.type()) {
+            case ESCROW -> account(escrowAccountId(ref.ownerId()), ref.ownerId(),
+                    AccountType.ESCROW, 1_000);
+            case COMMISSION -> account(commissionAccountId(ref.ownerId()), ref.ownerId(),
+                    AccountType.COMMISSION, 0);
+            case USER -> {
+                if (ref.ownerId() == PUBLISHER) {
+                    yield account(PUBLISHER_ACCOUNT, PUBLISHER, AccountType.USER, 0);
+                }
+                if (ref.ownerId() == SECOND_RUNNER) {
+                    yield account(SECOND_RUNNER_ACCOUNT, SECOND_RUNNER, AccountType.USER, 0);
+                }
+                yield account(RUNNER_ACCOUNT, ref.ownerId(), AccountType.USER, 0);
+            }
+        };
+    }
+
+    private static WalletAccount lockedAccount(long accountId) {
+        if (accountId >= COMMISSION_ACCOUNT_BASE) {
+            return account(accountId, accountId - COMMISSION_ACCOUNT_BASE,
+                    AccountType.COMMISSION, 0);
+        }
+        if (accountId >= ESCROW_ACCOUNT_BASE) {
+            return account(accountId, accountId - ESCROW_ACCOUNT_BASE, AccountType.ESCROW, 1_000);
+        }
+        if (accountId == PUBLISHER_ACCOUNT) {
+            return account(PUBLISHER_ACCOUNT, PUBLISHER, AccountType.USER, 0);
+        }
+        if (accountId == RUNNER_ACCOUNT) {
+            return account(RUNNER_ACCOUNT, RUNNER, AccountType.USER, 0);
+        }
+        if (accountId == SECOND_RUNNER_ACCOUNT) {
+            return account(SECOND_RUNNER_ACCOUNT, SECOND_RUNNER, AccountType.USER, 0);
+        }
+        throw new IllegalArgumentException("unexpected account id " + accountId);
     }
 
     private static WalletAccount account(long id, long ownerId, AccountType type, long available) {

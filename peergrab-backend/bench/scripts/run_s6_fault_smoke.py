@@ -156,8 +156,26 @@ def fresh_stack(mysql_id):
     system_accounts = scalar(mysql_id, """
         SELECT COUNT(*) FROM wallet_account WHERE owner_type IN ('ESCROW','COMMISSION')
         """)
-    if balance < 100 or runner != 1 or system_accounts != 2:
-        raise Refused("Expected seeded publisher, runner and system wallets")
+    # New ledger topology: no shared ESCROW(-1)/COMMISSION(-2) seed rows. Publication opens
+    # one account pair per task, so a clean stack must start with zero system accounts.
+    if balance < 100 or runner != 1 or system_accounts != 0:
+        raise Refused("Expected seeded publisher/runner wallets and no shared system accounts")
+
+
+def assert_per_errand_accounts(mysql_id, errand_id):
+    """Publication must open exactly one ESCROW and one COMMISSION account for the task."""
+    if isinstance(errand_id, bool) or not isinstance(errand_id, int) or errand_id <= 0:
+        raise Refused("Invalid errand id for per-errand wallet check")
+    values = one_row(mysql_id, f"""
+        SELECT (SELECT COUNT(*) FROM wallet_account WHERE owner_id={errand_id}),
+               (SELECT COUNT(*) FROM wallet_account
+                 WHERE owner_id={errand_id} AND owner_type='ESCROW'),
+               (SELECT COUNT(*) FROM wallet_account
+                 WHERE owner_id={errand_id} AND owner_type='COMMISSION'),
+               (SELECT COUNT(*) FROM wallet_ledger WHERE biz_no='escrow:{errand_id}')
+        """, 4)
+    if values != ["2", "1", "1", "2"]:
+        raise Refused("Published task lacks its per-errand escrow/commission accounts")
 
 
 def snapshot(mysql_id):
@@ -608,6 +626,7 @@ def execute(args, mark):
         errand_id = prepare_delivered(base, publisher, runner, run_key)
         if one_row(mysql_id, f"SELECT status FROM errand WHERE id={errand_id}", 1)[0] != "DELIVERED":
             raise Refused("MQ precondition task is not DELIVERED")
+    assert_per_errand_accounts(mysql_id, errand_id)
     prepared = snapshot(mysql_id)
     assert_invariants(before, prepared)
     checked = preflight.check(project, base, os.getenv("PEERGRAB_TEST_DB_HOST"),

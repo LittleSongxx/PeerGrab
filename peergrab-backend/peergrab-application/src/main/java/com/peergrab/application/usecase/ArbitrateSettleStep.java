@@ -9,6 +9,8 @@ import com.peergrab.domain.errand.ports.ErrandRepository;
 import com.peergrab.domain.wallet.model.*;
 import com.peergrab.domain.wallet.ports.FundEventPort;
 import com.peergrab.domain.wallet.ports.WalletRepository;
+import com.peergrab.shared.BizException;
+import com.peergrab.shared.ErrorCode;
 import com.peergrab.shared.Money;
 import com.peergrab.shared.SnowflakeIdGenerator;
 import org.slf4j.Logger;
@@ -31,8 +33,8 @@ import java.util.ArrayList;
 public class ArbitrateSettleStep {
 
     private static final Logger log = LoggerFactory.getLogger(ArbitrateSettleStep.class);
-    private static final long ESCROW_ACCOUNT_OWNER = -1L;
-    private static final long COMMISSION_ACCOUNT_OWNER = -2L;
+    /** 平台动作在流水中的归属标记；不是账户 owner。 */
+    private static final long PLATFORM_LEDGER_USER_ID = -2L;
 
     private final ErrandRepository errandRepository;
     private final WalletRepository walletRepository;
@@ -78,18 +80,23 @@ public class ArbitrateSettleStep {
         Money commissionAmount = Money.ofCents(commissionCents);
 
         WalletAccount escrowAccount = walletRepository
-                .findByOwner(ESCROW_ACCOUNT_OWNER, AccountType.ESCROW).orElseThrow();
+                .findByOwner(errandId, AccountType.ESCROW)
+                .orElseThrow(() -> new BizException(ErrorCode.ACCOUNT_NOT_FOUND, "escrow=" + errandId));
         WalletAccount runnerAccount = walletRepository
-                .findByOwner(errand.grabberId(), AccountType.USER).orElseThrow();
+                .findByOwner(errand.grabberId(), AccountType.USER)
+                .orElseThrow(() -> new BizException(ErrorCode.ACCOUNT_NOT_FOUND,
+                        "runner=" + errand.grabberId()));
         WalletAccount commissionAccount = walletRepository
-                .findByOwner(COMMISSION_ACCOUNT_OWNER, AccountType.COMMISSION).orElseThrow();
+                .findByOwner(errandId, AccountType.COMMISSION)
+                .orElseThrow(() -> new BizException(ErrorCode.ACCOUNT_NOT_FOUND,
+                        "commission=" + errandId));
 
         var legs = new ArrayList<WalletPosting.Leg>();
         legs.add(WalletPosting.Leg.debit(escrowAccount.id(), errand.publisherId(), escrow.amount()));
         legs.add(WalletPosting.Leg.credit(runnerAccount.id(), errand.grabberId(), runnerAmount));
         if (commissionCents > 0) {
             legs.add(WalletPosting.Leg.credit(commissionAccount.id(),
-                    COMMISSION_ACCOUNT_OWNER, commissionAmount));
+                    PLATFORM_LEDGER_USER_ID, commissionAmount));
         }
         WalletPosting.post(walletRepository, idGenerator, bizNo, LedgerEntry.RefType.SETTLE,
                 errandId, legs);

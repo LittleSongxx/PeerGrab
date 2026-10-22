@@ -32,6 +32,7 @@ API 与 Worker 复用应用用例；领域层定义状态规则和端口，基�
 - **并发抢单**：鉴权后先做热点限流，再校验信用与在途资格；Redis Lua 原子预占名额，MySQL 状态与版本 CAS 加唯一索引最终裁决；Redis 不可用时仍可由数据库裁决。
 - **状态机驱动交互**：领域层约束任务流转，后端按状态和当前身份计算 `availableActions`；前端据此显示按钮，不另写一套状态规则。
 - **资金防重与对账**：结算以任务状态 CAS、托管单状态 CAS、流水业务号唯一约束防重复入账；账户按固定顺序更新，后台核对借贷平衡、余额快照和托管闭环。
+- **每单账户**：发布事务内为任务创建独立的托管户与佣金户（`owner_id=errand_id`），结算/退款/仲裁与批量结算只读写本任务账户，不再争用全局共享系统户；旧库须执行 `migrate-wallet-per-errand.sql`，旧 `-1/-2` 行只作历史流水归属。
 - **可靠异步**：超时递补和自动结算同事务登记本地消息，再交给 RocketMQ 定时投递；发送失败重试、Worker 扫描兜底，版本与轮次拦住过期消息。资金事件与账务同事务写入 outbox，MQ 恢复后由 Worker 投递。
 - **缓存与通知**：详情采用 Cache Aside、逻辑过期和互斥回填；布隆判否短路防穿透（就绪标记 fail-open、1% 判否抽样审计与巡检补登记兜底）；缓存不参与抢单裁决。WebSocket 经 Redis Pub/Sub 跨 API 副本分发，持久消息与定期轮询补齐实时事件的丢失。
 - **身份与角色**：没有用户表，仲裁员由 `peergrab.auth.arbitrator-id` 指定（演示为 `9001`）；仲裁员不能发布或抢单，仲裁用例再校验其不是当事人，裁决方向严格枚举 `RUNNER`/`PUBLISHER`；登录失败按 IP 与 userId 限速，登录响应带 `role`。
@@ -51,9 +52,9 @@ API 与 Worker 复用应用用例；领域层定义状态规则和端口，基�
 
 2026-09-27 首次上线版本为 `2370c45`（压测夹具随后修正为 `7da0a92`）：旧库经备份、独立恢复和迁移演练后升级；一笔虚拟交易从发布到结算完成，资金事件进入 v2 普通消息 Topic、持久通知落库，资金不变量全部通过。当时隔离 MySQL/Redis 的后端测试 **214 项通过、0 跳过**，前端与后端生产包构建通过。
 
-2026-09-28 已部署优化版 `5ace500`，独立 MySQL/Redis 上的 223 项后端测试全部通过。2026-10-19 当前版本在隔离 MySQL/Redis 上运行 `mvn -B -ntp -Dpeergrab.it=true clean test` 合计 **308 项、0 失败、0 错误、0 跳过（其中 78 项集成测试真实执行）**（更早的 298/223/214 等数字属于不同版本，见历史提交与报告）；并额外验证 API/Worker 启动 readiness、保留期 SQL 与迁移脚本幂等性。测试数量由 [`tools/summarize_tests.py`](peergrab-backend/tools/summarize_tests.py) 从同一批 surefire 报告汇总，CI 以该口径为准。[工具迁移前 ECS 六类场景实测](peergrab-backend/bench/reports/peergrab-current/report-ecs-spectrum-20260928.md)由 Vegeta、Java 客户端和 Python 探针取得，包含公网偶发超时、热点抢单的秒级尾延迟、MQ／扫描到期流转以及 Broker 暂停时“结算已提交、客户端却超时”的故障反例；保留原工具和计时口径。
+2026-09-28 已部署优化版 `5ace500`，独立 MySQL/Redis 上的 223 项后端测试全部通过。2026-10-22 当前版本在隔离 MySQL/Redis 上运行 `mvn -B -ntp -Dpeergrab.it=true clean test` 合计 **315 项、0 失败、0 错误、0 跳过（其中 81 项集成测试真实执行）**（更早的 308/298/223/214 等数字属于不同版本，见历史提交与报告）；并额外验证 API/Worker 启动 readiness、保留期 SQL 与迁移脚本幂等性。测试数量由 [`tools/summarize_tests.py`](peergrab-backend/tools/summarize_tests.py) 从同一批 surefire 报告汇总，CI 以该口径为准。[工具迁移前 ECS 六类场景实测](peergrab-backend/bench/reports/peergrab-current/report-ecs-spectrum-20260928.md)由 Vegeta、Java 客户端和 Python 探针取得，包含公网偶发超时、热点抢单的秒级尾延迟、MQ／扫描到期流转以及 Broker 暂停时“结算已提交、客户端却超时”的故障反例；保留原工具和计时口径。
 
-随后在同一业务镜像上完成[独立的 JMeter ECS 复测](peergrab-backend/bench/reports/peergrab-current/report-ecs-jmeter-20260928.md)：广场游标首屏经异机公网 HTTPS，在 **500 目标 RPS × 180 秒 × 3 轮**中实际启动 **269,608 次，全部通过 HTTP 和业务断言**，最差轮 P99 **255 ms**；600 目标 RPS 长档第二轮出现 **1 次连接超时**，按门禁停止第三轮。2,000 个 JMeter 用户线程同单抢 1 名额恰好 1 人成功、0 超卖，但实际请求开始横跨 2.228 秒、P99 **8.735 秒**；共享钱包热点结算 200 单／32 线程短批次为 **34.72 持久化 TPS**，资金校验通过。不同工具的连接复用与到达模型不同，不能用两份报告直接计算优化收益或全站容量。
+随后在同一业务镜像上完成[独立的 JMeter ECS 复测](peergrab-backend/bench/reports/peergrab-current/report-ecs-jmeter-20260928.md)：广场游标首屏经异机公网 HTTPS，在 **500 目标 RPS × 180 秒 × 3 轮**中实际启动 **269,608 次，全部通过 HTTP 和业务断言**，最差轮 P99 **255 ms**；600 目标 RPS 长档第二轮出现 **1 次连接超时**，按门禁停止第三轮。2,000 个 JMeter 用户线程同单抢 1 名额恰好 1 人成功、0 超卖，但实际请求开始横跨 2.228 秒、P99 **8.735 秒**；**旧共享系统户模型**下结算 200 单／32 线程短批次为 **34.72 持久化 TPS**，资金校验通过；2026-10 起已改为每单托管户/佣金户，旧数字仅作历史口径。不同工具的连接复用与到达模型不同，不能用两份报告直接计算优化收益或全站容量。
 
 所有指标均按镜像、工具、请求路径、负载窗口和错误分母分开记录；这些有限窗口实验不是全站容量或生产 SLA 承诺。
 

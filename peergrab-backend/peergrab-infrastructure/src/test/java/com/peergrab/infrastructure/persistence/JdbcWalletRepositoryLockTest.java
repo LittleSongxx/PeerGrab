@@ -31,8 +31,10 @@ class JdbcWalletRepositoryLockTest {
                   available BIGINT NOT NULL, frozen BIGINT NOT NULL, version BIGINT NOT NULL
                 )
                 """);
-        jdbc.update("INSERT INTO wallet_account VALUES (1,-1,'ESCROW',100,0,7)");
-        jdbc.update("INSERT INTO wallet_account VALUES (2,-2,'COMMISSION',0,0,3)");
+        // 每任务一对独立系统账户：owner_id 就是 errandId，同一 errand 的
+        // ESCROW/COMMISSION 由 (owner_id, owner_type) 唯一键区分。
+        jdbc.update("INSERT INTO wallet_account VALUES (1,5001,'ESCROW',100,0,7)");
+        jdbc.update("INSERT INTO wallet_account VALUES (2,5001,'COMMISSION',0,0,3)");
         jdbc.update("INSERT INTO wallet_account VALUES (9,2001,'USER',0,0,4)");
 
         var repository = new JdbcWalletRepository(jdbc, new SimpleMeterRegistry());
@@ -59,17 +61,19 @@ class JdbcWalletRepositoryLockTest {
                 )
                 """);
         jdbc.execute("CREATE UNIQUE INDEX uk_owner ON wallet_account(owner_id, owner_type)");
-        jdbc.update("INSERT INTO wallet_account VALUES (1,-1,'ESCROW',100,0,7)");
-        jdbc.update("INSERT INTO wallet_account VALUES (2,-2,'COMMISSION',0,0,3)");
+        jdbc.update("INSERT INTO wallet_account VALUES (1,5001,'ESCROW',100,0,7)");
+        jdbc.update("INSERT INTO wallet_account VALUES (2,5001,'COMMISSION',0,0,3)");
         jdbc.update("INSERT INTO wallet_account VALUES (9,2001,'USER',0,0,4)");
 
         var repository = new JdbcWalletRepository(jdbc, new SimpleMeterRegistry());
-        var escrow = new WalletRepository.OwnerRef(-1, AccountType.ESCROW);
+        var escrow = new WalletRepository.OwnerRef(5001, AccountType.ESCROW);
+        var commission = new WalletRepository.OwnerRef(5001, AccountType.COMMISSION);
         var runner = new WalletRepository.OwnerRef(2001, AccountType.USER);
-        var accounts = repository.findByOwners(List.of(escrow, runner, escrow));
+        var accounts = repository.findByOwners(List.of(escrow, commission, runner, escrow));
 
-        assertEquals(List.of(escrow, runner), accounts.keySet().stream().toList());
+        assertEquals(List.of(escrow, commission, runner), accounts.keySet().stream().toList());
         assertEquals(1L, accounts.get(escrow).id());
+        assertEquals(2L, accounts.get(commission).id());
         assertEquals(9L, accounts.get(runner).id());
     }
 
@@ -85,7 +89,7 @@ class JdbcWalletRepositoryLockTest {
                   available BIGINT NOT NULL, frozen BIGINT NOT NULL, version BIGINT NOT NULL
                 )
                 """);
-        jdbc.update("INSERT INTO wallet_account VALUES (1,-1,'ESCROW',1000,0,7)");
+        jdbc.update("INSERT INTO wallet_account VALUES (1,5001,'ESCROW',1000,0,7)");
         jdbc.update("INSERT INTO wallet_account VALUES (9,2001,'USER',0,0,4)");
 
         var repository = new JdbcWalletRepository(jdbc, new SimpleMeterRegistry());

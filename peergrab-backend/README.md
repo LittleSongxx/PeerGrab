@@ -58,8 +58,12 @@ docker compose --env-file .env -f docker-compose.yaml exec -T mysql \
   sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysql -uroot peer_grab' < migrate-runtime.sql
 docker compose --env-file .env -f docker-compose.yaml exec -T mysql \
   sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysql -uroot peer_grab' < migrate-query-indexes.sql
+docker compose --env-file .env -f docker-compose.yaml exec -T mysql \
+  sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysql -uroot peer_grab' < migrate-wallet-per-errand.sql
 docker compose --env-file .env -f docker-compose.yaml -f docker-compose.full.yaml up -d --build
 ```
+
+2026-10 起资金账户改为“每任务一对独立 ESCROW/COMMISSION 账户”（`owner_id=errand_id`），`init.sql` 不再预置全局 `-1/-2` 系统户。已有卷必须先执行 `migrate-wallet-per-errand.sql`：它只迁移仍为 `HELD` 的托管单，把旧共享托管户余额转入每单托管户，并补齐每单佣金户；旧 `-1/-2` 行保留作历史流水归属。脚本可重复执行，执行前须停写、备份，在恢复副本上演练。
 
 如果旧环境调整过确认或自动结算期限，执行 `migrate-runtime.sql` 前先按[生产迁移说明](docker/ECS_DEPLOY.md)在同一 MySQL 会话中设置原期限并验证回填。升级后检查 app、worker 的健康状态与 `/actuator/health/readiness`。
 
@@ -109,7 +113,7 @@ export PEERGRAB_TEST_DB_PASSWORD='<独立测试 MySQL 密码>'
 mvn -Dpeergrab.it=true test
 ```
 
-2026-09-27 的旧版在可丢弃 MySQL/Redis 上运行 **214 项后端测试，0 失败、0 跳过**；前端 `npm run build` 与后端 `mvn -DskipTests package` 通过。真实 RocketMQ 的普通 Topic 类型、发送和消费读回另经独立契约脚本验证。2026-09-28 优化版在全新隔离 MySQL/Redis 上运行 `mvn -Dpeergrab.it=true test`，按 Maven 各模块汇总 **223 项执行、0 失败、0 错误、0 跳过**；独立栈的 S1/S4/S5 运行验收见下文报告。2026-10-19 当前版本在同一隔离栈上运行 `mvn -B -ntp -Dpeergrab.it=true clean test` 合计 **308 项、0 失败、0 错误、0 跳过，其中 78 项集成测试真实执行**（更早的 298 项属于不同提交）；同时验证 API/Worker 运行时 readiness 与保留期 SQL。测试数量以同一条命令 + [`tools/summarize_tests.py`](tools/summarize_tests.py) 汇总为唯一口径，CI 的 backend job 会输出并校验该数字。
+2026-09-27 的旧版在可丢弃 MySQL/Redis 上运行 **214 项后端测试，0 失败、0 跳过**；前端 `npm run build` 与后端 `mvn -DskipTests package` 通过。真实 RocketMQ 的普通 Topic 类型、发送和消费读回另经独立契约脚本验证。2026-09-28 优化版在全新隔离 MySQL/Redis 上运行 `mvn -Dpeergrab.it=true test`，按 Maven 各模块汇总 **223 项执行、0 失败、0 错误、0 跳过**；独立栈的 S1/S4/S5 运行验收见下文报告。2026-10-22 当前版本在同一隔离栈上运行 `mvn -B -ntp -Dpeergrab.it=true clean test` 合计 **315 项、0 失败、0 错误、0 跳过，其中 81 项集成测试真实执行**（更早的 308/298 项属于不同提交）；同时验证 API/Worker 运行时 readiness 与保留期 SQL。测试数量以同一条命令 + [`tools/summarize_tests.py`](tools/summarize_tests.py) 汇总为唯一口径，CI 的 backend job 会输出并校验该数字。
 
 在可丢弃的本地演示库上可运行 `python3 bench/scripts/smoke_e2e.py --env-file docker/.env`；脚本验证发布、抢单、结算、退款、仲裁和通知，**会创建任务并改变演示账户余额**。只读资金不变式检查可执行：
 

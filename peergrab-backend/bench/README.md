@@ -50,6 +50,24 @@ python3 peergrab-backend/bench/scripts/preflight.py
 
 S2 的固定 JMeter 用户池只能**尝试**目标 RPS；服务端变慢、发压器排队或连接耗尽时，实际发出率会偏离目标，必须以 JTL 为分母。S1 的 Synchronizing Timer 放行线程也不保证请求同刻抵达应用。JMeter 使用 CLI `-n` 模式，原始 JTL 只保存字段白名单；业务正确性以响应断言加 MySQL 真值为准。[Apache JMeter 官方最佳实践](https://jmeter.apache.org/usermanual/best-practices.html)。
 
+## 汇总与口径校验
+
+报告落盘前先跑两个只读工具；它们不启动 Docker、不发压，只读 `bench/runs/` 的 JSON：
+
+```bash
+python3 bench/scripts/canonicalize.py --input bench/runs/<run-dir> --format markdown --details
+python3 bench/scripts/lint_metrics.py bench/reports/peergrab-current/*.md
+```
+
+- `canonicalize.py`：统一 JMeter S2 summary、Vegeta stage summary、S2 knee
+  manifest/result，输出 n/中位数/min-max、错误分类、资源水位和警告；单轮、P99
+  轮间离散、目标/实发偏差、缺资源、只有客户端延迟、success>requests 会直接标出。
+- `lint_metrics.py`：拦截“极限压测/全站容量/SLA/百万级/裸 QPS/缓存提升 X%”等
+  无口径表述；caveat 行、代码块和多引用示例跳过。
+
+两个工具都有离线单元测试，随 `benchmark-assets` CI 的
+`python3 -m unittest discover -s peergrab-backend/bench/scripts -p 'test_*.py'` 执行。
+
 ## 证据与清理
 
 每轮记录业务镜像／提交、JMX 哈希、数据规模、用户或 Key 分布、采样窗口、目标和实际请求、P50／P95／P99、传输／HTTP／业务错误、客户端与服务器资源，以及名额或资金 SQL 校验。历史数字保留原版本和工具标签，失败轮与修正后的有效轮分开。私有归档、SHA-256、保留与清理规则见[评测资产目录](ASSET_CATALOG.md)；公开报告只包含脱敏汇总。

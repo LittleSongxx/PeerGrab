@@ -259,12 +259,20 @@ public class JdbcWalletRepository implements WalletRepository {
      * 并发/重复调用只会保留一条账户行；余额始终为 0，不影响对账。
      */
     @Override
-    public void ensureUserAccount(long userId) {
+    public WalletAccount ensureAccount(long ownerId, AccountType type) {
         jdbc.update("""
                 INSERT INTO wallet_account (id, owner_id, owner_type, available, frozen, version)
-                VALUES (?, ?, 'USER', 0, 0, 0)
+                VALUES (?, ?, ?, 0, 0, 0)
                 ON DUPLICATE KEY UPDATE owner_id = owner_id
-                """, idGenerator.nextId(), userId);
+                """, idGenerator.nextId(), ownerId, type.name());
+        return findByOwner(ownerId, type).orElseThrow(() ->
+                new IllegalStateException("wallet account missing after ensure: owner="
+                        + ownerId + " type=" + type));
+    }
+
+    @Override
+    public void ensureUserAccount(long userId) {
+        ensureAccount(userId, AccountType.USER);
     }
 
     @Override
