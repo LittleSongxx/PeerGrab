@@ -155,6 +155,16 @@
 | `peergrab.credit.calibration-batch-size` | `1000` | 单批用户数 | worker |
 | `peergrab.credit.ranking-rebuild-interval-ms` | `60000` | 信用榜单重建周期 | worker |
 
+## 抢单请求幂等（grab-request.*）
+
+| 键 | 默认值 | 作用 | 生效进程 |
+| --- | --- | --- | --- |
+| `peergrab.grab-request.max-in-flight` | `10` | 单实例同时执行的抢单请求上限，满载 503 | API |
+| `peergrab.grab-request.lease-seconds` | `30` | 请求执行租约，过期后由恢复扫描接管 | API |
+| `peergrab.grab-request.recovery-enabled` | `true` | 是否启用请求恢复扫描 | worker |
+| `peergrab.grab-request.recovery-interval-ms` | `10000` | 恢复扫描周期 | worker |
+| `peergrab.grab-request.recovery-batch` | `200` | 单轮扫描上限 | worker |
+
 ## 候选队列（candidate.*）
 
 | 键 | 默认值 | 作用 | 生效进程 |

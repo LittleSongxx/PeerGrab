@@ -18,6 +18,7 @@
 | 钱包账户拓扑、每单托管户与迁移 | [wallet-account-topology](architecture/wallet-account-topology.md) |
 | 为什么按 campus_id 分片、为什么运行链路还没接线 | [sharding-design](architecture/sharding-design.md) |
 | 不变式清单与拆层对照实验 | [invariants-and-control-experiments](architecture/invariants-and-control-experiments.md) |
+| 持久幂等抢单请求（v2）与崩溃恢复 | [grab-request-idempotency](architecture/grab-request-idempotency.md) |
 | 工程分期、关键取舍与踩坑档案 | [design-evolution](engineering/design-evolution.md) |
 | 压测方法论、场景设计、报告口径 | [benchmark/methodology](benchmark/methodology.md) |
 | 压测运行手册与历史报告 | [bench/README](../peergrab-backend/bench/README.md) |

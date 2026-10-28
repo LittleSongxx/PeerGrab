@@ -40,12 +40,31 @@ def body_text(page):
     return page.locator("body").inner_text()
 
 
-def wait_toast(page, contains=None):
-    page.wait_for_selector('[data-testid="toast"]', timeout=8000)
-    toast = page.locator('[data-testid="toast"]').first.inner_text()
+def pending_grab_keys(page):
+    return page.evaluate(
+        "Object.keys(sessionStorage).filter((key) => key.startsWith('peergrab_grab_request'))"
+    )
+
+
+def first_grab_card(page):
+    page.wait_for_selector('[data-testid="errand-card"]', timeout=8000)
+    return page.locator('[data-testid="errand-card"]').filter(
+        has=page.locator('[data-testid="action-grab"]')
+    ).first
+
+
+def wait_toast(page, contains=None, timeout=8000):
     if contains:
-        expect(contains in toast, f"toast 期望包含 {contains!r}，实际 {toast!r}")
-    return toast
+        # 同时可能有多条 toast（旧的一条还没消失），要扫描全部而不是只看第一条。
+        page.wait_for_function(
+            """(needle) => Array.from(document.querySelectorAll('[data-testid="toast"]'))
+                .some((node) => node.textContent.includes(needle))""",
+            arg=contains,
+            timeout=timeout,
+        )
+        return contains
+    page.wait_for_selector('[data-testid="toast"]', timeout=timeout)
+    return page.locator('[data-testid="toast"]').last.inner_text()
 
 
 def open_app(browser, base, user=1001, viewport=None, ws_broken=False, configure=None):
@@ -271,6 +290,144 @@ def grab_confirm_flow(browser, base):
         wait_toast(page, "抢单成功")
         page.wait_for_selector("text=待确认", timeout=6000)
         expect(page.locator('[data-testid="action-confirm"]').count() >= 1, "抢中后应出现确认接单按钮")
+    finally:
+        context.close()
+
+
+@case
+def grab_v2_persists_request_id_before_post(browser, base):
+    state = mock_api.MockState()
+    state.holds["grab"] = True
+    context, page, state = mock_api.new_page(browser, base, state)
+    try:
+        mock_api.login(page, base, 2001)
+        first_grab_card(page).locator('[data-testid="action-grab"]').click()
+        # POST 已被 mock 挂起：请求键必须在此之前落盘，刷新/重试才能用同一 ID 恢复。
+        page.wait_for_function(
+            "Object.keys(sessionStorage).some((key) => key.startsWith('peergrab_grab_request'))",
+            timeout=5000,
+        )
+        expect(state.release("grab"), "应能释放被挂起的 /grab-v2 响应")
+        wait_toast(page, "抢单成功")
+        page.wait_for_selector("text=待确认", timeout=6000)
+        expect(not pending_grab_keys(page), "终态后应清理持久请求键")
+    finally:
+        context.close()
+
+
+@case
+def grab_v2_processing_polls_same_request(browser, base):
+    context, page, state = open_app(
+        browser, base, 2001,
+        configure=lambda s: s.flags.__setitem__("grab_processing_polls", 2),
+    )
+    try:
+        first_grab_card(page).locator('[data-testid="action-grab"]').click()
+        wait_toast(page, "抢单成功")
+        page.wait_for_selector("text=待确认", timeout=6000)
+        rows = list(state.grab_requests.values())
+        expect(len(rows) == 1, f"202 轮询应只登记 1 个请求，实际 {len(rows)}")
+        expect(rows[0]["status"] == "SUCCEEDED", f"请求应收敛为 SUCCEEDED，实际 {rows[0]['status']}")
+        expect(not pending_grab_keys(page), "终态后应清理持久请求键")
+    finally:
+        context.close()
+
+
+@case
+def grab_v2_recovers_from_gateway_error(browser, base):
+    context, page, state = open_app(
+        browser, base, 2001,
+        configure=lambda s: s.flags.__setitem__("grab_gateway_error_once", True),
+    )
+    try:
+        first_grab_card(page).locator('[data-testid="action-grab"]').click()
+        wait_toast(page, "抢单成功")
+        page.wait_for_selector("text=待确认", timeout=6000)
+        expect(len(state.grab_requests) == 1, f"补发后应只有 1 条登记，实际 {len(state.grab_requests)}")
+    finally:
+        context.close()
+
+
+@case
+def grab_v2_slot_full_then_new_request_succeeds(browser, base):
+    context, page, state = open_app(
+        browser, base, 2001,
+        configure=lambda s: s.flags.__setitem__("grab_slot_full_once", True),
+    )
+    try:
+        first_grab_card(page).locator('[data-testid="action-grab"]').click()
+        wait_toast(page, "名额已满")
+        page.wait_for_timeout(300)
+        expect(not pending_grab_keys(page), "确定失败后应按契约清理旧请求键")
+        first_keys = set(state.grab_requests.keys())
+        expect(len(first_keys) == 1, f"应登记 1 条失败请求，实际 {len(first_keys)}")
+        # 契约：确定失败后由用户换新 requestId 重新发起
+        first_grab_card(page).locator('[data-testid="action-grab"]').click()
+        wait_toast(page, "抢单成功")
+        second_keys = set(state.grab_requests.keys())
+        # 旧请求行作为历史保留，关键是第二次抢单登记了一个全新的 requestId。
+        expect(len(second_keys - first_keys) == 1, "第二次抢单应登记新的 requestId")
+    finally:
+        context.close()
+
+
+@case
+def grab_v2_replay_is_idempotent(browser, base):
+    context, page, _ = open_app(browser, base, 2001)
+    try:
+        result = page.evaluate(
+            """async () => {
+              const token = localStorage.getItem('peergrab_token');
+              const requestId = '00000000-0000-4000-8000-000000000001';
+              const url = '/api/errands/215731113107132416/grab-v2';
+              const init = {
+                method: 'POST',
+                headers: {
+                  Authorization: 'Bearer ' + token,
+                  'Content-Type': 'application/json',
+                  'X-Request-Id': requestId,
+                },
+                body: JSON.stringify({ expectedRound: 0 }),
+              };
+              const first = await (await fetch(url, init)).json();
+              const second = await (await fetch(url, init)).json();
+              const card = await (await fetch('/api/errands/215731113107132416', {
+                headers: { Authorization: 'Bearer ' + token },
+              })).json();
+              return { first, second, slotTaken: card.data.slotTaken };
+            }"""
+        )
+        expect(result["first"]["code"] == "OK", f"首次抢单应成功：{result}")
+        expect(result["second"]["code"] == "OK", f"重放应返回同一成功：{result}")
+        expect(result["second"]["data"]["replayed"] is True, f"重放应标记 replayed：{result}")
+        expect(
+            result["first"]["data"]["requestId"] == result["second"]["data"]["requestId"],
+            f"重放 requestId 应一致：{result}",
+        )
+        expect(result["slotTaken"] == 1, f"重放不应二次占名额：{result}")
+    finally:
+        context.close()
+
+
+@case
+def detail_recovers_pending_grab_request(browser, base):
+    state = mock_api.MockState()
+    request_id = "00000000-0000-4000-8000-000000000002"
+    errand_id = "215731113107132416"
+    state.register_grab(2001, errand_id, request_id, 0, "PROCESSING",
+                        "REQUEST_PROCESSING", 202, pending_polls=1)
+    context, page, state = mock_api.new_page(browser, base, state)
+    try:
+        mock_api.login(page, base, 2001)
+        # 模拟"上次抢单 202 后刷新"：持久键还在，详情页应主动用 GET 恢复。
+        page.evaluate(
+            """([key, value]) => sessionStorage.setItem(key, value)""",
+            [f"peergrab_grab_request:2001:{errand_id}",
+             json.dumps({"requestId": request_id, "round": 0})],
+        )
+        mock_api.goto_hash(page, base, f"/detail/{errand_id}")
+        wait_toast(page, "上次抢单已成功")
+        page.wait_for_selector('[data-testid="action-confirm"]', timeout=6000)
     finally:
         context.close()
 

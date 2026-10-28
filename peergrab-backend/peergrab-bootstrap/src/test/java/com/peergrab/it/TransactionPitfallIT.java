@@ -139,7 +139,8 @@ class TransactionPitfallIT {
             HikariConfig cfg = new HikariConfig();
             cfg.setJdbcUrl("jdbc:mysql://" + System.getenv().getOrDefault("PEERGRAB_TEST_DB_HOST", "127.0.0.1")
                     + ":" + System.getenv().getOrDefault("PEERGRAB_TEST_DB_PORT", "3307")
-                    + "/peer_grab?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai");
+                    + "/" + System.getenv().getOrDefault("PEERGRAB_TEST_DB_NAME", "peer_grab")
+                    + "?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai");
             cfg.setUsername("root");
             cfg.setPassword(System.getenv().getOrDefault("PEERGRAB_TEST_DB_PASSWORD", "peergrab123456"));
             cfg.setMaximumPoolSize(2);          // 刻意调小

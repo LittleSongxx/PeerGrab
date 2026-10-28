@@ -18,6 +18,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.LinkedHashMap;
@@ -49,6 +50,7 @@ public class ErrandController {
     private final GetErrandDetailUseCase detailUseCase;
     private final ErrandActionResolver actionResolver;
     private final ErrandRepository errandRepository;
+    private final GrabRequestUseCase grabRequestUseCase;
     private final ObjectMapper objectMapper;
     private final Timer grabSuccessTimer;
     private final Timer grabSlotFullTimer;
@@ -70,6 +72,7 @@ public class ErrandController {
                             GetErrandDetailUseCase detailUseCase,
                             ErrandActionResolver actionResolver,
                             ErrandRepository errandRepository,
+                            GrabRequestUseCase grabRequestUseCase,
                             ObjectMapper objectMapper,
                             MeterRegistry meterRegistry) {
         this.publishUseCase = publishUseCase;
@@ -85,6 +88,7 @@ public class ErrandController {
         this.detailUseCase = detailUseCase;
         this.actionResolver = actionResolver;
         this.errandRepository = errandRepository;
+        this.grabRequestUseCase = grabRequestUseCase;
         this.objectMapper = objectMapper;
         this.grabSuccessTimer = grabTimer(meterRegistry, "success");
         this.grabSlotFullTimer = grabTimer(meterRegistry, "slot_full");
@@ -229,6 +233,37 @@ public class ErrandController {
             timer.record(System.nanoTime() - started, java.util.concurrent.TimeUnit.NANOSECONDS);
         }
     }
+
+    /**
+     * 持久幂等抢单（v2）：先登记 requestId，再执行原抢单链路，返回确定结果或 202。
+     * 与 v1 的 /grab 并存，便于灰度与回滚；客户端用同一 requestId 查询结果。
+     */
+    @PostMapping("/{errandId}/grab-v2")
+    public ResponseEntity<Result<GrabRequestUseCase.Result>> grabV2(
+            @PathVariable long errandId,
+            @RequestHeader(value = "X-Request-Id", required = false) String requestId,
+            @RequestBody(required = false) GrabV2Request req) {
+        if (requestId == null || requestId.isBlank()) {
+            throw new BizException(ErrorCode.INVALID_ARGUMENT, "X-Request-Id 必须为非空 UUID");
+        }
+        int expectedRound = req == null || req.expectedRound() == null ? 0 : req.expectedRound();
+        return respondGrabRequest(grabRequestUseCase.grab(errandId, CurrentUser.get(), requestId, expectedRound));
+    }
+
+    /** 用原 requestId 查询抢单结果：202/网络失败后的恢复入口。 */
+    @GetMapping("/{errandId}/grab-requests/{requestId}")
+    public ResponseEntity<Result<GrabRequestUseCase.Result>> grabRequest(@PathVariable long errandId,
+                                                                        @PathVariable String requestId) {
+        return respondGrabRequest(grabRequestUseCase.query(errandId, CurrentUser.get(), requestId));
+    }
+
+    private ResponseEntity<Result<GrabRequestUseCase.Result>> respondGrabRequest(GrabRequestUseCase.Result r) {
+        Result<GrabRequestUseCase.Result> body = r.code() == ErrorCode.OK
+                ? Result.ok(r) : Result.fail(r.code(), r);
+        return ResponseEntity.status(r.httpStatus()).body(body);
+    }
+
+    public record GrabV2Request(Integer expectedRound) {}
 
     @PostMapping("/{errandId}/confirm")
     public Result<Void> confirm(@PathVariable long errandId) {

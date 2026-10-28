@@ -178,6 +178,31 @@ ON DUPLICATE KEY UPDATE id = id;
 -- 本地消息表：跨进程最终一致的主方案。
 -- 业务写入与消息登记在同一个本地事务里，要么都成功要么都失败；
 -- 发送失败由 worker 扫 PENDING 重发。把"消息有没有发出去"变成可查询的数据库状态。
+-- 抢单请求持久事实：requestId 相同、payload 相同只返回同一结果；Redis 只是挡流量。
+CREATE TABLE IF NOT EXISTS grab_request (
+  id                   BIGINT       NOT NULL PRIMARY KEY,
+  campus_id            BIGINT       NOT NULL COMMENT '校区 ID，P6 分片键',
+  errand_id            BIGINT       NOT NULL,
+  runner_id            BIGINT       NOT NULL,
+  operation            VARCHAR(24)  CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  request_id           VARCHAR(64)  CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  payload_hash         CHAR(64)     CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  request_round        INT          NOT NULL,
+  base_errand_version  BIGINT       NOT NULL,
+  status               VARCHAR(16)  NOT NULL,
+  reservation_token    CHAR(36)     CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  lease_until          DATETIME(3)  NOT NULL,
+  result_code          VARCHAR(64)  NULL,
+  http_status          SMALLINT     NULL,
+  result_json          JSON         NULL,
+  created_at           DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  completed_at         DATETIME(3)  NULL,
+  UNIQUE KEY uk_grab_request_scope (campus_id, runner_id, operation, request_id),
+  KEY idx_grab_request_expiry (status, lease_until, id),
+  KEY idx_grab_request_errand (campus_id, errand_id, status),
+  CONSTRAINT ck_grab_request_status CHECK (status IN ('PROCESSING','SUCCEEDED','REJECTED','EXPIRED'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='抢单请求及永久幂等守卫';
+
 CREATE TABLE IF NOT EXISTS local_message (
   id            BIGINT       NOT NULL,
   msg_key       VARCHAR(96)  NOT NULL COMMENT '幂等键，如 timeout:{errandId}:{round}',

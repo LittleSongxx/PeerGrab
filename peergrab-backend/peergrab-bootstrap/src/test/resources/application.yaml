@@ -19,7 +19,7 @@ spring:
   application:
     name: peergrab
   datasource:
-    url: jdbc:mysql://${PEERGRAB_TEST_DB_HOST:127.0.0.1}:${PEERGRAB_TEST_DB_PORT:3307}/peer_grab?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai&rewriteBatchedStatements=true
+    url: jdbc:mysql://${PEERGRAB_TEST_DB_HOST:127.0.0.1}:${PEERGRAB_TEST_DB_PORT:3307}/${PEERGRAB_TEST_DB_NAME:peer_grab}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai&rewriteBatchedStatements=true
     username: root
     password: ${PEERGRAB_TEST_DB_PASSWORD:peergrab123456}
     hikari:
@@ -30,6 +30,7 @@ spring:
     redis:
       host: ${PEERGRAB_TEST_REDIS_HOST:127.0.0.1}
       port: ${PEERGRAB_TEST_REDIS_PORT:6380}
+      database: ${PEERGRAB_TEST_REDIS_DATABASE:0}
       lettuce:
         pool:
           max-active: 64

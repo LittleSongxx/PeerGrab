@@ -4,9 +4,9 @@
 
 | 套件 | 依赖 | 作用 | 入口 |
 | --- | --- | --- | --- |
-| mock UI 验收 | 只需 `dist/` 构建产物 | 28 个用例：登录/导航/广场/发布/详情/钱包/信用/消息/骨架屏/401 刷新/迟到响应/移动端焦点陷阱/可访问性/console 清洁 | `python3 tests/ui_smoke.py --dist dist` |
+| mock UI 验收 | 只需 `dist/` 构建产物 | 34 个用例：登录/导航/广场/发布/详情/钱包/信用/消息/骨架屏/401 刷新/迟到响应/移动端焦点陷阱/可访问性/console 清洁，以及 v2 抢单的请求键落盘、202 轮询、网关恢复、名额满换新 ID、重放幂等与详情页恢复 | `python3 tests/ui_smoke.py --dist dist` |
 | 真实浏览器 E2E | 运行中的后端 + Vite dev | 4 个演示身份走完发布→抢单→履约→结算、取消退款、争议仲裁，写入全部由 UI 点击产生 | `python3 tests/live_smoke.py --base http://127.0.0.1:5173 --api-base http://127.0.0.1:8080` |
-| 真实 API/MQ 验收 | 运行中的后端 + 短超时配置 | 并发抢单恰好 1 人成功、发布/结算/退款/仲裁幂等、越权拒绝、超时递补、自动结算；可选 worker 日志作 MQ 证据 | `python3 tests/live_api_smoke.py --base http://127.0.0.1:8080 --timeout-flow --auto-settle-flow` |
+| 真实 API/MQ 验收 | 运行中的后端 + 短超时配置 | 并发抢单（`/grab-v2`）恰好 1 人成功且同 requestId 重放不二次占名额、发布/结算/退款/仲裁幂等、越权拒绝、超时递补、自动结算；可选 worker 日志作 MQ 证据 | `python3 tests/live_api_smoke.py --base http://127.0.0.1:8080 --timeout-flow --auto-settle-flow` |
 | 截图生成 | 只需 `dist/` 构建产物 | 用固定 mock 数据生成 7 张桌面截图、7 张 390px 移动截图与总览图 | `python3 tests/screenshots.py --dist dist` |
 
 ## 真实栈复跑

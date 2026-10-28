@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { newRequestId } from '../utils/requestId';
+import { newGrabRequestId } from '../grabRequests';
 import { api, getRole } from '../api';
 import type { ErrandCard } from '../api';
 import ErrandCardView from '../components/ErrandCard';
 import LoadingSkeleton from '../components/LoadingSkeleton';
 import UiIcon from '../components/UiIcon';
-import { issueDemoCredentials, revokeCredentials } from '../api';
+import { grabV2WithToken, issueDemoCredentials, revokeCredentials } from '../api';
 import type { DemoCredentials } from '../api';
 import { demoPasswordFor } from '../identity';
 import { showToast } from '../utils/toast';
@@ -23,7 +23,11 @@ type Filter = 'all' | 'available';
 /**
  * 任务广场：列表 + 抢单 + 两个已配置跑腿身份的并发演示。
  *
- * 并发抢单演示的实现方式：当前浏览器以两个跑腿身份发抢单请求。
+ * 并发抢单演示的实现方式：当前浏览器以两个跑腿身份向 v2 抢单端点
+ * （POST /api/errands/{id}/grab-v2）同时发请求，每个请求带独立 requestId 与
+ * 列表里的 expectedRound。于是「一人抢中、另一人拿 SLOT_FULL/GRAB_CONFLICT」
+ * 直接来自后端真实裁决，而不是前端自说自话。
+ *
  * 注意浏览器对同域并发连接有限制（HTTP/1.1 约 6 条），所以这只能演示
  * "少量并发下名额不超发"；真实的 2000 并发压测看后端的 SpikeLoadClient 报告，
  * 页面上对此做了如实标注——不把演示当压测。
@@ -138,8 +142,10 @@ export default function Square() {
     });
   }, [cards, filter, query]);
 
-  /** 并发抢单演示：登录两个已授权的跑腿身份，同时发抢单请求 */
-  const spikeGrab = async (errandId: string) => {
+  /** 并发抢单演示：登录两个已授权的跑腿身份，同时向 v2 抢单端点发请求 */
+  const spikeGrab = async (errand: ErrandCard) => {
+    const errandId = errand.id;
+    const expectedRound = errand.round;
     targetRef.current = errandId;
     setGrabbing(true);
     setGrabLog([]);
@@ -151,25 +157,23 @@ export default function Square() {
         credentials.push(await issueDemoCredentials(users[i], passwords[i]));
       }
 
-      // 对齐释放：所有请求同时发出
+      // 对齐释放：所有请求同时发出；每个请求各自生成 requestId（同一请求重试才复用）
       const startedAt = performance.now();
       const results = await Promise.all(
         credentials.map(async (credential, index) => {
           const start = performance.now();
           try {
-            const resp = await fetch(`/api/errands/${errandId}/grab`, {
-              method: 'POST',
-              // 每次并发抢单是独立请求，各自带幂等键（同一请求重试才复用）
-              headers: {
-                Authorization: `Bearer ${credential.token}`,
-                'X-Request-Id': newRequestId(),
-              },
-            });
-            const body = await resp.json();
+            const http = await grabV2WithToken(
+              credential.token,
+              errandId,
+              expectedRound,
+              newGrabRequestId(),
+            );
+            const code = http.result?.code ?? `HTTP_${http.httpStatus}`;
             return {
               label: `跑腿 ${users[index]}`,
-              ok: body.code === 'OK',
-              code: body.code,
+              ok: code === 'OK' && http.result?.data?.grabbed === true,
+              code,
               ms: Math.round(performance.now() - start),
             };
           } catch {
@@ -319,7 +323,7 @@ export default function Square() {
                         </div>
                         <button type="button" className="btn btn-secondary race-demo__submit"
                           disabled={grabbing || !runner2001Password || !runner2002Password}
-                          onClick={() => spikeGrab(card.id)}>
+                          onClick={() => spikeGrab(card)}>
                           {grabbing && targetRef.current === card.id ? '正在发起请求…' : '开始并发演示'}
                         </button>
                       </div>

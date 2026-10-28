@@ -17,6 +17,13 @@ public enum ErrorCode {
     GRAB_RATE_LIMITED("当前任务过热，请稍后再试"),
     SELF_GRAB_FORBIDDEN("不能抢自己发布的任务"),
 
+    // 持久请求幂等（抢单请求 v2）
+    REQUEST_PROCESSING("抢单请求处理中"),
+    REQUEST_CONFLICT("请求键与已有请求内容不匹配"),
+    REQUEST_EXPIRED("抢单请求已过期，请重新发起"),
+    REQUEST_NOT_FOUND("抢单请求不存在"),
+    DEPENDENCY_UNAVAILABLE("依赖服务暂不可用，请稍后重试"),
+
     // 资格
     CREDIT_TOO_LOW("信用分不足"),
     TOO_MANY_ONGOING("在途任务数已达上限"),

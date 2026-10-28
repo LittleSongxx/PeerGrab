@@ -85,6 +85,11 @@ peergrab:
       per-second: 500           # 单实例、单任务每秒放行数，S2 阶梯加压后定参
       resource: peer_grab_grab
 
+  # P12：持久幂等抢单请求。v1 /grab 与 v2 /grab-v2 并存，可独立回滚。
+  grab-request:
+    max-in-flight: 10
+    lease-seconds: 30
+
   credit:
     min-score: 40
     max-ongoing: 5

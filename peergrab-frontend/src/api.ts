@@ -26,9 +26,6 @@ export class BizError extends Error {
   }
 }
 
-/** 真实 HTTP 失败（含网关 5xx）与网络断开的统一错误码 */
-export const TRANSIENT_ERROR_CODES = new Set(["NETWORK_ERROR", "HTTP_ERROR", "BAD_RESPONSE"]);
-
 const TOKEN_KEY = "peergrab_token";
 const REFRESH_KEY = "peergrab_refresh";
 const USER_KEY = "peergrab_user";
@@ -303,13 +300,16 @@ export async function logout() {
   if (credentials) await revokeCredentials(credentials);
 }
 
-/** 发请求并返回 data；code 非 OK 时抛 BizError（带业务码） */
-async function request<T>(
+/**
+ * 带鉴权发请求并完成 401 刷新/重放，返回原始 Response（不解析 body）。
+ * 普通接口 request 与 v2 抢单的原始响应共用这一段，保证登录态处理完全一致。
+ */
+async function sendAuthorized(
   path: string,
   method = "GET",
   body?: unknown,
   extraHeaders?: Record<string, string>,
-): Promise<T> {
+): Promise<Response> {
   const send = (activeToken: string | null) =>
     fetchWithTimeout(path, {
       method,
@@ -360,7 +360,96 @@ async function request<T>(
     throw new BizError("UNAUTHORIZED", "会话已切换，请重试");
   }
 
+  return resp;
+}
+
+/** 发请求并返回 data；code 非 OK 时抛 BizError（带业务码） */
+async function request<T>(
+  path: string,
+  method = "GET",
+  body?: unknown,
+  extraHeaders?: Record<string, string>,
+): Promise<T> {
+  const resp = await sendAuthorized(path, method, body, extraHeaders);
   return parseResponse<T>(resp);
+}
+
+// ── 抢单 v2（持久幂等请求）─────────────────────────────
+//
+// 这些端点用 HTTP 409/429/503 表达确定业务结果，不能套用「非 2xx 即 HTTP_ERROR」，
+// 否则前端只能拿到一层笼统的「服务不可用」，丢掉了 SLOT_FULL / STALE_VERSION 等语义。
+// 低层只负责把 HTTP 状态 + Result body 原样带回来，分支判断在 grabRequests.ts。
+
+/** 与后端 GrabRequestUseCase.Result 对齐的 data 结构。 */
+export interface GrabRequestData {
+  requestId: string;
+  /** PROCESSING / SUCCEEDED / REJECTED / EXPIRED；登记前失败时为 null */
+  status: string | null;
+  code: string;
+  grabbed: boolean;
+  appliedRound: number | null;
+  replayed: boolean;
+  retryAfterMillis: number;
+  httpStatus: number;
+}
+
+/** 抢单接口的原始响应：HTTP 状态码 + 解析出的 Result body（非 JSON 时为 null）。 */
+export interface GrabHttpResult {
+  httpStatus: number;
+  result: ApiResult<GrabRequestData> | null;
+}
+
+function decodeGrabResponse(response: Response): Promise<GrabHttpResult> {
+  return response
+    .json()
+    .then((body: unknown) => ({ httpStatus: response.status, result: body as ApiResult<GrabRequestData> }))
+    .catch(() => ({ httpStatus: response.status, result: null }));
+}
+
+/** 已登录会话的抢单 POST；requestId 由 grabRequests.ts 生成并持久化 */
+export async function grabV2(
+  errandId: string,
+  expectedRound: number,
+  requestId: string,
+): Promise<GrabHttpResult> {
+  const response = await sendAuthorized(
+    `/api/errands/${errandId}/grab-v2`,
+    "POST",
+    { expectedRound },
+    { "X-Request-Id": requestId },
+  );
+  return decodeGrabResponse(response);
+}
+
+/** 查询同一 requestId 的持久结果：202/网络失败后的恢复入口 */
+export async function grabRequest(errandId: string, requestId: string): Promise<GrabHttpResult> {
+  const response = await sendAuthorized(`/api/errands/${errandId}/grab-requests/${encodeURIComponent(requestId)}`);
+  return decodeGrabResponse(response);
+}
+
+/**
+ * 用显式 token 发并发抢单 POST。
+ *
+ * 任务广场的「双人同时抢单」演示要在同一页面同时以两个演示身份发请求，
+ * 不能复用模块级的当前登录 token，因此这里显式传入凭据；401 刷新不适用
+ * （演示凭据刚签发，且每个请求独立）。
+ */
+export async function grabV2WithToken(
+  accessToken: string,
+  errandId: string,
+  expectedRound: number,
+  requestId: string,
+): Promise<GrabHttpResult> {
+  const response = await fetchWithTimeout(`/api/errands/${errandId}/grab-v2`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+      "X-Request-Id": requestId,
+    },
+    body: JSON.stringify({ expectedRound }),
+  });
+  return decodeGrabResponse(response);
 }
 
 // ── 任务 ──────────────────────────────────────────────
@@ -432,10 +521,9 @@ export const api = {
     request<{ errandId: string; status: string }>("/api/errands", "POST", req, {
       "X-Request-Id": requestId,
     }),
-  // 抢单：requestId 用于幂等，网络失败重试时复用同一个值
-  grab: (id: string, requestId?: string) =>
-    request<{ code: string; grabbed: boolean }>(`/api/errands/${id}/grab`, "POST", undefined,
-      requestId ? { "X-Request-Id": requestId } : undefined),
+  // 抢单 v2：低层返回 HTTP 状态 + Result body，业务分支集中在 grabRequests.ts
+  grabV2,
+  grabRequest,
   // settle/cancel 成功时 data 是 { result: 'SETTLED' | 'ALREADY_SETTLED' | ... }
   action: (id: string, name: "confirm" | "pickup" | "deliver" | "settle" | "cancel" | "dispute") =>
     request<{ result?: string } | null>(`/api/errands/${id}/${name}`, "POST"),

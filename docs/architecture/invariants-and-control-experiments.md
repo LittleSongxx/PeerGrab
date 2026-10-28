@@ -38,6 +38,8 @@ PeerGrab 的抢单同步链路是**四层**，不是五层：
 | INV-2 | 同一用户不重复占名额 | 同一 `(errand_id, round, runner_id)` 至多一条成功记录 | 由 `uk_errand_round_user` 与 Lua `SISMEMBER` 双重约束 |
 | INV-3 | 重复请求只生效一次 | 同一 `(errand_id, round, request_id)` 至多一条成功记录；重放只能返回同一 runner 的成功结果 | 跨轮不重放；跨用户不返回他人结果 |
 | INV-4 | 失败者有候选机会 | 任务 `LOCKED`/名额满时，失败请求进入候选队列并获得排队结果；候选被领取时有租约，不能被两个 worker 同时消费 | 这是活性/公平性约束，不是资金正确性约束 |
+| INV-5 | 同一 requestId 只有一个终态结果 | 同 `(campus_id, runner_id, request_id)` 至多一条成功请求行；重放返回同一结果，内容不一致拒绝 | 由 `grab_request.uk_grab_request_scope` 与 payload hash 保证 |
+| INV-6 | 崩溃后请求可收敛 | 租约过期的 PROCESSING 必然被恢复为 SUCCEEDED 或 EXPIRED；不得长期悬挂，也不得凭猜测成功 | 由 Worker 恢复扫描 + `grab_record` 复核保证 |
 
 ### 1.4 资金“三道幂等闸门”
 
@@ -72,6 +74,15 @@ PeerGrab 的抢单同步链路是**四层**，不是五层：
 | L3 | 托管闭环：`RELEASED/REFUNDED` 托管单有对应结算/退款流水；任务已结算/退款但托管仍 `HELD` 也是差异 | `findEscrowClosureDiffs()`；`ReconciliationJob.run` | `recon_diff(ESCROW_CLOSURE)` |
 
 `recon_diff` 有记录就说明代码有 bug，不是“允许的小误差”；同一天重复跑由 `uk_date_type_subject(check_date, check_type, subject)` 去重。`recon_diff` 是审计证据，**不参与保留期自动清理**。
+
+### 1.3.1 请求幂等与恢复（v2）
+
+| 约束 | 代码落点 | 验证 |
+| --- | --- | --- |
+| 请求唯一 | `grab_request` 唯一键、`GrabRequestUseCase.grab` 登记/重放 | `GrabRequestUseCaseTest`、`GrabRequestV2IT` |
+| 租约执行 | `reservation_token`、`GrabRequestStep.finish` 条件 UPDATE | `GrabRequestUseCaseTest` |
+| 恢复裁决 | `GrabRequestStep.reconcile`（`grab_record` 复核）、`GrabRequestRecoveryUseCase` | `GrabRequestStepTest`、`GrabRequestV2IT` |
+| 崩溃窗口 | 登记后/预占后/提交后三阶段恢复矩阵见 [grab-request-idempotency](grab-request-idempotency.md) | 故障注入（待补） |
 
 ## 2. 断言点、代码落点与验证测试
 

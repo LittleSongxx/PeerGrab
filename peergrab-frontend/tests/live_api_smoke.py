@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """PeerGrab 真实 API/MQ 验收（标准库 urllib + ThreadPoolExecutor）。
 
-覆盖：并发抢单恰好 1 人成功、发布/结算/退款/仲裁幂等、越权拒绝、
+覆盖：v2 持久幂等抢单（并发恰好 1 人成功、同 requestId 重放不二次占名额）、发布/结算/退款/仲裁幂等、越权拒绝、
 超时递补（空候选回退）与自动结算（MQ 主通道）。
 
 只能在可丢弃的隔离栈上运行（会创建任务并改变演示账户余额）。
@@ -86,6 +86,11 @@ class Client:
         _, payload = self._request(method, path, token=self.tokens[user_id], body=body, headers=headers)
         return payload
 
+    def call_status(self, user_id, method, path, body=None, headers=None):
+        """返回 (HTTP 状态, payload)：v2 抢单用 4xx/5xx 表达确定业务结果。"""
+        return self._request(method, path, token=self.tokens[user_id], body=body,
+                             headers=headers, expect_http_200=False)
+
     def ok(self, user_id, method, path, body=None, headers=None):
         payload = self.call(user_id, method, path, body, headers)
         if payload.get("code") != "OK":
@@ -152,10 +157,19 @@ def finish_task(client, errand_id, publisher=1001, runner=2001):
         pass
 
 
-def grab_once(client, user_id, errand_id, request_id):
-    payload = client.call(
-        user_id, "POST", f"/api/errands/{errand_id}/grab", headers={"X-Request-Id": request_id}
+def grab_once(client, user_id, errand_id, request_id, timeout_seconds=10):
+    """走 v2 持久幂等抢单端点；202 时用同一 requestId 查询终态（与前端恢复同口径）。"""
+    expected_round = int(client.detail(1001, errand_id)["round"])
+    _, payload = client.call_status(
+        user_id, "POST", f"/api/errands/{errand_id}/grab-v2",
+        {"expectedRound": expected_round}, {"X-Request-Id": request_id},
     )
+    deadline = time.time() + timeout_seconds
+    while payload.get("code") == "REQUEST_PROCESSING" and time.time() < deadline:
+        time.sleep(0.3)
+        _, payload = client.call_status(
+            user_id, "GET", f"/api/errands/{errand_id}/grab-requests/{request_id}"
+        )
     return payload.get("code"), payload.get("data") or {}
 
 
@@ -227,21 +241,29 @@ def main():
         assert len(wins) == 1, f"同单并发应恰好 1 人成功，实际 {results}"
         losers = [item for item in results if item[1] != "OK"]
         assert losers and losers[0][1] in ("SLOT_FULL", "GRAB_CONFLICT"), losers
+        for user, _, data in results:
+            assert data.get("requestId") == request_ids[user], (user, data)
         state["flow_task"] = errand_id
         state["winner"] = wins[0][0]
+        state["winner_request_id"] = request_ids[wins[0][0]]
         return f"winner={wins[0][0]} loser={losers[0][1]}"
 
     def grab_replay_safe():
         errand_id = state["flow_task"]
         winner = state["winner"]
-        replay_id = str(uuid.uuid4())
-        first = grab_once(client, winner, errand_id, replay_id)
-        second = grab_once(client, winner, errand_id, replay_id)
-        assert first[0] in ("OK", "ALREADY_GRABBED"), first
-        assert second[0] in ("OK", "GRAB_CONFLICT", "ALREADY_GRABBED", "SLOT_FULL"), second
+        original_id = state["winner_request_id"]
+        first = grab_once(client, winner, errand_id, original_id)
+        second = grab_once(client, winner, errand_id, original_id)
+        assert first[0] == "OK", first
+        assert second[0] == "OK", second
+        assert second[1].get("replayed") is True, second
+        assert first[1].get("requestId") == original_id == second[1].get("requestId"), (first, second)
+        # 换新 requestId 重抢已 LOCKED 的任务：v2 应返回确定失败且不二次占名额。
+        fresh = grab_once(client, winner, errand_id, str(uuid.uuid4()))
+        assert fresh[0] in ("SLOT_FULL", "ALREADY_GRABBED", "GRAB_CONFLICT"), fresh
         detail = client.detail(1001, errand_id)
         assert detail["slotTaken"] == 1, detail
-        return f"first={first[0]} replay={second[0]}"
+        return f"replay={second[0]} fresh={fresh[0]}"
 
     def lifecycle_and_settlement():
         errand_id = state["flow_task"]
@@ -283,7 +305,7 @@ def main():
     def arbitration_refund_and_permission():
         before_publisher = int(client.balance(1001))
         errand_id, _ = publish(client, reward=1200)
-        client.ok(2001, "POST", f"/api/errands/{errand_id}/grab", headers={"X-Request-Id": str(uuid.uuid4())})
+        grab_once(client, 2001, errand_id, str(uuid.uuid4()))
         client.ok(2001, "POST", f"/api/errands/{errand_id}/confirm")
         client.ok(2001, "POST", f"/api/errands/{errand_id}/dispute")
         unauthorized = client.call(1001, "POST", f"/api/errands/{errand_id}/arbitrate", {"favor": "PUBLISHER"})
@@ -330,7 +352,7 @@ def main():
     def auto_settle():
         errand_id, _ = publish(client, reward=900)
         before_publisher = int(client.balance(1001))
-        client.ok(2001, "POST", f"/api/errands/{errand_id}/grab", headers={"X-Request-Id": str(uuid.uuid4())})
+        grab_once(client, 2001, errand_id, str(uuid.uuid4()))
         client.ok(2001, "POST", f"/api/errands/{errand_id}/confirm")
         client.ok(2001, "POST", f"/api/errands/{errand_id}/pickup")
         client.ok(2001, "POST", f"/api/errands/{errand_id}/deliver")

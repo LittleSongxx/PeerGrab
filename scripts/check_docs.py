@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Validate PeerGrab engineering docs: relative links + single index.
 
-Local-only material (`docs/tutorial/`, `docs/assets/screenshots/`) is intentionally
+Local-only material (`docs/tutorial/`, `docs/assets/screenshots/`, `docs/面经/`) is intentionally
 not committed; it is ignored here so a clean checkout still passes.
 
 Usage: python3 scripts/check_docs.py
@@ -16,7 +16,7 @@ from pathlib import Path
 from urllib.parse import unquote
 
 ROOT = Path(__file__).resolve().parents[1]
-IGNORED_PREFIXES = ("tutorial/", "assets/screenshots/")
+IGNORED_PREFIXES = ("tutorial/", "assets/screenshots/", "面经/")
 
 PRIMARY_DOCS = [
     ROOT / "README.md",

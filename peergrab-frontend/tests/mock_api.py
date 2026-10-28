@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import threading
+import uuid
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -26,6 +27,25 @@ DEMO_PASSWORDS = {
     2001: "demo2001",
     2002: "demo2002",
     9001: "demo9001",
+}
+
+# v2 抢单的稳定业务码文案：与后端 ErrorCode 对齐，仅供 mock 响应使用。
+GRAB_MESSAGES = {
+    "INVALID_ARGUMENT": "请求参数无效",
+    "ERRAND_NOT_FOUND": "任务不存在",
+    "ROLE_NOT_ALLOWED": "当前角色不能参与抢单",
+    "SELF_GRAB_FORBIDDEN": "不能抢自己发布的任务",
+    "ALREADY_GRABBED": "你已抢过该任务",
+    "SLOT_FULL": "名额已满",
+    "ERRAND_NOT_GRABBABLE": "任务当前不可抢",
+    "STALE_VERSION": "任务数据已被并发修改",
+    "GRAB_CONFLICT": "并发冲突，抢单失败",
+    "GRAB_RATE_LIMITED": "当前任务过热，请稍后再试",
+    "DEPENDENCY_UNAVAILABLE": "依赖服务暂不可用，请稍后重试",
+    "REQUEST_PROCESSING": "抢单请求处理中",
+    "REQUEST_CONFLICT": "请求键与已有请求内容不匹配",
+    "REQUEST_NOT_FOUND": "抢单请求不存在",
+    "REQUEST_EXPIRED": "抢单请求已过期",
 }
 
 DEFAULT_VIEWPORT = {"width": 1440, "height": 900}
@@ -70,6 +90,8 @@ class MockState:
         self.refresh_tokens = {}
         self.tasks = {}
         self.publish_requests = {}
+        # v2 持久请求事实：(runnerId, requestId) -> 请求行；同键重放返回同一结果。
+        self.grab_requests = {}
         self.ledger = {}
         self.notifications = {}
         self.credit_events = {}
@@ -80,6 +102,10 @@ class MockState:
             "login_fail_once": False,
             "next_cursor_once": False,
             "force_401_wallet_once": False,
+            # v2 抢单夹具：202 轮询次数 / 网关非 JSON 5xx / 确定名额满失败
+            "grab_processing_polls": 0,
+            "grab_gateway_error_once": False,
+            "grab_slot_full_once": False,
         }
         self.holds = {}
         self.held = {}
@@ -317,6 +343,173 @@ class MockState:
             "read": False,
         })
 
+    # ---------- grab v2（持久幂等抢单请求）----------
+    def grab_result(self, request_id, status, code, grabbed=False, applied_round=None,
+                    replayed=False, retry_after=0, http_status=200):
+        return {
+            "requestId": request_id,
+            "status": status,
+            "code": code,
+            "grabbed": grabbed,
+            "appliedRound": applied_round,
+            "replayed": replayed,
+            "retryAfterMillis": retry_after,
+            "httpStatus": http_status,
+        }
+
+    def grab_fail(self, code, request_id, http_status, message=None):
+        data = self.grab_result(request_id, None, code, http_status=http_status)
+        return http_status, {"code": code,
+                             "message": message or GRAB_MESSAGES.get(code, code),
+                             "data": data}
+
+    def register_grab(self, viewer, errand_id, request_id, expected_round, status, code,
+                      http_status, grabbed=False, pending_polls=0):
+        row = {
+            "requestId": request_id,
+            "errandId": errand_id,
+            "runnerId": viewer,
+            "expectedRound": expected_round,
+            "status": status,
+            "code": code,
+            "httpStatus": http_status,
+            "grabbed": grabbed,
+            "appliedRound": expected_round if grabbed else None,
+            "pendingPolls": pending_polls,
+        }
+        self.grab_requests[(viewer, request_id)] = row
+        return row
+
+    def grab_row_response(self, row, replayed):
+        data = self.grab_result(row["requestId"], row["status"], row["code"],
+                                grabbed=row["grabbed"], applied_round=row["appliedRound"],
+                                replayed=replayed, http_status=row["httpStatus"])
+        if row["code"] == "OK":
+            return 200, {"code": "OK", "message": "OK", "data": data}
+        return row["httpStatus"], {"code": row["code"],
+                                   "message": GRAB_MESSAGES.get(row["code"], row["code"]),
+                                   "data": data}
+
+    def grab_processing_response(self, row):
+        data = self.grab_result(row["requestId"], "PROCESSING", "REQUEST_PROCESSING",
+                                replayed=True, retry_after=1000, http_status=202)
+        return 202, {"code": "REQUEST_PROCESSING",
+                     "message": GRAB_MESSAGES["REQUEST_PROCESSING"], "data": data}
+
+    def replay_grab(self, row):
+        if row["status"] == "PROCESSING":
+            return self.grab_processing_response(row)
+        return self.grab_row_response(row, replayed=True)
+
+    def apply_grab(self, task, viewer):
+        self.transition(task, "LOCKED", viewer)
+        task["grabberId"] = str(viewer)
+        task["slotTaken"] = 1
+
+    def resolve_processing_grab(self, row, task):
+        if task is None:
+            row.update(status="REJECTED", code="ERRAND_NOT_FOUND", httpStatus=404, grabbed=False)
+        elif row["expectedRound"] != task["round"]:
+            row.update(status="REJECTED", code="STALE_VERSION", httpStatus=409, grabbed=False)
+        elif task["status"] != "PUBLISHED":
+            row.update(status="REJECTED", code="SLOT_FULL", httpStatus=409, grabbed=False)
+        elif task["grabberId"] == str(row["runnerId"]):
+            row.update(status="REJECTED", code="ALREADY_GRABBED", httpStatus=409, grabbed=False)
+        else:
+            self.apply_grab(task, row["runnerId"])
+            row.update(status="SUCCEEDED", code="OK", httpStatus=200, grabbed=True,
+                       appliedRound=task["round"])
+        return row
+
+    @staticmethod
+    def canonical_uuid(value):
+        try:
+            return str(uuid.UUID(value)) == value
+        except (ValueError, AttributeError, TypeError):
+            return False
+
+    def grab_v2(self, task, errand_id, viewer, headers, body):
+        """POST /api/errands/{id}/grab-v2：先登记请求行，再按任务事实收敛终态。"""
+        request_id = (headers.get("x-request-id") or "").strip()
+        if not request_id:
+            return self.grab_fail("INVALID_ARGUMENT", "", 400, "X-Request-Id 必须为非空 UUID")
+        if not self.canonical_uuid(request_id):
+            return self.grab_fail("INVALID_ARGUMENT", request_id, 400, "X-Request-Id 必须为 UUID")
+        expected_round = 0
+        if isinstance(body, dict) and isinstance(body.get("expectedRound"), int):
+            expected_round = body["expectedRound"]
+        if expected_round < 0:
+            return self.grab_fail("INVALID_ARGUMENT", request_id, 400)
+
+        existing = self.grab_requests.get((viewer, request_id))
+        if existing is not None:
+            # 同一 requestId 只允许对应同一 (errand, round)，否则按契约返回 REQUEST_CONFLICT。
+            if existing["errandId"] != errand_id or existing["expectedRound"] != expected_round:
+                return self.grab_fail("REQUEST_CONFLICT", request_id, 409)
+            return self.replay_grab(existing)
+
+        if self.flags["grab_gateway_error_once"]:
+            # 模拟请求在登记前被网关打掉：返回非 Result 的 HTML 5xx，客户端应走恢复查询。
+            self.flags["grab_gateway_error_once"] = False
+            return 502, "<html><body>502 Bad Gateway</body></html>"
+
+        if task is None:
+            return self.grab_fail("ERRAND_NOT_FOUND", request_id, 404)
+        if self.flags["grab_slot_full_once"]:
+            self.flags["grab_slot_full_once"] = False
+            row = self.register_grab(viewer, errand_id, request_id, expected_round,
+                                     "REJECTED", "SLOT_FULL", 409)
+            return self.grab_row_response(row, replayed=False)
+        if viewer == 9001:
+            row = self.register_grab(viewer, errand_id, request_id, expected_round,
+                                     "REJECTED", "ROLE_NOT_ALLOWED", 403)
+            return self.grab_row_response(row, replayed=False)
+        if task["publisherId"] == str(viewer):
+            row = self.register_grab(viewer, errand_id, request_id, expected_round,
+                                     "REJECTED", "SELF_GRAB_FORBIDDEN", 403)
+            return self.grab_row_response(row, replayed=False)
+        if task["grabberId"] == str(viewer):
+            row = self.register_grab(viewer, errand_id, request_id, expected_round,
+                                     "REJECTED", "ALREADY_GRABBED", 409)
+            return self.grab_row_response(row, replayed=False)
+        if expected_round != task["round"]:
+            row = self.register_grab(viewer, errand_id, request_id, expected_round,
+                                     "REJECTED", "STALE_VERSION", 409)
+            return self.grab_row_response(row, replayed=False)
+        if task["status"] != "PUBLISHED":
+            code = "SLOT_FULL" if task["status"] == "LOCKED" else "ERRAND_NOT_GRABBABLE"
+            row = self.register_grab(viewer, errand_id, request_id, expected_round,
+                                     "REJECTED", code, 409)
+            return self.grab_row_response(row, replayed=False)
+        polls = int(self.flags["grab_processing_polls"] or 0)
+        if polls > 0:
+            # 首次返回 202；后续 GET 逐次减少 pendingPolls，到 0 时按任务事实收敛。
+            self.flags["grab_processing_polls"] = 0
+            row = self.register_grab(viewer, errand_id, request_id, expected_round,
+                                     "PROCESSING", "REQUEST_PROCESSING", 202,
+                                     pending_polls=polls)
+            return self.grab_processing_response(row)
+        self.apply_grab(task, viewer)
+        row = self.register_grab(viewer, errand_id, request_id, expected_round,
+                                 "SUCCEEDED", "OK", 200, grabbed=True)
+        return self.grab_row_response(row, replayed=False)
+
+    def grab_request_query(self, task, errand_id, viewer, request_id):
+        """GET /api/errands/{id}/grab-requests/{requestId}：202/网络失败后的恢复入口。"""
+        if not self.canonical_uuid(request_id):
+            return self.grab_fail("INVALID_ARGUMENT", request_id, 400, "X-Request-Id 必须为 UUID")
+        row = self.grab_requests.get((viewer, request_id))
+        if row is None or row["errandId"] != errand_id:
+            return self.grab_fail("REQUEST_NOT_FOUND", request_id, 404)
+        if row["status"] == "PROCESSING":
+            if row["pendingPolls"] > 0:
+                row["pendingPolls"] -= 1
+                if row["pendingPolls"] == 0:
+                    row = self.resolve_processing_grab(row, task)
+                    return self.grab_row_response(row, replayed=True)
+            return self.grab_processing_response(row)
+        return self.grab_row_response(row, replayed=True)
+
     # ---------- request dispatch ----------
     def handle(self, method, path, query, headers, body):
         gate = self.hold_for(method, path)
@@ -338,6 +531,8 @@ class MockState:
         if path == "/api/wallet":
             return "wallet"
         parts = [part for part in path.split("/") if part]
+        if len(parts) == 4 and parts[0] == "api" and parts[1] == "errands" and parts[3] == "grab-v2":
+            return "grab"
         if len(parts) == 3 and parts[0] == "api" and parts[1] == "errands":
             return "detail"
         return None
@@ -458,6 +653,10 @@ class MockState:
         if path.startswith("/api/errands/"):
             parts = [part for part in path.split("/") if part]
             errand_id = parts[2]
+            if len(parts) == 4 and parts[3] == "grab-v2" and method == "POST":
+                return self.grab_v2(self.tasks.get(errand_id), errand_id, viewer, headers, body)
+            if len(parts) == 5 and parts[3] == "grab-requests" and method == "GET":
+                return self.grab_request_query(self.tasks.get(errand_id), errand_id, viewer, parts[4])
             task = self.tasks.get(errand_id)
             if task is None:
                 return fail("ERRAND_NOT_FOUND", "任务不存在")
@@ -641,6 +840,10 @@ def _fulfill(route, request, state):
     if result is None:
         return
     status, payload = result
+    if isinstance(payload, str):
+        # 非 JSON 的网关错误页（模拟 5xx 被代理层截断），客户端应把它当"结果未知"。
+        route.fulfill(status=status, content_type="text/html; charset=utf-8", body=payload)
+        return
     route.fulfill(
         status=status,
         content_type="application/json; charset=utf-8",

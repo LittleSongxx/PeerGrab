@@ -54,6 +54,12 @@ peergrab:
   fund-outbox:
     retry-interval-ms: 2000
     max-run-ms: 10000
+  # P12：收敛 PROCESSING 抢单请求（业务已提交补成功 / 未提交回收占位）。
+  grab-request:
+    recovery-enabled: true
+    recovery-interval-ms: 10000
+    recovery-batch: 200
+
   credit:
     calibration-cron: "0 0 3 * * ?"
     calibration-batch-size: 1000

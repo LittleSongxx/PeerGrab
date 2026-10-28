@@ -1,13 +1,35 @@
-import { useRef, useState } from "react";
-import { api, ACTION_TEXT, BizError, TRANSIENT_ERROR_CODES } from "../api";
+import { useState } from "react";
+import { api, ACTION_TEXT, BizError } from "../api";
 import type { ErrandCard } from "../api";
-import { newRequestId } from "../utils/requestId";
+import { grabErrand } from "../grabRequests";
 import { showToast } from "../utils/toast";
 
 /** settle/cancel 的幂等成功结果：后端重复处理时 data.result 落在这两个值上 */
 const ALREADY_TEXT: Record<string, string> = {
   ALREADY_SETTLED: "该任务此前已完成结算，无需重复处理。",
   ALREADY_REFUNDED: "该任务此前已完成退款，无需重复处理。",
+};
+
+/**
+ * v2 抢单失败的固定提示：后端 code 是稳定契约，文案在前端集中维护；
+ * 未覆盖的 code 用后端 message 兜底。与 v1 的宽松重试不同，本分支契约里
+ * 409/429/503 都是确定性结果，提示用户刷新或稍后重新发起即可。
+ */
+const GRAB_FAILURE_HINT: Record<string, string> = {
+  SLOT_FULL: "名额已满，任务已被其他跑腿抢中",
+  ALREADY_GRABBED: "你已抢过该任务，请到任务详情确认接单",
+  STALE_VERSION: "任务状态已被更新，请刷新后重试",
+  REQUEST_CONFLICT: "本次请求与已有请求冲突，请重新发起",
+  REQUEST_EXPIRED: "本次抢单请求已过期，请重新发起",
+  REQUEST_NOT_FOUND: "抢单请求已失效，请重新发起",
+  GRAB_RATE_LIMITED: "当前抢单请求过多，请稍后再试",
+  DEPENDENCY_UNAVAILABLE: "服务繁忙，请稍后重试",
+  ERRAND_NOT_FOUND: "任务不存在或已被删除",
+  ERRAND_NOT_GRABBABLE: "任务当前不可抢",
+  SELF_GRAB_FORBIDDEN: "不能抢自己发布的任务",
+  ROLE_NOT_ALLOWED: "当前身份不能参与抢单",
+  CREDIT_TOO_LOW: "信用分不足，暂时不能抢单",
+  INVALID_ARGUMENT: "请求参数无效，请刷新后重试",
 };
 
 interface Props {
@@ -24,8 +46,6 @@ interface Props {
  */
 export default function ActionButtons({ card, onChanged, compact, onRequestArbitration }: Props) {
   const [busy, setBusy] = useState<string | null>(null);
-  // 抢单幂等键：网络失败（非 BizError）重试时复用，收到业务响应后清理
-  const pendingRequestId = useRef<Map<string, string>>(new Map());
 
   const run = async (action: string) => {
     if (action === "ARBITRATE") {
@@ -34,17 +54,21 @@ export default function ActionButtons({ card, onChanged, compact, onRequestArbit
       return;
     }
     setBusy(action);
-    const grabbing = action === "GRAB";
-    // 上一次是网络错误时复用同一个 requestId，服务端就不会把重试当成新请求
-    const requestId = grabbing
-      ? pendingRequestId.current.get(card.id) ?? newRequestId()
-      : undefined;
-    if (requestId) pendingRequestId.current.set(card.id, requestId);
     try {
-      if (grabbing) {
-        await api.grab(card.id, requestId);
-        pendingRequestId.current.delete(card.id);
-        showToast("success", "抢单成功，记得及时确认接单。");
+      if (action === "GRAB") {
+        // v2 客户端负责：请求键持久化 → POST → 202/网络失败用同一键查询恢复。
+        const outcome = await grabErrand(card.id, card.round);
+        if (outcome.kind === "success") {
+          showToast(
+            "success",
+            outcome.replayed ? "抢单成功（此前提交的请求已生效）。" : "抢单成功，记得及时确认接单。",
+          );
+        } else if (outcome.kind === "processing") {
+          showToast("info", outcome.message);
+        } else {
+          const hint = GRAB_FAILURE_HINT[outcome.code] ?? outcome.message;
+          showToast(outcome.retryable ? "info" : "error", `${hint}（${outcome.code}）`);
+        }
       } else {
         const result = await api.action(card.id, action.toLowerCase() as never);
         if (action === "SETTLE" || action === "CANCEL") {
@@ -56,14 +80,8 @@ export default function ActionButtons({ card, onChanged, compact, onRequestArbit
       onChanged();
     } catch (error) {
       if (error instanceof BizError) {
-        // 只有拿到确定的业务码才丢弃幂等键；网络/网关错误时服务端可能已经
-        // 处理成功，重试必须复用同一个 requestId，否则会被误报 ALREADY_GRABBED。
-        if (grabbing && !TRANSIENT_ERROR_CODES.has(error.code)) {
-          pendingRequestId.current.delete(card.id);
-        }
         showToast("error", `${error.message}（${error.code}）`);
       } else {
-        // 网络错误：保留 requestId 供下一次重试复用
         showToast("error", "网络错误，请稍后重试。");
       }
     } finally {

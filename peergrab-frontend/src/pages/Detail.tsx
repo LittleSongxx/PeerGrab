@@ -5,6 +5,7 @@ import { showToast } from '../utils/toast';
 import LoadingSkeleton from '../components/LoadingSkeleton';
 import type { ErrandCard, StatusChange } from '../api';
 import ActionButtons from '../components/ActionButtons';
+import { recoverPendingGrab } from '../grabRequests';
 import { subscribeWs } from '../ws';
 
 interface Props {
@@ -51,6 +52,8 @@ export default function Detail({ errandId }: Props) {
   const [arbitrationBusy, setArbitrationBusy] = useState(false);
   // 迟到响应守卫：切换到另一个任务后，旧任务的响应不能覆盖当前页面。
   const requestVersion = useRef(0);
+  // v2 抢单恢复每个任务只尝试一次，避免详情页 10s 轮询反复查询。
+  const grabRecoveryDone = useRef(false);
 
   const load = useCallback(() => {
     const version = ++requestVersion.current;
@@ -81,6 +84,7 @@ export default function Detail({ errandId }: Props) {
     setTimelineError(null);
     setActionNotice(null);
     setArbitrating(false);
+    grabRecoveryDone.current = false;
     requestVersion.current += 1;
     return () => { requestVersion.current += 1; };
   }, [errandId]);
@@ -101,6 +105,29 @@ export default function Detail({ errandId }: Props) {
     }
     return () => { unsub(); if (t) window.clearInterval(t); };
   }, [load, card?.status, errandId]);
+
+  // v2 抢单恢复：202/网络中断后用户重新进入详情页时，用持久化的同一 requestId
+  // 查询终态，避免出现「其实已抢中、页面却还显示可抢」的误导。
+  useEffect(() => {
+    if (grabRecoveryDone.current) return;
+    if (!card || card.status !== 'PUBLISHED' || !card.availableActions.includes('GRAB')) return;
+    grabRecoveryDone.current = true;
+    recoverPendingGrab(card.id, card.round)
+      .then((outcome) => {
+        if (!outcome) return;
+        if (outcome.kind === 'success') {
+          showToast('success', '上次抢单已成功，正在刷新任务状态。');
+          load();
+        } else if (outcome.kind === 'failure') {
+          showToast('error', `${outcome.message}（${outcome.code}）`);
+          load();
+        }
+        // processing：预算内仍未确定，持久键保留给下一次恢复。
+      })
+      .catch(() => {
+        // 恢复查询失败不阻断详情加载；用户手动抢单时会复用同一 requestId 再次收敛。
+      });
+  }, [card, load]);
 
   const arbitrate = async (favor: 'RUNNER' | 'PUBLISHER') => {
     setArbitrationBusy(true);

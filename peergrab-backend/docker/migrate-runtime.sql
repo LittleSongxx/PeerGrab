@@ -244,7 +244,7 @@ CREATE TABLE IF NOT EXISTS runner_quota_lock (
   PRIMARY KEY (runner_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='跑腿在途额度事务锁';
 
--- 切换生产鉴权到 JWT 前执行。旧 Redis Session/refresh 无法安全迁入，用户须重新登录。
+-- 切换生产鉴权到 JWT 前执行。旧 Redis Session/refresh 无法安全迁移，用户须重新登录。
 CREATE TABLE IF NOT EXISTS auth_token_session (
   session_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   user_id BIGINT NOT NULL,

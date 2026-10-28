@@ -266,7 +266,7 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 
 **验证与数字**
 
-- README 当前口径：`mvn -Dpeergrab.it=true test` 合计 **318 项、0 失败、0 错误、0 跳过，其中 80 项集成测试真实执行**；另验证 API/Worker readiness、保留期 SQL、迁移脚本幂等性。
+- P10 当期的 README 口径：`mvn -Dpeergrab.it=true test` 合计 318 项、0 失败、0 错误、0 跳过，其中 80 项集成测试真实执行；另验证 API/Worker readiness、保留期 SQL、迁移脚本幂等性。P12 后的当前口径见进度快照。
 - 第二轮记录为 **289 项、0 失败/0 跳过**；第一轮分析报告记录为 **267 项、1 跳过（73 项 IT）**；更早的 2026-09-25 冒烟为 141 项、2026-09-27 上线为 214 项、2026-09-28 为 223 项。这些是不同时间点的快照，不是互相矛盾。
 - 旧库升级路径：用改动前 `init.sql` 建库 → 执行两个迁移脚本 → 全量 289 项测试通过，校验 `transfer_count`、9001 账户、5 个新索引。
 - 代码基线 `c73389e`（含 P11 `9a8159d`）**没有在 README 中声明已部署**；生产仍记录为 `5ace500`。
@@ -295,6 +295,34 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 - 迁移脚本的幂等与预检查（共享 `-1` 户 `available = SUM(候选 HELD amount)`、重复执行 no-op）已在本机旧共享户 fixture 上手工演练：2 个 HELD 单迁移成功，第二次执行 no-op，迁移后 L1 借贷差为 0、系统户 L2 快照差为 0；该演练未纳入自动化 IT。
 - 单测/IT 已适配每单账户（新增账户拓扑测试；迁移脚本为手工 fixture 验证）；新模型 S4-a 本机 IT（500 个不同任务、64 工作线程、单轮）观测约 118–119 TPS，但仍不是 ECS 稳态或容量承诺。P3/P9 记录的 32–39 TPS 是共享系统户时期口径，不能当新模型收益证据。
 - 测试计数以 README 最终口径为准，本节不新造数字。
+
+### P12：2026-10 持久幂等抢单请求（grab-request v2）
+
+**交付内容**
+
+- 新增 `grab_request` 表：requestId 唯一作用域、payload hash、expectedRound/baseVersion、
+  reservation token 与 30s 租约、持久结果列；新库在 `init.sql`、旧库用 `migrate-grab-request-v2.sql` 建表。
+- 新增 `POST /api/errands/{id}/grab-v2`（Header `X-Request-Id`，Body `expectedRound`）与
+  `GET /api/errands/{id}/grab-requests/{requestId}`：200/202/409/429/503 语义，终态可重放。
+- 应用层 `GrabRequestUseCase` 复用既有 `GrabErrandUseCase`（四层防护/DB CAS/候选队列/超时消息不变），
+  在其外层做登记、租约、终态写回；`GrabCommitSideEffects` 统一补跑超时消息/缓存失效/实时通知。
+- Worker 新增 `GrabRequestRecoveryJob`：扫描租约过期的 PROCESSING，按 `grab_record` 复核收敛为
+  SUCCEEDED（补副作用）或 EXPIRED（清理任务仍 PUBLISHED 时的陈旧 Redis 快照）。
+- v1 `/grab` 保留，可灰度回滚；配置项见 [config-reference](../architecture/config-reference.md)。
+
+**关键取舍**
+
+- **数据库是请求事实，Redis 仍是提示**：没有引入新的分布式事务；Redis 预占、DB CAS 与唯一索引的角色不变。
+- **同步执行 + 202 兜底**：首次请求通常同步返回确定结果；只有结果未知（租约内未完成/崩溃/并发重放）才返回 202，避免把抢单变成纯异步任务。
+- **不新增 repair-task 表**：恢复只做“请求收敛 + 丢弃陈旧快照”两个动作，足以保证正确性；复杂补偿等真正需要时再加。
+- **429/503 语义收紧**：确定失败也持久化，客户端应换新 requestId，不再复用旧 ID；这与 v1 的宽松重试不同，需前端同步。
+
+**验证**
+
+- 新增 `GrabRequestUseCaseTest`、`GrabRequestStepTest` 与 `GrabRequestV2IT`；IT 需隔离 MySQL/Redis，覆盖
+  同 ID 单事实、换轮次冲突、失败重放、提交恢复、过期回收。
+- 压测沿用 S1/S2/S4；故障注入计划：在 Redis 预占后/DB 提交后强杀 API，验证恢复扫描收敛。
+- 2026-10-28 隔离 MySQL/Redis 全量运行：`mvn -B -ntp -Dpeergrab.it=true test` 合计 **332 项、0 失败、0 错误、0 跳过，其中 85 项 IT 真实执行**（32 个 IT 报表文件）；迁移脚本 `migrate-grab-request-v2.sql` 已在旧库上执行并验证幂等。
 
 ## 5. 基础设施替换指引
 
@@ -443,7 +471,7 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 | 代码基线 | `c73389e`（2026-10-22；之后仅文档修订） | `git log --oneline -- peergrab-backend`（最近代码提交） |
 | 工作区 | 干净（`git status --short` 无输出） | `git status --short` |
 | 账户拓扑 | 每单 `ESCROW`/`COMMISSION`（`owner_id=errandId`），`ensureAccount` 幂等开户；旧 `-1`/`-2` 仅作历史/迁移数据；已提交 `9a8159d` | `WalletRepository`、`PublishErrandUseCase`、`Settle/Refund/Arbitrate`、`docker/init.sql`；[ADR](../architecture/wallet-account-topology.md) |
-| 后端测试 | **318 项、0 失败、0 错误、0 跳过；80 项 IT 真实执行** | [README](../../README.md) |
+| 后端测试 | **332 项、0 失败、0 错误、0 跳过；85 项 IT 真实执行**（2026-10-28） | [README](../../README.md) |
 | 前端构建 | `npm run build` 通过 | 分析报告 §7；README 上线记录 |
 | 生产版本 | `5ace500`（2026-09-28 部署；当前代码基线未部署） | [后端 README](../../peergrab-backend/README.md) |
 | 当前代码基线是否上线 | README 未声明 `c73389e` 已部署 | README 上线段落 |
@@ -459,7 +487,8 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 - **223**：2026-09-28 优化版。
 - **267 / 1 跳过 / 73 IT**：分析报告 §0 的实跑快照。
 - **289 / 0 跳过**：第二轮审计后的快照（§9.4）。
-- **318 / 80 IT**：2026-10-22 当前口径（新增每单账户相关测试）；更早的 308/78 IT 为第三轮审计后口径。
+- **318 / 80 IT**：2026-10-22 P11 口径（新增每单账户相关测试）；更早的 308/78 IT 为第三轮审计后口径。
+- **332 / 85 IT**：2026-10-28 P12 口径（新增持久幂等抢单 v2：9 项单测 + 5 项 IT）；与上一行不同代码与测试集，不能拿来算“测试增长”。
 
 这些数字对应不同代码与测试集，不能拿来算“测试增长”或“覆盖率提升”。
 
