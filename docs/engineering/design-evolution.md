@@ -497,13 +497,13 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 
 | 项 | 当前状态 | 证据 |
 | --- | --- | --- |
-| 代码基线 | `c73389e`（2026-10-22；之后仅文档修订） | `git log --oneline -- peergrab-backend`（最近代码提交） |
+| 代码基线 | `ac1117b`（2026-10-28；P12/P13 + 交付前审查补强，之后仅文档修订） | `git log --oneline -- peergrab-backend`（最近代码提交） |
 | 工作区 | 干净（`git status --short` 无输出） | `git status --short` |
 | 账户拓扑 | 每单 `ESCROW`/`COMMISSION`（`owner_id=errandId`），`ensureAccount` 幂等开户；旧 `-1`/`-2` 仅作历史/迁移数据；已提交 `9a8159d` | `WalletRepository`、`PublishErrandUseCase`、`Settle/Refund/Arbitrate`、`docker/init.sql`；[ADR](../architecture/wallet-account-topology.md) |
 | 后端测试 | **350 项、0 失败、0 错误、0 跳过；93 项 IT 真实执行（34 个 IT 报表文件）**（2026-10-28，含审查补强） | [README](../../README.md) |
 | 前端构建 | `npm run build` 通过 | 分析报告 §7；README 上线记录 |
 | 生产版本 | `5ace500`（2026-09-28 部署；当前代码基线未部署） | [后端 README](../../peergrab-backend/README.md) |
-| 当前代码基线是否上线 | README 未声明 `c73389e` 已部署 | README 上线段落 |
+| 当前代码基线是否上线 | README 未声明 `ac1117b` 已部署 | README 上线段落 |
 | HTTP 压测工具 | JMeter 5.6.3，7 个现行 JMX | [JMeter 入口](../../peergrab-backend/bench/jmeter/README.md) |
 | S5 到期测量 | 专用 Java 探针，无 HTTP 替代物 | [S5 说明](../../peergrab-backend/bench/S5_TIMELINE.md) |
 | 可观测 | Prometheus/Grafana overlay + 11 条告警；无 tracing/日志聚合/Alertmanager | [后端 README](../../peergrab-backend/README.md) |
