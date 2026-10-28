@@ -167,6 +167,8 @@ python3 tests/ui_smoke.py --dist dist
 # 真实浏览器链路 / 真实 API+MQ（只连可丢弃隔离栈）
 python3 tests/live_smoke.py --base http://127.0.0.1:25173 --api-base http://127.0.0.1:28080
 python3 tests/live_api_smoke.py --base http://127.0.0.1:28080 --timeout-flow --auto-settle-flow
+# 持久幂等抢单 v2 真实栈验收：发布/抢单/重放/查询/落败/限流
+python3 peergrab-backend/bench/scripts/verify_grab_v2_live.py --base http://127.0.0.1:28080
 ```
 
 当前基线：**342 项后端测试，0 失败、0 错误、0 跳过；其中 88 项 IT 真实执行**（2026-10-28，含持久幂等抢单 v2 与边缘加固新增用例）。测试数量由 [`tools/summarize_tests.py`](peergrab-backend/tools/summarize_tests.py) 从同一批 surefire 报表汇总，CI 使用同一口径。

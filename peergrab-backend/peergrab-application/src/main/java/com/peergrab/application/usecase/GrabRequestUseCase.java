@@ -77,15 +77,6 @@ public class GrabRequestUseCase {
         if (!valid(errandId, runnerId, requestId, expectedRound)) {
             return response(ErrorCode.INVALID_ARGUMENT, requestId, 400);
         }
-        // 可信跑腿身份的共享预算：每次 HTTP 重试（含同 requestId 重放）都计费。
-        // 放在任务读取与请求登记之前，避免过热请求先消耗 DB/Redis 再被拒绝。
-        RunnerRateLimiterPort.Decision limit = runnerLimiter.checkGrab(runnerId, errandId);
-        if (limit.status() == RunnerRateLimiterPort.Status.LIMITED) {
-            return response(ErrorCode.GRAB_RATE_LIMITED, requestId, 429, limit.retryAfterMillis());
-        }
-        if (limit.status() == RunnerRateLimiterPort.Status.UNAVAILABLE) {
-            return response(ErrorCode.DEPENDENCY_UNAVAILABLE, requestId, 503);
-        }
         Errand errand = errands.findById(errandId).orElse(null);
         if (errand == null) {
             return response(ErrorCode.ERRAND_NOT_FOUND, requestId, 404);
@@ -93,7 +84,24 @@ public class GrabRequestUseCase {
         String hash = fingerprint(errandId, expectedRound);
         var existing = requests.find(errand.campusId(), runnerId, requestId);
         if (existing.isPresent()) {
+            // 已完成请求的幂等重放优先于抢单预算：否则客户端在响应丢失后重试，
+            // 可能因为预算耗尽拿不到本已确定的结果。重放本身仍受查询预算约束。
+            RunnerRateLimiterPort.Decision replayLimit = runnerLimiter.checkQuery(runnerId);
+            if (replayLimit.status() == RunnerRateLimiterPort.Status.LIMITED) {
+                return response(ErrorCode.GRAB_RATE_LIMITED, requestId, 429, replayLimit.retryAfterMillis());
+            }
+            if (replayLimit.status() == RunnerRateLimiterPort.Status.UNAVAILABLE) {
+                return response(ErrorCode.DEPENDENCY_UNAVAILABLE, requestId, 503);
+            }
             return replay(existing.get(), errandId, hash);
+        }
+        // 新尝试才消耗抢单预算；放在任务读取之后、请求登记之前，避免过热请求写库。
+        RunnerRateLimiterPort.Decision limit = runnerLimiter.checkGrab(runnerId, errandId);
+        if (limit.status() == RunnerRateLimiterPort.Status.LIMITED) {
+            return response(ErrorCode.GRAB_RATE_LIMITED, requestId, 429, limit.retryAfterMillis());
+        }
+        if (limit.status() == RunnerRateLimiterPort.Status.UNAVAILABLE) {
+            return response(ErrorCode.DEPENDENCY_UNAVAILABLE, requestId, 503);
         }
         // 登记发生在 Redis 占位前，必须先限制整条 DB 编排并发量，避免把连接池打满后
         // 连恢复查询都拿不到连接。满载返回 503，客户端保留原 ID 重试。

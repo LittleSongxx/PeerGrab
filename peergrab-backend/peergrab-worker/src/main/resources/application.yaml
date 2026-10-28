@@ -2,7 +2,7 @@ spring:
   application:
     name: peergrab-worker
   datasource:
-    url: jdbc:mysql://127.0.0.1:3307/peer_grab?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai
+    url: jdbc:mysql://${PEERGRAB_DB_HOST:127.0.0.1}:${PEERGRAB_DB_PORT:3307}/${PEERGRAB_DB_NAME:peer_grab}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai
     username: root
     password: ${PEERGRAB_MYSQL_PASSWORD:peergrab123456}
     hikari:
@@ -10,8 +10,9 @@ spring:
       minimum-idle: 2
   data:
     redis:
-      host: 127.0.0.1
-      port: 6380
+      host: ${PEERGRAB_REDIS_HOST:127.0.0.1}
+      port: ${PEERGRAB_REDIS_PORT:6380}
+      database: ${PEERGRAB_REDIS_DATABASE:0}
       timeout: 500ms
 
 peergrab:

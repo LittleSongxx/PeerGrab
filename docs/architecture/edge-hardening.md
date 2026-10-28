@@ -70,6 +70,8 @@
   `GrabRequestUseCaseTest`（429/503/查询预算分支）。
 - 集成：`RunnerRateLimitIT`（跨任务桶共享、单任务桶独立、查询桶独立、Retry-After > 0）。
 - 全量 `mvn -B -ntp -Dpeergrab.it=true test` 在隔离 MySQL/Redis 上执行：**342 项、0 失败、0 错误、0 跳过，其中 88 项 IT 真实执行**（2026-10-28）。
+- 真实栈：`verify_grab_v2_live.py` 8 步全过（发布/抢中/重放/查询/落败/429）；前端 `live_api_smoke.py` 11/11 通过。
+- 调优记录：终态请求的重放优先于抢单预算（走查询桶），避免客户端响应丢失后因预算耗尽拿不到已确定结果；新尝试才消耗抢单桶。
 
 ## 6. 已知边界
 

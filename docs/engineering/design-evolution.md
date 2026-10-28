@@ -351,6 +351,7 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 - `RunnerRateLimitIT`：跨任务桶共享、单任务桶独立、查询桶独立、Retry-After > 0（真实 Redis）。
 - `InternalAuthInterceptorTest`：未配置/正确/错误/短 token 启动失败。
 - 2026-10-28 隔离 MySQL/Redis 全量运行：`mvn -B -ntp -Dpeergrab.it=true test` 合计 **342 项、0 失败、0 错误、0 跳过，其中 88 项 IT 真实执行**。
+- 真实栈联调（独立库 `peer_grab_live` + 独立 Redis DB）：`bench/scripts/verify_grab_v2_live.py` 8 步全过；前端 `live_api_smoke.py` 对同一 API 11/11 通过，证明 v2 幂等/限流在真实 HTTP 链路上的契约成立。
 
 ## 5. 基础设施替换指引
 
