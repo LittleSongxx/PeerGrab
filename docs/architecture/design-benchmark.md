@@ -209,6 +209,7 @@ INV-1 是硬约束，验收方式是"成功数严格等于名额数 + 数据库 
 | --- | --- | --- |
 | 前置 | `GrabErrandUseCase.grab` | requestId 校验 → `ActorRolePolicy.isArbitrator` → 任务存在 → 自抢拒绝 → 幂等回放 |
 | L1 限流 | `SentinelGrabRateLimiterAdapter`（或 `LocalGrabRateLimiterAdapter`） | 按 `errandId` 热点参数限流，默认 500/秒/实例，`grab.limit.*` |
+| 跑腿预算 | `RunnerRateLimiterPort` / `RedisRunnerRateLimiterAdapter` | 跨任务桶 2/s(burst 4)、单任务桶 0.5/s(burst 2)、查询桶 5/s(burst 10)；Lua 先检查后扣减，Redis 不可用返回 503 |
 | L2 资格 | `CreditRepository.scoreOf`、`ErrandQueryPort.countOngoingByRunner` | 信用分读后端 `credit_score`，客户端传分被忽略 |
 | L3 预占 | `RedisGrabSlotAdapter` + `RedisLuaConfig` | hash tag 同槽、requestId 幂等、名额守恒、同用户防重、pending 窗口 |
 | L4 终裁 | `GrabTransactionalStep.lockAndRecord` | `runner_quota_lock` → `casLockForRunner` → `ensureUserAccount` → `grab_record` → 状态日志 |
@@ -265,6 +266,7 @@ v2 只是把“请求生命周期”持久化。接口并存：v1 `/grab`、v2 `
 5. **候选队列容量与排序**：[待补充]。当前只有"时间戳 − 信用分×10ms"的启发式排序，没有压测过队列深度对递补时延的影响。
 6. **限流是单实例语义**：Sentinel 规则在进程内，多副本时总放行量按副本数放大；它保护单实例，不保护集群。
 7. **v2 与 v1 并存**：当前 `/grab` 与 `/grab-v2` 同时可用，切换期需要明确前端版本；禁止 v1/v2 写进程长期混跑，否则同一 requestId 的持久化位置不同、重放口径会分叉。
+8. **跑腿预算只覆盖 v2 入口**：跨任务/单任务/查询桶在 `GrabRequestUseCase` 内执行，v1 同步端点不在此预算内；切换完成后应删除 v1。限流维度是已认证 `runnerId`，来源 IP/路由预算留给 Nginx 层。
 
 ## 4. 链路 L2：超时递补与自动结算
 
@@ -480,6 +482,7 @@ flowchart TD
 | 演示登录 | `DemoLoginPolicy`、`LoginAttemptGuard` | 常量时间比较；失败按 IP+userId 限速（5 次/60 秒，锁 300 秒），仅可信代理解析 `X-Forwarded-For` |
 | 角色 | `ActorRolePolicy` | 仲裁员禁止发布/抢单；仲裁用例二次校验当事人 |
 | 实时推送 | `WsHandler`、`WsSessionRegistry`、`WsAuthHandshakeInterceptor`、`RedisFanoutRealtimeNotifier` | 握手校验 token + Origin 白名单；推送前复核会话；单用户 8 连接、单连接 5 条/秒；`1008` 鉴权失败 vs `1013` 限流 |
+| 内部端点 | `InternalAuthInterceptor` | 仲裁员 Bearer 之外可要求 `X-Internal-Token`（≥32 字节）；空配置不启用，Nginx 仍对 `/api/internal/` 返回 404 |
 
 边界：① JWT 实为有状态会话，每请求查 MySQL，MySQL 是鉴权热点；② 登录限速是进程内计数，多 API 副本时降级为"每副本限速"；③ 公开演示口令与 `9001` 仲裁员仅用于演示，生产必须关闭 demo。
 
@@ -578,7 +581,7 @@ stateDiagram-v2
 | Redis 故障读降级 | 暂停 Redis 容器后连续详情读 | 后端 README S6 | 250/250 成功，P95 2.013 秒 |
 | Broker 故障下资金正确性 | 暂停 Broker 时发起结算，比对 HTTP 结果与数据库资金事实 | 后端 README S6 | 结算已在数据库提交，但客户端 8 秒超时；另起新栈关闭延迟双删后约 0.095 秒返回（仅定位对照，非默认配置） |
 | 资金/一致性差异 | `recon_diff`、`sync_diff` 行数（目标恒为 0） | 各轮 S4 的 SQL 校验 | 各轮资金借贷差额、每单系统账户快照、托管闭环均为 0；`sync_diff` 正常为空 |
-| 后端测试门禁 | `mvn -Dpeergrab.it=true test` 的 surefire 汇总（隔离 MySQL/Redis） | 后端 README（2026-10） | 2026-10-28 为 332 项、0 失败、0 错误、0 跳过，其中 85 项集成测试真实执行；2026-10-22 为 318/80 IT；2026-09-28 为 223 项 |
+| 后端测试门禁 | `mvn -Dpeergrab.it=true test` 的 surefire 汇总（隔离 MySQL/Redis） | 后端 README（2026-10） | 2026-10-28（P2 边缘加固后）为 342 项、0 失败、0 错误、0 跳过，其中 88 项集成测试真实执行；同日 P12 为 332/85 IT；2026-10-22 为 318/80 IT；2026-09-28 为 223 项 |
 | 分片规则验证 | `peergrab-sharding-lab` 单测：任务共片、用户维度路由、生产 SQL 不按 `errand_id` 单查 | `peergrab-sharding-lab` | 规则层测试通过；分片后的容量、跨片事务表现 `[待补充]` |
 | 事务消息协议对照 | `peergrab-txmsg-lab` 的 6 个场景：半消息可见性、commit/rollback 幂等、三态回查、半消息失败短路 | `peergrab-txmsg-lab`（`TransactionMessageLabTest`） | 离线测试通过（`mvn -o -pl peergrab-txmsg-lab test`）；真实 Broker 对照 `[待补充]` |
 

@@ -17,7 +17,7 @@
   <img src="https://img.shields.io/badge/RocketMQ-5-D77310?style=flat-square" />
   <img src="https://img.shields.io/badge/React-18-61DAFB?style=flat-square&logo=react&logoColor=white" />
   <img src="https://img.shields.io/badge/Docker%20Compose-9%20services-2496ED?style=flat-square&logo=docker&logoColor=white" />
-  <img src="https://img.shields.io/badge/tests-332%20passed-2ea44f?style=flat-square" />
+  <img src="https://img.shields.io/badge/tests-342%20passed-2ea44f?style=flat-square" />
 </p>
 
 <p align="center">
@@ -82,6 +82,7 @@
 | **持久幂等抢单请求** | 抢单先落 `grab_request`（requestId、payload hash、租约、轮次），同键重放返回同一终态；崩溃后 Worker 按 `grab_record` 复核收敛为成功或过期，不靠猜。 |
 | **可靠异步** | 超时递补、自动结算、资金事件先与业务同事务写入本地消息表 / Outbox，再由 Worker 投递或扫描补偿；消费端幂等。 |
 | **缓存只加速** | 详情读使用 Cache Aside + 逻辑过期 + 互斥回填 + 布隆过滤防穿透；缓存不参与抢单与资金裁决，故障时回源或返回旧值。 |
+| **入口预算与内部凭证** | 可信跑腿跨任务/单任务/查询三个 Redis 令牌桶（跨副本共享，Redis 故障 503）；内部运维端点可选 `X-Internal-Token` 第二凭证。 |
 | **资金对账** | 后台检查借贷平衡、每单账户快照与托管闭环；结算/退款同一业务号只允许入账一次。 |
 
 ## 架构
@@ -168,7 +169,7 @@ python3 tests/live_smoke.py --base http://127.0.0.1:25173 --api-base http://127.
 python3 tests/live_api_smoke.py --base http://127.0.0.1:28080 --timeout-flow --auto-settle-flow
 ```
 
-当前基线：**332 项后端测试，0 失败、0 错误、0 跳过；其中 85 项 IT 真实执行**（2026-10-28，含持久幂等抢单 v2 新增用例）。测试数量由 [`tools/summarize_tests.py`](peergrab-backend/tools/summarize_tests.py) 从同一批 surefire 报表汇总，CI 使用同一口径。
+当前基线：**342 项后端测试，0 失败、0 错误、0 跳过；其中 88 项 IT 真实执行**（2026-10-28，含持久幂等抢单 v2 与边缘加固新增用例）。测试数量由 [`tools/summarize_tests.py`](peergrab-backend/tools/summarize_tests.py) 从同一批 surefire 报表汇总，CI 使用同一口径。
 
 ## 实测与边界
 

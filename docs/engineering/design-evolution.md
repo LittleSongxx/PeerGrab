@@ -324,6 +324,34 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 - 压测沿用 S1/S2/S4；故障注入计划：在 Redis 预占后/DB 提交后强杀 API，验证恢复扫描收敛。
 - 2026-10-28 隔离 MySQL/Redis 全量运行：`mvn -B -ntp -Dpeergrab.it=true test` 合计 **332 项、0 失败、0 错误、0 跳过，其中 85 项 IT 真实执行**（32 个 IT 报表文件）；迁移脚本 `migrate-grab-request-v2.sql` 已在旧库上执行并验证幂等。
 
+### P13：2026-10 边缘加固（跑腿双桶与内部端点凭证）
+
+**交付内容**
+
+- 新增 `RunnerRateLimiterPort` 与 `RedisRunnerRateLimiterAdapter`：跨任务桶（2/s，burst 4）、
+  单任务桶（0.5/s，burst 2）、查询桶（5/s，burst 10），统一 Lua 令牌桶、Redis TIME 高水位、
+  查询另带本机恢复预算；`GrabRequestUseCase` 的 grab/query 在持久请求登记前接入。
+- 新增 `InternalAuthInterceptor`：`/api/internal/**` 在仲裁员 Bearer 之外可要求
+  `X-Internal-Token`（`peergrab.auth.internal-token`，非空必须 ≥32 字节，空=不启用），
+  常量时间比较；失败计 `peergrab.internal.auth{outcome=rejected}`。
+- 配置、测试与文档：`edge-hardening.md`、config-reference、invariants 口径说明；
+  `RunnerRateLimitIT`、`InternalAuthInterceptorTest` 与 `GrabRequestUseCaseTest` 限流分支。
+
+**关键取舍**
+
+- **不新增网关进程**：限流与内部凭证并入 API 层，保持单 ECS + Nginx 部署不变；
+  网关级路由/IP 预算留给后续真正需要多服务边缘时再做。
+- **Redis 故障返回 503 而不是放行**：入口宁可短暂不可用，也不能把限流失效当成额度充足；
+  查询单独保留本机恢复预算，避免 202 请求永远拿不到结果。
+- **v1 入口不接入预算**：保留 `/grab` 的原始行为用于回滚；正式切换后删除 v1，避免两套入口不同限流语义。
+- **内部凭证是可选第二道**：空配置保持本地/CI/历史压测客户端兼容；生产必须配置并同时依赖 Nginx 404。
+
+**验证**
+
+- `RunnerRateLimitIT`：跨任务桶共享、单任务桶独立、查询桶独立、Retry-After > 0（真实 Redis）。
+- `InternalAuthInterceptorTest`：未配置/正确/错误/短 token 启动失败。
+- 2026-10-28 隔离 MySQL/Redis 全量运行：`mvn -B -ntp -Dpeergrab.it=true test` 合计 **342 项、0 失败、0 错误、0 跳过，其中 88 项 IT 真实执行**。
+
 ## 5. 基础设施替换指引
 
 ### 5.1 装配方式
@@ -471,7 +499,7 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 | 代码基线 | `c73389e`（2026-10-22；之后仅文档修订） | `git log --oneline -- peergrab-backend`（最近代码提交） |
 | 工作区 | 干净（`git status --short` 无输出） | `git status --short` |
 | 账户拓扑 | 每单 `ESCROW`/`COMMISSION`（`owner_id=errandId`），`ensureAccount` 幂等开户；旧 `-1`/`-2` 仅作历史/迁移数据；已提交 `9a8159d` | `WalletRepository`、`PublishErrandUseCase`、`Settle/Refund/Arbitrate`、`docker/init.sql`；[ADR](../architecture/wallet-account-topology.md) |
-| 后端测试 | **332 项、0 失败、0 错误、0 跳过；85 项 IT 真实执行**（2026-10-28） | [README](../../README.md) |
+| 后端测试 | **342 项、0 失败、0 错误、0 跳过；88 项 IT 真实执行**（2026-10-28） | [README](../../README.md) |
 | 前端构建 | `npm run build` 通过 | 分析报告 §7；README 上线记录 |
 | 生产版本 | `5ace500`（2026-09-28 部署；当前代码基线未部署） | [后端 README](../../peergrab-backend/README.md) |
 | 当前代码基线是否上线 | README 未声明 `c73389e` 已部署 | README 上线段落 |
@@ -489,6 +517,7 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 - **289 / 0 跳过**：第二轮审计后的快照（§9.4）。
 - **318 / 80 IT**：2026-10-22 P11 口径（新增每单账户相关测试）；更早的 308/78 IT 为第三轮审计后口径。
 - **332 / 85 IT**：2026-10-28 P12 口径（新增持久幂等抢单 v2：9 项单测 + 5 项 IT）；与上一行不同代码与测试集，不能拿来算“测试增长”。
+- **342 / 88 IT**：2026-10-28 P2 口径（新增跑腿双桶限流与内部端点凭证：7 项单测 + 3 项 IT）。
 
 这些数字对应不同代码与测试集，不能拿来算“测试增长”或“覆盖率提升”。
 
