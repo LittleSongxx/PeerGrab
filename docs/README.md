@@ -33,7 +33,7 @@
 | 后端版本 | `peergrab-backend/pom.xml`（`1.0.0-SNAPSHOT`，Maven 聚合根） | `mvn -B -ntp help:evaluate -Dexpression=project.version -q -DforceStdout` |
 | 前端版本 | `peergrab-frontend/package.json`（`1.0.0`） | `npm run build` 读同一文件 |
 | 当前测试数量（单测 + IT） | 同一条命令 `mvn -B -ntp -Dpeergrab.it=true clean test` + [summarize_tests.py](../peergrab-backend/tools/summarize_tests.py) | CI backend job 写入 step summary；`--strict --require-it` 门禁 |
-| 历史测试数字（214/223/298/308…） | 根 README「上线与实测」历史段落 | 标注日期与版本，不与当前口径混用 |
+| 历史测试数字（214/223/298/308/315…） | 根 README「上线与实测」历史段落 | 标注日期与版本，不与当前口径混用 |
 | 配置键与默认值 | [config-reference](architecture/config-reference.md) + 两份 `application.yaml` | `SharedConfigConsistencyTest` 校验共享键一致 |
 | 压测数字 | `peergrab-backend/bench/reports/peergrab-current/` + [ASSET_CATALOG](../peergrab-backend/bench/ASSET_CATALOG.md) | 报告必须带镜像/工具/路径/窗口/错误分母 |
 | 模块清单与运行包边界 | [design-benchmark](architecture/design-benchmark.md) §2 + 各模块 `pom.xml` | `mvn -B -ntp -pl ... test` 构建即校验 |

@@ -13,7 +13,7 @@
 
 | 项 | 结果 | 说明 |
 | --- | --- | --- |
-| 后端全量测试 | **315 项、0 失败、0 错误、0 跳过；81 项 IT 真实执行** | 隔离 MySQL/Redis；`summarize_tests.py --strict --require-it` |
+| 后端全量测试 | **315 项、0 失败、0 错误、0 跳过；81 项 IT 真实执行**（当次快照；当前口径 318 项/80 IT，以根 README 与最新 surefire 汇总为准） | 隔离 MySQL/Redis；`summarize_tests.py --strict --require-it` |
 | 新增每单账户 IT | 3 项通过 | 发布开户、结算/退款只动本任务账户、缺账户 fail-closed |
 | 钱包并发/幂等 IT | `PublishEscrowIT`、`AutoSettleBatchIT`、`SettlementIT`、`SettleConcurrencyIT`、`SettlementAccountAutoProvisionIT`、`WalletLedgerConcurrencyIT` 等通过 | 含 200/500 并发资金一致性与三层对账 |
 | S4-a 本机 IT | 500 个不同任务、64 工作线程、单轮，约 **118–119 TPS**（两轮观测） | 来自 `bench_run` 的 `IT/S4` 记录；S4-b 同单并发仍恰好一次成功 |

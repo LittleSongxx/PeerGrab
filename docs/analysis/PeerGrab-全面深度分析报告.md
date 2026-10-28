@@ -2,7 +2,7 @@
 
 > **历史审计注记（2026-10）**：本报告分析的是旧共享 `ESCROW(-1)`/`COMMISSION(-2)` 账户模型（HEAD `b1e6d57`）。2026-10 已改为每任务独立的托管户/佣金户，热点账户与结算锁竞争的当前结论以 [账户拓扑 ADR](../architecture/wallet-account-topology.md) 与最新设计基准为准；本报告保留为历史问题清单。
 
-> 分析对象：当前工作区（HEAD `b1e6d57` + 15 个未提交修改）  
+> 分析对象：历史快照（HEAD `b1e6d57` + 当时 15 个未提交修改；后续已在 §9/§10 修复，当前状态以根 README、[design-evolution](../engineering/design-evolution.md) 与代码为准）
 > 分析方式：全量源码阅读（258 个 Java 文件、18 个前端文件、SQL/Compose/CI/压测资产）、联网调研、单元测试与集成测试实跑、构建验证  
 > 结论口径：只评价代码与文档事实；公开演示定位下的已知限制与真正缺陷分开表述。
 
@@ -80,7 +80,7 @@
 - 资金事件 outbox：与账务同事务写 `fund_event_outbox`，worker 投递普通 Topic，双消费组（落库 / 实时推送），消费幂等靠 `notification(msg_key,user_id)` 唯一索引。
 
 ### 2.7 缓存体系
-Cache Aside + 逻辑过期（物理 TTL 约为逻辑 TTL 两倍）+ SET NX token 互斥重建 + 空值缓存 + TTL 抖动 + 可选多分片 + Redis 故障时 1 秒进程内兜底副本 + 布隆判否（当前工作区未提交改动已改为"判否短路 + 1% 抽样审计"）+ 提交后删除与延迟双删（MQ）+ 随机抽样一致性校验 job。身份相关的 `role/availableActions` 不进共享缓存，避免缓存串号。
+Cache Aside + 逻辑过期（物理 TTL 约为逻辑 TTL 两倍）+ SET NX token 互斥重建 + 空值缓存 + TTL 抖动 + 可选多分片 + Redis 故障时 1 秒进程内兜底副本 + 布隆判否（当时工作区未提交改动已改为"判否短路 + 1% 抽样审计"）+ 提交后删除与延迟双删（MQ）+ 随机抽样一致性校验 job。身份相关的 `role/availableActions` 不进共享缓存，避免缓存串号。
 
 ### 2.8 实时通知
 WebSocket（握手 query token + 浏览器 Origin 白名单）→ 每次推送前复核会话有效性（撤回即时生效）→ 本机连接推送 + Redis Pub/Sub 广播其它 API 副本（instanceId 防回环）→ 有界队列丢事件只降级不阻塞业务 → 前端 WS + 10/30 秒轮询双保险。
@@ -160,11 +160,11 @@ WebSocket（握手 query token + 浏览器 Origin 白名单）→ 每次推送�
 - 影响：客户端 bug/误操作即可造成资金裁决方向错误；请求体为 null 还会 NPE → 500。
 - 建议：严格枚举校验（`RUNNER|PUBLISHER`），非法返回 `INVALID_ARGUMENT`；对资金动作加二次确认/幂等 requestId。
 
-**H4. 布隆判否短路（当前未提交改动）的安全网与注释/README 不符，存在真实任务被判 404 的窗口**
-- 位置：`GetErrandDetailUseCase`（未提交改动开启 `bloom-negative` 短路）、`PublishErrandUseCase` afterCommit 的 `registerExisting` 失败仅 warn、`BloomRebuildJob.ensureReady`。
+**H4. 布隆判否短路（当时未提交改动；后续已修复，见 §9.1）的安全网与注释/README 不符，存在真实任务被判 404 的窗口**
+- 位置：`GetErrandDetailUseCase`（当时未提交改动开启 `bloom-negative` 短路）、`PublishErrandUseCase` afterCommit 的 `registerExisting` 失败仅 warn、`BloomRebuildJob.ensureReady`。
 - 机制：`BloomRebuildJob` **只在 `existenceIndexReady()==false` 时重建**（就绪后每 5 分钟直接 return），并不是注释所称的"每 5 分钟整体校准"；发布后 Redis 抖动导致布隆登记失败时，唯一自愈路径是读路径 1% 抽样审计 + 每 5 分钟随机抽 100 条的巡检，可能让真实任务在一段时间内被 99% 的详情请求判为 404（尤其冷门任务）。
 - 建议（三选一或组合）：布隆登记纳入本地消息表/outbox 重试；把 `bloom-rebuild` 改成真正的周期全量校准；对判否请求提高审计率或"回源一次后补登记"。
-- 备注：该改动在 git 中未提交，说明作者也在评估阶段；建议确认后再上线。
+- 备注：该改动在当时尚未提交，说明作者也在评估阶段；后续已在 §9.1 修复并合入。
 
 **H5. Broker 长故障时 worker 快调度池可能被同步 MQ 发送长期占用，拖慢超时/结算扫描**
 - 位置：`WorkerSchedulers.fastTaskScheduler`（池 3）、`LocalMessageRetryJob`、`FundEventOutboxJob`、`RocketMqDelayMessageAdapter`。
@@ -216,7 +216,7 @@ WebSocket（握手 query token + 浏览器 Origin 白名单）→ 每次推送�
 - **建表/索引规模化隐患**：`ORDER BY RAND()` 抽样、每 60s `SELECT DISTINCT campus_id FROM errand`、`listByRunner` 的 `DISTINCT` 子查询、对账 SQL 的相关子查询，在十万级以上都会变重（其中随机采样、校区列表与 `listByRunner` 已在 §9 修复，对账相关子查询保留并按校园量级设计）。
 - **驱动行为放宽校验**：`JdbcWalletRepository.applyAccountUpdates` 容忍 JDBC `SUCCESS_NO_INFO(-2)`，理论上会掩盖"版本 CAS 失败"（有对账兜底，但破坏了"锁定后必成功"的断言）。
 - **测试门禁**：本地 `mvn test` 会静默跳过约 70 个 IT（只有 CI 用 `-Dpeergrab.it=true` + 报告断言兜底），容易误判"全绿"；IT 依赖固定端口/常驻中间件，无 Testcontainers，环境耦合。
-- **仓库卫生**：`bench/runs/tools/apache-jmeter-5.6.3` 等压测工具与产物体量大；`架构图/`、`.zcodeignore` 未跟踪；当前工作区有 15 个未提交修改（Bloom 短路、缓存降级等），存在"线上镜像 / 仓库 / 工作区"三份状态不一致风险。
+- **仓库卫生**：`bench/runs/tools/apache-jmeter-5.6.3` 等压测工具与产物体量大；`架构图/`、`.zcodeignore` 未跟踪；分析时工作区有 15 个未提交修改（Bloom 短路、缓存降级等），存在"线上镜像 / 仓库 / 工作区"三份状态不一致风险。
 - **文案与实现一致性**：README 中"当前资金链路基于单 MySQL 本地事务""不是 SLA"等边界写得很好，但个别文案（如"缓存失效链路已闭环""全量重建每 5 分钟校准"）略高于实现，建议统一复核。
 
 ---

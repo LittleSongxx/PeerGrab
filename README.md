@@ -167,7 +167,7 @@ python3 tests/live_smoke.py --base http://127.0.0.1:25173 --api-base http://127.
 python3 tests/live_api_smoke.py --base http://127.0.0.1:28080 --timeout-flow --auto-settle-flow
 ```
 
-当前基线：**318 项后端测试，0 失败、0 错误、0 跳过；其中 81 项 IT 真实执行**。测试数量由 [`tools/summarize_tests.py`](peergrab-backend/tools/summarize_tests.py) 从同一批 surefire 报表汇总，CI 使用同一口径。
+当前基线：**318 项后端测试，0 失败、0 错误、0 跳过；其中 80 项 IT 真实执行**。测试数量由 [`tools/summarize_tests.py`](peergrab-backend/tools/summarize_tests.py) 从同一批 surefire 报表汇总，CI 使用同一口径。
 
 ## 实测与边界
 

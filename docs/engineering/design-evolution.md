@@ -4,7 +4,7 @@
 >
 > 口径：本文只写仓库里能核对到的代码、配置、提交与报告。**不新造性能数字**；引用到的数字都注明来源文件。无法确证“原始设计稿”的地方，只写落地事实与原因，不补写设计意图。
 >
-> 基线：Git `HEAD = 3be9723`（2026-10-19），工作区仍有未提交改动（前端、文档与 `txmsg-lab` 等）。仓库公开历史从 2026-09-26 的 `4e7729d` 开始；更早的 P1–P7 只能从源码注释、模块结构和文档修复轮次归纳，**不是官方路线图，也不能按本仓库提交时间排序**。
+> 基线：本文修订所基于的代码提交为 `c73389e`（2026-10-22；之后的文档修订不改变代码），工作区干净（`git status --short` 无输出）。仓库公开历史从 2026-09-26 的 `4e7729d` 开始；更早的 P1–P7 只能从源码注释、模块结构和文档修复轮次归纳，**不是官方路线图，也不能按本仓库提交时间排序**。
 
 ## 1. 文档定位：四份文档各回答什么
 
@@ -24,7 +24,7 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 
 运行形态是**模块化单体 + 双进程**：
 
-- 10 个 Maven 子模块（工作区当前 pom；`txmsg-lab` 尚未提交）：`shared`、`domain`、`application`、`infrastructure`、`presentation`、`bootstrap`、`worker` 进入运行包；`bench` 是压测客户端，`sharding-lab` 是离线分片实验，`txmsg-lab` 是事务消息协议仿真，三者都不进入 API/Worker。
+- 10 个 Maven 子模块（`peergrab-backend/pom.xml`；`txmsg-lab` 已提交）：`shared`、`domain`、`application`、`infrastructure`、`presentation`、`bootstrap`、`worker` 进入运行包；`bench` 是压测客户端，`sharding-lab` 是离线分片实验，`txmsg-lab` 是事务消息协议仿真，三者都不进入 API/Worker。
 - API（`peergrab-bootstrap`，8080）与 Worker（`peergrab-worker`，8082）复用 `application`/`domain`，只装配不同的适配器与调度器。
 - 单 MySQL 库承载任务、托管、账户、复式流水、本地消息、资金 outbox、通知与 JWT 会话；Redis 与 RocketMQ 都是可重建或可补偿的派生状态。
 
@@ -54,7 +54,7 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 
 ## 4. P1–P11：分期、取舍与验证
 
-> **分期来源说明**：P1–P7 的编号来自源码注释（例如 `GrabErrandUseCase` 写“P7 引入”、`GrabRecord` 写“P1 索引没带 round、P2 暴露”、`DelayTaskPolicy` 写“P2/P3/P4”、`ErrandQueryPort` 写“P6 改造计划”），但本仓库公开提交从 P8 前后才开始，无法用 `git log` 还原 P1–P7 的交付顺序。P8–P10 可按提交与报告逐项核对；P11 是 2026-10 的每单账户模型，当前只有工作区未提交改动、迁移脚本与 ADR 可核对，尚无独立提交与压测报告。下面的“验证”既引用当期报告，也引用今天仍可复跑的测试；两者会明确区分。
+> **分期来源说明**：P1–P7 的编号来自源码注释（例如 `GrabErrandUseCase` 写“P7 引入”、`GrabRecord` 写“P1 索引没带 round、P2 暴露”、`DelayTaskPolicy` 写“P2/P3/P4”、`ErrandQueryPort` 写“P6 改造计划”），但本仓库公开提交从 P8 前后才开始，无法用 `git log` 还原 P1–P7 的交付顺序。P8–P10 可按提交与报告逐项核对；P11 是 2026-10 的每单账户模型，已提交为 `9a8159d`，并有迁移脚本、ADR 与本机 IT 观测报告；尚无 ECS/批量结算独立压测。下面的“验证”既引用当期报告，也引用今天仍可复跑的测试；两者会明确区分。
 
 ### P1：骨架与发布托管
 
@@ -266,14 +266,14 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 
 **验证与数字**
 
-- README 当前口径：`mvn -Dpeergrab.it=true test` 合计 **318 项、0 失败、0 错误、0 跳过，其中 81 项集成测试真实执行**；另验证 API/Worker readiness、保留期 SQL、迁移脚本幂等性。
+- README 当前口径：`mvn -Dpeergrab.it=true test` 合计 **318 项、0 失败、0 错误、0 跳过，其中 80 项集成测试真实执行**；另验证 API/Worker readiness、保留期 SQL、迁移脚本幂等性。
 - 第二轮记录为 **289 项、0 失败/0 跳过**；第一轮分析报告记录为 **267 项、1 跳过（73 项 IT）**；更早的 2026-09-25 冒烟为 141 项、2026-09-27 上线为 214 项、2026-09-28 为 223 项。这些是不同时间点的快照，不是互相矛盾。
 - 旧库升级路径：用改动前 `init.sql` 建库 → 执行两个迁移脚本 → 全量 289 项测试通过，校验 `transfer_count`、9001 账户、5 个新索引。
-- 当前 HEAD `3be9723` 的修复**没有在 README 中声明已部署**；生产仍记录为 `5ace500`。
+- 代码基线 `c73389e`（含 P11 `9a8159d`）**没有在 README 中声明已部署**；生产仍记录为 `5ace500`。
 
 ### P11：2026-10 每单托管户/佣金户
 
-> 与 P1–P10 不同，P11 的改动**当前仍以工作区未提交改动存在**，尚无可引用的提交与压测报告；事实核对点是工作区代码、`init.sql`、迁移脚本与 ADR，而不是 `git log`。
+> P11 已提交为 `9a8159d`（2026-10-22），并有本机 IT 观测报告（`report-wallet-topology-local-20261022.md`）；尚未做 ECS/批量结算独立压测，事实核对以代码、迁移脚本、ADR 与报告为准。
 
 **交付内容**
 
@@ -291,7 +291,7 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 
 **验证与数字**
 
-- 代码可核对点（工作区）：运行代码不再有 `ESCROW_ACCOUNT_OWNER`/`COMMISSION_ACCOUNT_OWNER` 常量；`init.sql` 无固定系统户种子；发布/结算/退款/仲裁按 `errandId` 查账户。
+- 代码可核对点（`9a8159d`）：运行代码不再有 `ESCROW_ACCOUNT_OWNER`/`COMMISSION_ACCOUNT_OWNER` 常量；`init.sql` 无固定系统户种子；发布/结算/退款/仲裁按 `errandId` 查账户。
 - 迁移脚本的幂等与预检查（共享 `-1` 户 `available = SUM(候选 HELD amount)`、重复执行 no-op）已在本机旧共享户 fixture 上手工演练：2 个 HELD 单迁移成功，第二次执行 no-op，迁移后 L1 借贷差为 0、系统户 L2 快照差为 0；该演练未纳入自动化 IT。
 - 单测/IT 已适配每单账户（新增账户拓扑测试；迁移脚本为手工 fixture 验证）；新模型 S4-a 本机 IT（500 个不同任务、64 工作线程、单轮）观测约 118–119 TPS，但仍不是 ECS 稳态或容量承诺。P3/P9 记录的 32–39 TPS 是共享系统户时期口径，不能当新模型收益证据。
 - 测试计数以 README 最终口径为准，本节不新造数字。
@@ -440,13 +440,13 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 
 | 项 | 当前状态 | 证据 |
 | --- | --- | --- |
-| 代码基线 | `3be9723`（2026-10-19） | `git rev-parse --short HEAD` |
-| 工作区 | 有未提交改动：前端（`App.tsx`、`api.ts`、`ws.ts` 等）与 2026-10 每单账户模型（后端账户/用例/`init.sql`/迁移脚本） | `git status --short` |
-| 账户拓扑 | 每单 `ESCROW`/`COMMISSION`（`owner_id=errandId`），`ensureAccount` 幂等开户；旧 `-1`/`-2` 仅作历史/迁移数据；工作区未提交 | `WalletRepository`、`PublishErrandUseCase`、`Settle/Refund/Arbitrate`、`docker/init.sql`；[ADR](../architecture/wallet-account-topology.md) |
-| 后端测试 | **318 项、0 失败、0 错误、0 跳过；81 项 IT 真实执行** | [README](../../README.md) |
+| 代码基线 | `c73389e`（2026-10-22；之后仅文档修订） | `git log --oneline -- peergrab-backend`（最近代码提交） |
+| 工作区 | 干净（`git status --short` 无输出） | `git status --short` |
+| 账户拓扑 | 每单 `ESCROW`/`COMMISSION`（`owner_id=errandId`），`ensureAccount` 幂等开户；旧 `-1`/`-2` 仅作历史/迁移数据；已提交 `9a8159d` | `WalletRepository`、`PublishErrandUseCase`、`Settle/Refund/Arbitrate`、`docker/init.sql`；[ADR](../architecture/wallet-account-topology.md) |
+| 后端测试 | **318 项、0 失败、0 错误、0 跳过；80 项 IT 真实执行** | [README](../../README.md) |
 | 前端构建 | `npm run build` 通过 | 分析报告 §7；README 上线记录 |
-| 生产版本 | `5ace500`（2026-09-28 部署） | [后端 README](../../peergrab-backend/README.md) |
-| 当前 HEAD 是否上线 | README 未声明 `3be9723` 已部署 | README 上线段落 |
+| 生产版本 | `5ace500`（2026-09-28 部署；当前代码基线未部署） | [后端 README](../../peergrab-backend/README.md) |
+| 当前代码基线是否上线 | README 未声明 `c73389e` 已部署 | README 上线段落 |
 | HTTP 压测工具 | JMeter 5.6.3，7 个现行 JMX | [JMeter 入口](../../peergrab-backend/bench/jmeter/README.md) |
 | S5 到期测量 | 专用 Java 探针，无 HTTP 替代物 | [S5 说明](../../peergrab-backend/bench/S5_TIMELINE.md) |
 | 可观测 | Prometheus/Grafana overlay + 11 条告警；无 tracing/日志聚合/Alertmanager | [后端 README](../../peergrab-backend/README.md) |
@@ -459,7 +459,7 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 - **223**：2026-09-28 优化版。
 - **267 / 1 跳过 / 73 IT**：分析报告 §0 的实跑快照。
 - **289 / 0 跳过**：第二轮审计后的快照（§9.4）。
-- **318 / 81 IT**：2026-10-22 当前口径（新增每单账户相关测试）；更早的 308/78 IT 为第三轮审计后口径。
+- **318 / 80 IT**：2026-10-22 当前口径（新增每单账户相关测试）；更早的 308/78 IT 为第三轮审计后口径。
 
 这些数字对应不同代码与测试集，不能拿来算“测试增长”或“覆盖率提升”。
 
@@ -481,13 +481,13 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 ### 8.2 后续路线（按收益/风险排序）
 
 1. **先修 S6 默认配置的提交后阻塞**：把延迟双删/首轮超时消息全部改为有界后台投递（部分已做），用 Broker 暂停 + 持续结算复测，直到客户端不再超时。
-2. **结算热点专项（P11 已执行一半）**：2026-10 已把账务拓扑改为每单 `ESCROW`/`COMMISSION` 账户，并配套迁移、对账与资金校验；本机 IT 已观测新模型 S4-a 约 118–119 TPS（500 任务/64 线程、单轮）；剩余待办是在独立压测栈复测与长稳态，确认剩余瓶颈（同一用户钱包/批量页内竞争）与账户行增长的对账成本。
+2. **结算热点专项（P11 已实现，验证未完成）**：2026-10 已把账务拓扑改为每单 `ESCROW`/`COMMISSION` 账户，并配套迁移、对账与资金校验；本机 IT 已观测新模型 S4-a 约 118–119 TPS（500 任务/64 线程、单轮）；剩余待办是在独立压测栈复测与长稳态，确认剩余瓶颈（同一用户钱包/批量页内竞争）与账户行增长的对账成本。
 3. **长稳态与混合负载**：按 [多用户混合负载](../../peergrab-backend/bench/MIXED_WORKLOAD.md) 跑 30 分钟，补多游标页、多用户、读写混合；当前样例是“待执行方案”，不是已实测。
 4. **S6 连续故障窗口**：Broker 故障下持续结算 + outbox 积压/排空曲线；Redis 网络延迟与主从切换；MySQL 连接受限；Worker 强杀。
 5. **测试基础设施**：IT 仍依赖固定端口/常驻中间件，无 Testcontainers；本地 `mvn test` 会跳过 IT，必须靠 CI 的 `-Dpeergrab.it=true` 与报告断言。
 6. **可观测闭环**：tracing、日志聚合、Alertmanager；把“超卖计数/资金差异/到期未处理”做成可告警指标。
 7. **身份与风控**：真实用户表/角色服务、登录限速多实例化、设备/IP 风控；生产禁用 demo。
-8. **部署当前 HEAD**：`3be9723` 通过隔离测试，但 README 未声明已上线；上线前走独立发布窗口、迁移演练与回滚。
+8. **部署当前代码基线**：`c73389e` 通过隔离测试，但 README 未声明已上线；上线前走独立发布窗口、迁移演练与回滚。
 
 ### 8.3 不应该再出现的表述
 
