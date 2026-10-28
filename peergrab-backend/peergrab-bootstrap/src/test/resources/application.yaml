@@ -66,6 +66,15 @@ peergrab:
       # 并发正确性集成测试要压 Lua + DB CAS 本体，不让 P7 治理层提前拦流
       enabled: false
       per-second: 500
+    # P2：集成测试默认放宽跑腿双桶；限流专项 IT 用 @SpringBootTest(properties=...) 收紧。
+    runner-limit:
+      rate: 1000
+      burst: 100000
+      errand-rate: 1000
+      errand-burst: 100000
+      query-rate: 1000
+      query-burst: 100000
+      recovery-query-per-second: 1000
   credit:
     # 测试库被各测试类共享，跑腿的在途任务会跨测试累积，
     # 上限放宽到 1000 避免 L2 资格校验干扰无关测试（生产保持 5）

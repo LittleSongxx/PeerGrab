@@ -56,6 +56,8 @@ peergrab:
       password-2002: ${PEERGRAB_AUTH_DEMO_PASSWORD_2002:}
       password-9001: ${PEERGRAB_AUTH_DEMO_PASSWORD_9001:}
     jwt-secret: ${PEERGRAB_AUTH_JWT_SECRET:}
+    # P2：内部端点第二凭证；空值表示不启用（本地/CI 兼容），生产必须配置 ≥32 字节。
+    internal-token: ${PEERGRAB_INTERNAL_TOKEN:}
     session-ttl-minutes: 120
     refresh-ttl-minutes: 10080    # P6：JWT refresh token，默认 7 天
   settle:
@@ -84,6 +86,15 @@ peergrab:
       enabled: true             # P7：抢单 L1 热点限流
       per-second: 500           # 单实例、单任务每秒放行数，S2 阶梯加压后定参
       resource: peer_grab_grab
+    # P2：可信跑腿双桶限流（跨任务 + 单任务）；Redis 不可用时返回 503。
+    runner-limit:
+      rate: 2                 # 每秒补充令牌（跨任务）
+      burst: 4                # 桶容量
+      errand-rate: 0.5        # 单跑腿单任务每秒补充令牌
+      errand-burst: 2
+      query-rate: 5           # 结果查询独立预算
+      query-burst: 10
+      recovery-query-per-second: 10
 
   # P12：持久幂等抢单请求。v1 /grab 与 v2 /grab-v2 并存，可独立回滚。
   grab-request:

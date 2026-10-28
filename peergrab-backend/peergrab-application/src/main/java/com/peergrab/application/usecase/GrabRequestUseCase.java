@@ -6,6 +6,7 @@ import com.peergrab.domain.errand.ports.ErrandRepository;
 import com.peergrab.domain.grab.model.GrabRequest;
 import com.peergrab.domain.grab.model.GrabRequestStatus;
 import com.peergrab.domain.grab.ports.GrabRequestRepository;
+import com.peergrab.domain.grab.ports.RunnerRateLimiterPort;
 import com.peergrab.shared.ErrorCode;
 import com.peergrab.shared.SnowflakeIdGenerator;
 import org.slf4j.Logger;
@@ -41,6 +42,7 @@ public class GrabRequestUseCase {
     private final GrabErrandUseCase delegate;
     private final GrabCommitSideEffects sideEffects;
     private final SnowflakeIdGenerator ids;
+    private final RunnerRateLimiterPort runnerLimiter;
     private final int leaseSeconds;
     private final Semaphore grabCapacity;
 
@@ -51,6 +53,7 @@ public class GrabRequestUseCase {
                               GrabErrandUseCase delegate,
                               GrabCommitSideEffects sideEffects,
                               SnowflakeIdGenerator ids,
+                              RunnerRateLimiterPort runnerLimiter,
                               @Value("${peergrab.grab-request.max-in-flight:10}") int maxInFlight,
                               @Value("${peergrab.grab-request.lease-seconds:30}") int leaseSeconds) {
         if (maxInFlight < 1 || leaseSeconds < 1) {
@@ -62,6 +65,7 @@ public class GrabRequestUseCase {
         this.delegate = delegate;
         this.sideEffects = sideEffects;
         this.ids = ids;
+        this.runnerLimiter = runnerLimiter;
         this.leaseSeconds = leaseSeconds;
         this.grabCapacity = new Semaphore(maxInFlight);
     }
@@ -72,6 +76,15 @@ public class GrabRequestUseCase {
     public Result grab(long errandId, long runnerId, String requestId, int expectedRound) {
         if (!valid(errandId, runnerId, requestId, expectedRound)) {
             return response(ErrorCode.INVALID_ARGUMENT, requestId, 400);
+        }
+        // 可信跑腿身份的共享预算：每次 HTTP 重试（含同 requestId 重放）都计费。
+        // 放在任务读取与请求登记之前，避免过热请求先消耗 DB/Redis 再被拒绝。
+        RunnerRateLimiterPort.Decision limit = runnerLimiter.checkGrab(runnerId, errandId);
+        if (limit.status() == RunnerRateLimiterPort.Status.LIMITED) {
+            return response(ErrorCode.GRAB_RATE_LIMITED, requestId, 429, limit.retryAfterMillis());
+        }
+        if (limit.status() == RunnerRateLimiterPort.Status.UNAVAILABLE) {
+            return response(ErrorCode.DEPENDENCY_UNAVAILABLE, requestId, 503);
         }
         Errand errand = errands.findById(errandId).orElse(null);
         if (errand == null) {
@@ -135,6 +148,14 @@ public class GrabRequestUseCase {
         if (!valid(errandId, runnerId, requestId, 0)) {
             return response(ErrorCode.INVALID_ARGUMENT, requestId, 400);
         }
+        // 查询也必须有界：否则 202/网络失败后的轮询可以放大 Redis/DB 压力。
+        RunnerRateLimiterPort.Decision queryLimit = runnerLimiter.checkQuery(runnerId);
+        if (queryLimit.status() == RunnerRateLimiterPort.Status.LIMITED) {
+            return response(ErrorCode.GRAB_RATE_LIMITED, requestId, 429, queryLimit.retryAfterMillis());
+        }
+        if (queryLimit.status() == RunnerRateLimiterPort.Status.UNAVAILABLE) {
+            return response(ErrorCode.DEPENDENCY_UNAVAILABLE, requestId, 503);
+        }
         Errand errand = errands.findById(errandId).orElse(null);
         if (errand == null) {
             return response(ErrorCode.ERRAND_NOT_FOUND, requestId, 404);
@@ -181,8 +202,12 @@ public class GrabRequestUseCase {
     }
 
     private static Result response(ErrorCode code, String requestId, int httpStatus) {
+        return response(code, requestId, httpStatus, httpStatus == 202 ? 1000 : 0);
+    }
+
+    private static Result response(ErrorCode code, String requestId, int httpStatus, long retryAfterMillis) {
         return new Result(requestId, httpStatus == 202 ? GrabRequestStatus.PROCESSING.name() : null,
-                code, false, null, false, httpStatus == 202 ? 1000 : 0, httpStatus);
+                code, false, null, false, retryAfterMillis, httpStatus);
     }
 
     private static ErrorCode parseCode(String code) {

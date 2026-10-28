@@ -6,6 +6,7 @@ import com.peergrab.domain.errand.ports.ErrandRepository;
 import com.peergrab.domain.grab.model.GrabRequest;
 import com.peergrab.domain.grab.model.GrabRequestStatus;
 import com.peergrab.domain.grab.ports.GrabRequestRepository;
+import com.peergrab.domain.grab.ports.RunnerRateLimiterPort;
 import com.peergrab.shared.ErrorCode;
 import com.peergrab.shared.SnowflakeIdGenerator;
 import org.junit.jupiter.api.BeforeEach;
@@ -35,6 +36,7 @@ class GrabRequestUseCaseTest {
     private GrabRequestStep step;
     private GrabErrandUseCase delegate;
     private GrabCommitSideEffects sideEffects;
+    private RunnerRateLimiterPort runnerLimiter;
     private GrabRequestUseCase useCase;
 
     @BeforeEach
@@ -44,8 +46,52 @@ class GrabRequestUseCaseTest {
         step = mock(GrabRequestStep.class);
         delegate = mock(GrabErrandUseCase.class);
         sideEffects = mock(GrabCommitSideEffects.class);
+        runnerLimiter = mock(RunnerRateLimiterPort.class);
+        when(runnerLimiter.checkGrab(anyLong(), anyLong())).thenReturn(RunnerRateLimiterPort.Decision.allowed());
+        when(runnerLimiter.checkQuery(anyLong())).thenReturn(RunnerRateLimiterPort.Decision.allowed());
         useCase = new GrabRequestUseCase(errands, requests, step, delegate, sideEffects,
-                new SnowflakeIdGenerator(1), 10, 30);
+                new SnowflakeIdGenerator(1), runnerLimiter, 10, 30);
+    }
+
+    @Test
+    @DisplayName("跑腿共享预算耗尽时返回 429 + Retry-After，不登记请求")
+    void grab_returns_rate_limited_before_registering() {
+        when(runnerLimiter.checkGrab(RUNNER_ID, ERRAND_ID))
+                .thenReturn(RunnerRateLimiterPort.Decision.limited(321));
+
+        var result = useCase.grab(ERRAND_ID, RUNNER_ID, REQUEST_ID, 0);
+
+        assertEquals(ErrorCode.GRAB_RATE_LIMITED, result.code());
+        assertEquals(429, result.httpStatus());
+        assertEquals(321, result.retryAfterMillis());
+        verify(requests, never()).find(anyLong(), anyLong(), anyString());
+        verify(step, never()).register(any());
+    }
+
+    @Test
+    @DisplayName("限流存储不可用时返回 503，不把故障当成额度充足")
+    void grab_returns_dependency_unavailable_when_limiter_down() {
+        when(runnerLimiter.checkGrab(RUNNER_ID, ERRAND_ID))
+                .thenReturn(RunnerRateLimiterPort.Decision.unavailable());
+
+        var result = useCase.grab(ERRAND_ID, RUNNER_ID, REQUEST_ID, 0);
+
+        assertEquals(ErrorCode.DEPENDENCY_UNAVAILABLE, result.code());
+        assertEquals(503, result.httpStatus());
+        verify(step, never()).register(any());
+    }
+
+    @Test
+    @DisplayName("查询同样受独立预算约束")
+    void query_returns_rate_limited() {
+        when(runnerLimiter.checkQuery(RUNNER_ID))
+                .thenReturn(RunnerRateLimiterPort.Decision.limited(500));
+
+        var result = useCase.query(ERRAND_ID, RUNNER_ID, REQUEST_ID);
+
+        assertEquals(ErrorCode.GRAB_RATE_LIMITED, result.code());
+        assertEquals(429, result.httpStatus());
+        assertEquals(500, result.retryAfterMillis());
     }
 
     @Test

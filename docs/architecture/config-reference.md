@@ -55,6 +55,7 @@
 | `peergrab.auth.mode` | `session`（未配置按 session） | 鉴权实现：`session`=Redis 会话（本机演示），`jwt`=MySQL 真值 JWT（生产 compose 显式设为 jwt） | 两者 |
 | `peergrab.auth.allow-header-identity` | `false` | 是否信任 `X-User-Id` 请求头身份；生产必须 false | API |
 | `peergrab.auth.jwt-secret` | 空 | JWT 签名密钥；jwt 模式要求至少 32 字节 | 两者 |
+| `peergrab.auth.internal-token` | 空 | 内部端点第二凭证（`X-Internal-Token`）；空=不启用，非空必须 ≥32 字节 | API |
 | `peergrab.auth.session-ttl-minutes` | `120` | access token / 会话有效期 | 两者 |
 | `peergrab.auth.refresh-ttl-minutes` | `10080` | refresh token 有效期（7 天） | 两者 |
 | `peergrab.auth.resolve-cache-ms` | `1000` | 每请求会话校验的本地正结果缓存；0 关闭；跨实例登出的最坏延迟 | 两者 |
@@ -149,6 +150,13 @@
 | `peergrab.grab.limit.enabled` | `true` | 抢单 L1 热点限流开关 | 两者 |
 | `peergrab.grab.limit.per-second` | `500` | 单实例单任务每秒放行数 | 两者 |
 | `peergrab.grab.limit.resource` | `peer_grab_grab` | Sentinel 资源名 | 两者 |
+| `peergrab.grab.runner-limit.rate` | `2` | 跨任务桶每秒补充令牌 | 两者 |
+| `peergrab.grab.runner-limit.burst` | `4` | 跨任务桶容量 | 两者 |
+| `peergrab.grab.runner-limit.errand-rate` | `0.5` | 单任务桶每秒补充令牌 | 两者 |
+| `peergrab.grab.runner-limit.errand-burst` | `2` | 单任务桶容量 | 两者 |
+| `peergrab.grab.runner-limit.query-rate` | `5` | 查询桶每秒补充令牌 | 两者 |
+| `peergrab.grab.runner-limit.query-burst` | `10` | 查询桶容量 | 两者 |
+| `peergrab.grab.runner-limit.recovery-query-per-second` | `10` | Redis 故障时本机查询恢复预算 | 两者 |
 | `peergrab.credit.min-score` | `40` | 抢单最低信用分 | 两者 |
 | `peergrab.credit.max-ongoing` | `5` | 单人在途任务上限 | 两者 |
 | `peergrab.credit.calibration-cron` | `0 0 3 * * ?` | 信用校准 cron（按容器 TZ 解释） | worker |

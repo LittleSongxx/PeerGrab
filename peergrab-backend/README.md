@@ -113,7 +113,7 @@ export PEERGRAB_TEST_DB_PASSWORD='<独立测试 MySQL 密码>'
 mvn -Dpeergrab.it=true test
 ```
 
-2026-09-27 的旧版在可丢弃 MySQL/Redis 上运行 **214 项后端测试，0 失败、0 跳过**；前端 `npm run build` 与后端 `mvn -DskipTests package` 通过。真实 RocketMQ 的普通 Topic 类型、发送和消费读回另经独立契约脚本验证。2026-09-28 优化版在全新隔离 MySQL/Redis 上运行 `mvn -Dpeergrab.it=true test`，按 Maven 各模块汇总 **223 项执行、0 失败、0 错误、0 跳过**；独立栈的 S1/S4/S5 运行验收见下文报告。2026-10-22 版本在隔离栈上运行 `mvn -B -ntp -Dpeergrab.it=true clean test` 合计 **318 项、0 失败、0 错误、0 跳过，其中 80 项集成测试真实执行**（更早的 308/298 项属于不同提交）。2026-10-28 当前版本新增持久幂等抢单 v2 后，同一命令在隔离 MySQL/Redis 上合计 **332 项、0 失败、0 错误、0 跳过，其中 85 项集成测试真实执行**；同时验证 API/Worker 运行时 readiness 与保留期 SQL。测试数量以同一条命令 + [`tools/summarize_tests.py`](tools/summarize_tests.py) 汇总为唯一口径，CI 的 backend job 会输出并校验该数字。
+2026-09-27 的旧版在可丢弃 MySQL/Redis 上运行 **214 项后端测试，0 失败、0 跳过**；前端 `npm run build` 与后端 `mvn -DskipTests package` 通过。真实 RocketMQ 的普通 Topic 类型、发送和消费读回另经独立契约脚本验证。2026-09-28 优化版在全新隔离 MySQL/Redis 上运行 `mvn -Dpeergrab.it=true test`，按 Maven 各模块汇总 **223 项执行、0 失败、0 错误、0 跳过**；独立栈的 S1/S4/S5 运行验收见下文报告。2026-10-22 版本在隔离栈上运行 `mvn -B -ntp -Dpeergrab.it=true clean test` 合计 **318 项、0 失败、0 错误、0 跳过，其中 80 项集成测试真实执行**（更早的 308/298 项属于不同提交）。2026-10-28 当前版本新增持久幂等抢单 v2 后，同一命令在隔离 MySQL/Redis 上合计 **332 项、0 失败、0 错误、0 跳过，其中 85 项集成测试真实执行**；P2 边缘加固（跑腿双桶限流 + 内部端点凭证）后同一命令为 **342 项、0 失败、0 错误、0 跳过，其中 88 项集成测试真实执行**；同时验证 API/Worker 运行时 readiness 与保留期 SQL。测试数量以同一条命令 + [`tools/summarize_tests.py`](tools/summarize_tests.py) 汇总为唯一口径，CI 的 backend job 会输出并校验该数字。
 
 在可丢弃的本地演示库上可运行 `python3 bench/scripts/smoke_e2e.py --env-file docker/.env`；脚本验证发布、抢单、结算、退款、仲裁和通知，**会创建任务并改变演示账户余额**。只读资金不变式检查可执行：
 
