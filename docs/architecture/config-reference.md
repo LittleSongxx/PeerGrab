@@ -18,6 +18,7 @@
   - `两者`：键由 `peergrab-application`/`peergrab-infrastructure` 读取，两进程都会装配；业务触发可能只在一侧（例如 `cache.check-sample-size` 由 worker 的校验任务调用）。
 - **yaml 对称保留**：API 的 yaml 也保留 `credit.calibration.*`、`settle.scan-*`、`cache.bloom-refresh-interval-ms` 等 worker 专用键，但 API 进程不读取；改行为只对 worker 生效。
 - **环境变量**按 Spring 宽松绑定映射，例如 `PEERGRAB_AUTH_MODE` 对应 `peergrab.auth.mode`。
+- **数据源/Redis 连接**由环境变量覆盖：`PEERGRAB_DB_HOST`（默认 `127.0.0.1`）、`PEERGRAB_DB_PORT`（`3307`）、`PEERGRAB_DB_NAME`（`peer_grab`）、`PEERGRAB_REDIS_HOST`（`127.0.0.1`）、`PEERGRAB_REDIS_PORT`（`6380`）、`PEERGRAB_REDIS_DATABASE`（`0`）。Compose 部署用 Spring 标准键 `SPRING_DATASOURCE_URL` / `SPRING_DATA_REDIS_*` 覆盖连接串，两者不要同时改出不一致的库。
 - **不在 Spring 配置里**的运行时项：容器时区、Redis `allkeys-lru`、compose 端口与卷，见[单机部署说明](../../peergrab-backend/docker/ECS_DEPLOY.md)。
 
 ## 共享键矩阵

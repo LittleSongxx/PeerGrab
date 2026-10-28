@@ -69,6 +69,12 @@ jobs:
             --base http://127.0.0.1:8080 \
             --timeout-flow --auto-settle-flow \
             --output peergrab-frontend/verification/live-ci
+      - name: Durable grab-request v2 live acceptance
+        run: |
+          python3 peergrab-backend/bench/scripts/verify_grab_v2_live.py \
+            --base http://127.0.0.1:8080 \
+            --password-1001 demo1001 --password-2001 demo2001 --password-2002 demo2002 \
+            --json-out peergrab-frontend/verification/live-ci/grab-v2-live-report.json
       - name: Live browser acceptance (four demo identities)
         run: |
           python3 peergrab-frontend/tests/live_smoke.py \

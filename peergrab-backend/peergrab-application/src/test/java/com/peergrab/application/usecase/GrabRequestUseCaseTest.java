@@ -56,6 +56,9 @@ class GrabRequestUseCaseTest {
     @Test
     @DisplayName("跑腿共享预算耗尽时返回 429 + Retry-After，不登记请求")
     void grab_returns_rate_limited_before_registering() {
+        Errand available = errand(ErrandStatus.PUBLISHED, 0, 0);
+        when(errands.findById(ERRAND_ID)).thenReturn(Optional.of(available));
+        when(requests.find(CAMPUS_ID, RUNNER_ID, REQUEST_ID)).thenReturn(Optional.empty());
         when(runnerLimiter.checkGrab(RUNNER_ID, ERRAND_ID))
                 .thenReturn(RunnerRateLimiterPort.Decision.limited(321));
 
@@ -64,13 +67,15 @@ class GrabRequestUseCaseTest {
         assertEquals(ErrorCode.GRAB_RATE_LIMITED, result.code());
         assertEquals(429, result.httpStatus());
         assertEquals(321, result.retryAfterMillis());
-        verify(requests, never()).find(anyLong(), anyLong(), anyString());
         verify(step, never()).register(any());
     }
 
     @Test
     @DisplayName("限流存储不可用时返回 503，不把故障当成额度充足")
     void grab_returns_dependency_unavailable_when_limiter_down() {
+        Errand available = errand(ErrandStatus.PUBLISHED, 0, 0);
+        when(errands.findById(ERRAND_ID)).thenReturn(Optional.of(available));
+        when(requests.find(CAMPUS_ID, RUNNER_ID, REQUEST_ID)).thenReturn(Optional.empty());
         when(runnerLimiter.checkGrab(RUNNER_ID, ERRAND_ID))
                 .thenReturn(RunnerRateLimiterPort.Decision.unavailable());
 

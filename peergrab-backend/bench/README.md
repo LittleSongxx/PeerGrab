@@ -68,6 +68,21 @@ python3 bench/scripts/lint_metrics.py bench/reports/peergrab-current/*.md
 两个工具都有离线单元测试，随 `benchmark-assets` CI 的
 `python3 -m unittest discover -s peergrab-backend/bench/scripts -p 'test_*.py'` 执行。
 
+## 持久幂等抢单 v2 真实栈验收
+
+`verify_grab_v2_live.py` 针对一个运行中的 API（演示登录开启）验证单元/IT 之外的端到端契约：
+发布 → `/grab-v2` 抢中 → 同 requestId 重放 `replayed=true` → 查询 `SUCCEEDED` →
+第二个跑腿 `SLOT_FULL` → 同跑腿重复尝试触发 429（`Retry-After`）。命令行：
+
+```bash
+python3 peergrab-backend/bench/scripts/verify_grab_v2_live.py \
+  --base http://127.0.0.1:28080 \
+  --password-1001 demo1001 --password-2001 demo2001 --password-2002 demo2002
+```
+
+脚本只做业务写入与只读查询，不清理数据；只在可丢弃演示库上运行。CI 的
+[`acceptance-live.yml`](../../.github/workflows/acceptance-live.yml) 在真实栈验收后追加该步骤。
+
 ## 证据与清理
 
 每轮记录业务镜像／提交、JMX 哈希、数据规模、用户或 Key 分布、采样窗口、目标和实际请求、P50／P95／P99、传输／HTTP／业务错误、客户端与服务器资源，以及名额或资金 SQL 校验。历史数字保留当时的版本和工具标签，失败轮与修正后的有效轮分开。私有归档、SHA-256、保留与清理规则见[评测资产目录](ASSET_CATALOG.md)；公开报告只包含脱敏汇总。
