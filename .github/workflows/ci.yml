@@ -180,6 +180,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Compile live acceptance script
+        run: python3 -m py_compile peergrab-backend/bench/scripts/verify_grab_v2_live.py
       - name: Test benchmark safety and environment helpers
         run: |
           python3 -m venv "$RUNNER_TEMP/peergrab-bench-venv"

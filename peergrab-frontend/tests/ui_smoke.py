@@ -349,6 +349,27 @@ def grab_v2_recovers_from_gateway_error(browser, base):
 
 
 @case
+def grab_v2_transient_429_keeps_request_id(browser, base):
+    context, page, state = open_app(
+        browser, base, 2001,
+        configure=lambda s: s.flags.__setitem__("grab_rate_limited_once", True),
+    )
+    try:
+        first_grab_card(page).locator('[data-testid="action-grab"]').click()
+        wait_toast(page, "当前抢单请求过多")
+        expect(pending_grab_keys(page), "登记前的瞬时 429 应保留持久请求键")
+        first_id = state.grab_attempts[0]["requestId"]
+        expect(state.grab_attempts[0]["expectedRound"] == 0, "POST 必须携带 expectedRound")
+        first_grab_card(page).locator('[data-testid="action-grab"]').click()
+        wait_toast(page, "抢单成功")
+        expect(len(state.grab_attempts) == 2, f"第二次应重试一次，实际 {len(state.grab_attempts)} 次")
+        expect(state.grab_attempts[1]["requestId"] == first_id, "瞬时失败重试必须复用同一 requestId")
+        expect(not pending_grab_keys(page), "终态后应清理持久请求键")
+    finally:
+        context.close()
+
+
+@case
 def grab_v2_slot_full_then_new_request_succeeds(browser, base):
     context, page, state = open_app(
         browser, base, 2001,

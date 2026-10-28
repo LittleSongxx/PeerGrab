@@ -173,11 +173,8 @@ INSERT INTO wallet_account (id, owner_id, owner_type, available, frozen, version
   (9001, 9001, 'USER', 0, 0, 0)  -- 仲裁员也持有零余额账户：角色分离在应用层强制，这里只保证账户模型完整
 ON DUPLICATE KEY UPDATE id = id;
 
--- ==================== P2 新增 ====================
+-- ==================== P13：持久幂等抢单请求 ====================
 
--- 本地消息表：跨进程最终一致的主方案。
--- 业务写入与消息登记在同一个本地事务里，要么都成功要么都失败；
--- 发送失败由 worker 扫 PENDING 重发。把"消息有没有发出去"变成可查询的数据库状态。
 -- 抢单请求持久事实：requestId 相同、payload 相同只返回同一结果；Redis 只是挡流量。
 CREATE TABLE IF NOT EXISTS grab_request (
   id                   BIGINT       NOT NULL PRIMARY KEY,
@@ -203,6 +200,9 @@ CREATE TABLE IF NOT EXISTS grab_request (
   CONSTRAINT ck_grab_request_status CHECK (status IN ('PROCESSING','SUCCEEDED','REJECTED','EXPIRED'))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='抢单请求及永久幂等守卫';
 
+-- 本地消息表：跨进程最终一致的主方案。
+-- 业务写入与消息登记在同一个本地事务里，要么都成功要么都失败；
+-- 发送失败由 worker 扫 PENDING 重发。把"消息有没有发出去"变成可查询的数据库状态。
 CREATE TABLE IF NOT EXISTS local_message (
   id            BIGINT       NOT NULL,
   msg_key       VARCHAR(96)  NOT NULL COMMENT '幂等键，如 timeout:{errandId}:{round}',

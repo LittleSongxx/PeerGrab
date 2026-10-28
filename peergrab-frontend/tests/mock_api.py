@@ -106,7 +106,9 @@ class MockState:
             "grab_processing_polls": 0,
             "grab_gateway_error_once": False,
             "grab_slot_full_once": False,
+            "grab_rate_limited_once": False,
         }
+        self.grab_attempts = []
         self.holds = {}
         self.held = {}
         self.pending_route = {}
@@ -440,6 +442,17 @@ class MockState:
             expected_round = body["expectedRound"]
         if expected_round < 0:
             return self.grab_fail("INVALID_ARGUMENT", request_id, 400)
+        self.grab_attempts.append({"viewer": viewer, "requestId": request_id,
+                                   "expectedRound": expected_round, "errandId": errand_id})
+
+        if self.flags.get("grab_rate_limited_once"):
+            # 模拟入口预算拒绝：请求行未登记、status=null，客户端应保留 requestId。
+            self.flags["grab_rate_limited_once"] = False
+            data = self.grab_result(request_id, None, "GRAB_RATE_LIMITED",
+                                    retry_after=1000, http_status=429)
+            return 429, {"code": "GRAB_RATE_LIMITED",
+                         "message": GRAB_MESSAGES.get("GRAB_RATE_LIMITED", "rate limited"),
+                         "data": data}
 
         existing = self.grab_requests.get((viewer, request_id))
         if existing is not None:

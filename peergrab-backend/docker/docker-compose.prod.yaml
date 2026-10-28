@@ -121,6 +121,8 @@ services:
       PEERGRAB_AUTH_ALLOW_HEADER_IDENTITY: "false"
       # 本编排默认面向公开演示站；正式生产请设 PEERGRAB_AUTH_DEMO_ENABLED=false 并接入真实身份。
       PEERGRAB_AUTH_DEMO_ENABLED: "${PEERGRAB_AUTH_DEMO_ENABLED:-true}"
+      # 可选：设置后 /api/internal/** 额外要求 X-Internal-Token；留空=不启用。
+      PEERGRAB_INTERNAL_TOKEN: "${PEERGRAB_INTERNAL_TOKEN:-}"
       PEERGRAB_AUTH_DEMO_PASSWORD_1001: ${PEERGRAB_AUTH_DEMO_PASSWORD_1001:?Set a unique demo password in .env.prod}
       PEERGRAB_AUTH_DEMO_PASSWORD_2001: ${PEERGRAB_AUTH_DEMO_PASSWORD_2001:?Set a unique demo password in .env.prod}
       PEERGRAB_AUTH_DEMO_PASSWORD_2002: ${PEERGRAB_AUTH_DEMO_PASSWORD_2002:?Set a unique demo password in .env.prod}

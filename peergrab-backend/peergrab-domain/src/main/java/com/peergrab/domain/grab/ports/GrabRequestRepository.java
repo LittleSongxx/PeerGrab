@@ -42,6 +42,13 @@ public interface GrabRequestRepository {
     boolean finishRecovered(long campusId, long id, GrabRequestStatus status,
                             String resultCode, int httpStatus, String resultJson);
 
+    /**
+     * 受控补偿：执行线程在租约过期被恢复线程标 EXPIRED 之后才完成业务提交时，
+     * 允许在“grab_record 已证明提交”的前提下把 EXPIRED 升级为 SUCCEEDED。
+     * 只允许 EXPIRED 单向升级，不允许覆盖 SUCCEEDED/REJECTED。
+     */
+    boolean upgradeExpiredToSucceeded(long campusId, long id, String resultCode, int httpStatus, String resultJson);
+
     /** 扫描过期未终结的请求，供 worker 恢复任务收敛。 */
     List<GrabRequest> findExpired(int limit);
 }

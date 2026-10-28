@@ -17,7 +17,7 @@
   <img src="https://img.shields.io/badge/RocketMQ-5-D77310?style=flat-square" />
   <img src="https://img.shields.io/badge/React-18-61DAFB?style=flat-square&logo=react&logoColor=white" />
   <img src="https://img.shields.io/badge/Docker%20Compose-9%20services-2496ED?style=flat-square&logo=docker&logoColor=white" />
-  <img src="https://img.shields.io/badge/tests-342%20passed-2ea44f?style=flat-square" />
+  <img src="https://img.shields.io/badge/tests-350%20passed-2ea44f?style=flat-square" />
 </p>
 
 <p align="center">
@@ -168,10 +168,11 @@ python3 tests/ui_smoke.py --dist dist
 python3 tests/live_smoke.py --base http://127.0.0.1:25173 --api-base http://127.0.0.1:28080
 python3 tests/live_api_smoke.py --base http://127.0.0.1:28080 --timeout-flow --auto-settle-flow
 # 持久幂等抢单 v2 真实栈验收：发布/抢单/重放/查询/落败/限流
+cd ..
 python3 peergrab-backend/bench/scripts/verify_grab_v2_live.py --base http://127.0.0.1:28080
 ```
 
-当前基线：**342 项后端测试，0 失败、0 错误、0 跳过；其中 88 项 IT 真实执行**（2026-10-28，含持久幂等抢单 v2 与边缘加固新增用例）。测试数量由 [`tools/summarize_tests.py`](peergrab-backend/tools/summarize_tests.py) 从同一批 surefire 报表汇总，CI 使用同一口径。
+当前基线：**350 项后端测试，0 失败、0 错误、0 跳过；其中 93 项 IT 真实执行（34 个 IT 报表文件）**（2026-10-28，含持久幂等抢单 v2、边缘加固与交付前审查补强的 HTTP 契约测试）。测试数量由 [`tools/summarize_tests.py`](peergrab-backend/tools/summarize_tests.py) 从同一批 surefire 报表汇总，CI 使用同一口径。
 
 ## 实测与边界
 

@@ -6,6 +6,8 @@ import com.peergrab.domain.errand.ports.ErrandRepository;
 import com.peergrab.domain.grab.model.GrabRequest;
 import com.peergrab.domain.grab.ports.GrabRequestRepository;
 import com.peergrab.domain.grab.ports.GrabSlotPort;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -31,17 +33,24 @@ public class GrabRequestRecoveryUseCase {
     private final GrabCommitSideEffects sideEffects;
     private final ErrandRepository errands;
     private final GrabSlotPort grabSlotPort;
+    private final Counter recoveredCounter;
+    private final Counter expiredCounter;
+    private final Counter failedCounter;
 
     public GrabRequestRecoveryUseCase(GrabRequestRepository requests,
                                       GrabRequestStep step,
                                       GrabCommitSideEffects sideEffects,
                                       ErrandRepository errands,
-                                      GrabSlotPort grabSlotPort) {
+                                      GrabSlotPort grabSlotPort,
+                                      MeterRegistry registry) {
         this.requests = requests;
         this.step = step;
         this.sideEffects = sideEffects;
         this.errands = errands;
         this.grabSlotPort = grabSlotPort;
+        this.recoveredCounter = registry.counter("peergrab.grab-request.recovery", "outcome", "recovered");
+        this.expiredCounter = registry.counter("peergrab.grab-request.recovery", "outcome", "expired");
+        this.failedCounter = registry.counter("peergrab.grab-request.recovery", "outcome", "failed");
     }
 
     /** @return 本轮收敛的请求数（成功恢复 + 过期回收） */
@@ -53,13 +62,16 @@ public class GrabRequestRecoveryUseCase {
                 GrabRequestStep.ReconcileResult result = step.reconcile(stale);
                 if (result.recoveredSuccess()) {
                     sideEffects.run(result.request().errandId());
+                    recoveredCounter.increment();
                     recovered++;
                 } else {
                     clearStaleRedisReservation(result.request());
+                    expiredCounter.increment();
                     expired++;
                 }
             } catch (RuntimeException e) {
                 // 收敛失败下一轮继续扫；请求行仍是 PROCESSING，不会丢。
+                failedCounter.increment();
                 log.warn("抢单请求恢复失败 requestId={} errandId={}", stale.id(), stale.errandId(), e);
             }
         }
@@ -77,6 +89,12 @@ public class GrabRequestRecoveryUseCase {
         Errand errand = errands.findById(request.errandId()).orElse(null);
         if (errand == null || errand.status() != ErrandStatus.PUBLISHED
                 || errand.grabberId() != null || errand.slotTaken() != 0) {
+            return;
+        }
+        // 与 v1 的 healStaleRedisReservation 保持一致：别家请求可能刚建立 Redis 占位，
+        // 此时整把 invalidate 会清掉它的预占；pending 窗口内交给下一次抢单路径自愈。
+        if (grabSlotPort.reservationPending(request.errandId())) {
+            log.debug("存在在途 Redis 预占，跳过陈旧快照清理 errandId={}", request.errandId());
             return;
         }
         try {

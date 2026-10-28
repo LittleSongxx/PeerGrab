@@ -30,6 +30,7 @@ public class DataRetentionJob {
     private final int publishRequestDays;
     private final int notificationDays;
     private final int syncDiffDays;
+    private final int grabRequestDays;
 
     @Autowired
     public DataRetentionJob(JdbcTemplate jdbc,
@@ -40,7 +41,8 @@ public class DataRetentionJob {
                             @Value("${peergrab.retention.fund-outbox-days:30}") int fundOutboxDays,
                             @Value("${peergrab.retention.publish-request-days:7}") int publishRequestDays,
                             @Value("${peergrab.retention.notification-days:180}") int notificationDays,
-                            @Value("${peergrab.retention.sync-diff-days:90}") int syncDiffDays) {
+                            @Value("${peergrab.retention.sync-diff-days:90}") int syncDiffDays,
+                            @Value("${peergrab.retention.grab-request-days:30}") int grabRequestDays) {
         this.jdbc = jdbc;
         this.enabled = enabled;
         this.batchSize = Math.max(1, batchSize);
@@ -50,6 +52,7 @@ public class DataRetentionJob {
         this.publishRequestDays = Math.max(1, publishRequestDays);
         this.notificationDays = Math.max(1, notificationDays);
         this.syncDiffDays = Math.max(1, syncDiffDays);
+        this.grabRequestDays = Math.max(1, grabRequestDays);
     }
 
     @Scheduled(cron = "${peergrab.retention.cron:0 30 4 * * ?}", scheduler = "maintenanceTaskScheduler")
@@ -82,6 +85,13 @@ public class DataRetentionJob {
                  WHERE check_time < DATE_SUB(NOW(3), INTERVAL ? DAY)
                  LIMIT ?
                 """, syncDiffDays);
+        // 抢单请求只在终态保留幂等窗口；PROCESSING 行留给恢复任务，不能被清理。
+        total += prune("grab_request(terminal)", """
+                DELETE FROM grab_request
+                 WHERE status <> 'PROCESSING'
+                   AND completed_at < DATE_SUB(NOW(3), INTERVAL ? DAY)
+                 LIMIT ?
+                """, grabRequestDays);
         if (total > 0) log.info("数据保留清理完成 removed={}", total);
     }
 

@@ -31,6 +31,8 @@ services:
       PEERGRAB_AUTH_DEMO_PASSWORD_2001: ${PEERGRAB_AUTH_DEMO_PASSWORD_2001:?Set demo password}
       PEERGRAB_AUTH_DEMO_PASSWORD_2002: ${PEERGRAB_AUTH_DEMO_PASSWORD_2002:?Set demo password}
       PEERGRAB_AUTH_DEMO_PASSWORD_9001: ${PEERGRAB_AUTH_DEMO_PASSWORD_9001:?Set demo password}
+      # 可选：设置后 /api/internal/** 额外要求 X-Internal-Token；留空=不启用。
+      PEERGRAB_INTERNAL_TOKEN: "${PEERGRAB_INTERNAL_TOKEN:-}"
       MANAGEMENT_ENDPOINT_HEALTH_GROUP_READINESS_INCLUDE: readinessState,db,snowflakeLease
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/actuator/health/readiness"]

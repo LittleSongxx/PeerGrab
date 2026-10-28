@@ -11,8 +11,9 @@
 //    响应没回来」时断开，只有这个键能把后续查询/重放接上；
 // 2) 结果未知（202 / 网络错误 / 网关返回非 Result 的 5xx）时用同一 ID 轮询 GET，
 //    间隔 300ms、上限 30s；能判定终态才清理持久键；
-// 3) 带 Result body 的 4xx/5xx 是服务端确定答案：按契约换新 requestId，即清理旧键后
-//    由用户重新发起，绝不复用旧 ID（429/503 在本分支同样被持久化为确定失败）。
+// 3) 带 Result body 的确定性 4xx 是服务端最终答案：清理旧键，由用户换新 requestId 重新发起；
+//    429/503 是瞬时状态（限流预算/依赖暂时不可用），保留旧键，等待 Retry-After 后重试同一
+//    requestId，让服务端把已登记请求收敛掉——绝不因一次限流丢掉幂等结果。
 
 import { api, BizError, getUserId } from "./api";
 import type { GrabHttpResult } from "./api";
@@ -39,7 +40,24 @@ export type GrabOutcome =
 type GrabReading =
   | { kind: "success"; replayed: boolean; appliedRound: number | null }
   | { kind: "processing" }
-  | { kind: "failure"; code: string; message: string; retryable: boolean };
+  | { kind: "failure"; code: string; message: string; retryable: boolean; status: string | null; retryAfterMillis: number };
+
+type GrabFailureReading = Extract<GrabReading, { kind: "failure" }>;
+
+/** 瞬时失败：保留持久请求键，稍后用同一 requestId 重试（服务端会按持久结果收敛）。 */
+const TRANSIENT_CODES = new Set(["GRAB_RATE_LIMITED", "DEPENDENCY_UNAVAILABLE"]);
+
+/** 已终结的请求状态：即使 code 是 429/503，也不能再复用旧 requestId。 */
+const TERMINAL_STATUSES = new Set(["REJECTED", "EXPIRED"]);
+
+/**
+ * 429/503 既可能来自“登记前的入口预算”（值得保留 requestId 重试），也可能来自
+ * 已登记请求的终态（例如 delegate 内部热点限流被持久化为 REJECTED）。只有前者保留键。
+ */
+function keepPendingOnTransient(reading: GrabFailureReading): boolean {
+  if (!TRANSIENT_CODES.has(reading.code)) return false;
+  return reading.status === null || !TERMINAL_STATUSES.has(reading.status);
+}
 
 /** 契约里「重新发起一次可能成功」的确定失败；文案上给用户可重试提示。 */
 const RETRYABLE_CODES = new Set([
@@ -201,6 +219,8 @@ function readGrabResult(http: GrabHttpResult): GrabReading | null {
     code,
     message,
     retryable: RETRYABLE_CODES.has(code) || status === "EXPIRED",
+    status,
+    retryAfterMillis: typeof data?.retryAfterMillis === "number" ? data.retryAfterMillis : 0,
   };
 }
 
@@ -279,7 +299,17 @@ async function pollWithRequestId(
 
     if (reading?.kind === "failure") {
       if (reading.code !== "REQUEST_NOT_FOUND") {
-        // 409/429/503/过期等都是服务端确定答案：清理旧键，下一次由用户换新 ID 发起。
+        if (keepPendingOnTransient(reading)) {
+          // 登记前的限流/依赖不可用：保留持久键，按 Retry-After 退避后继续轮询，
+          // 不把一次瞬时 429/503 误报成抢单失败。
+          if (Date.now() < deadline) {
+            const wait = Math.min(Math.max(reading.retryAfterMillis, GRAB_POLL_INTERVAL_MS), 2_000);
+            await sleep(wait);
+            continue;
+          }
+          return processingOutcome(requestId);
+        }
+        // 其余 4xx 是确定答案：清理旧键，下一次由用户换新 ID 发起。
         clearPending(errandId);
         return failureOutcome(requestId, reading);
       }
@@ -332,7 +362,8 @@ export async function grabErrand(errandId: string, expectedRound: number): Promi
     return successOutcome(requestId, reading);
   }
   if (reading?.kind === "failure") {
-    clearPending(errandId);
+    // 只有“登记前”的 429/503 保留键；已终结请求的 429/503 必须清键换新 ID。
+    if (!keepPendingOnTransient(reading)) clearPending(errandId);
     return failureOutcome(requestId, reading);
   }
   // 202 处理中 / 网关返回非 Result body：用同一 ID 轮询查询直到终态。

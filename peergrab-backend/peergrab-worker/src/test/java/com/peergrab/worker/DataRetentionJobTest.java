@@ -23,12 +23,13 @@ class DataRetentionJobTest {
         jdbc.responses.add(new int[]{0});             // publish_request
         jdbc.responses.add(new int[]{7});             // notification
         jdbc.responses.add(new int[]{1});             // sync_diff
+        jdbc.responses.add(new int[]{0});             // grab_request
 
         DataRetentionJob job = new DataRetentionJob(jdbc, true, 500, 20,
-                7, 30, 30, 180, 90);
+                7, 30, 30, 180, 90, 30);
         job.run();
 
-        assertEquals(5, jdbc.distinctTables(), "五张可清理表各清理一次（含分批重复调用）");
+        assertEquals(6, jdbc.distinctTables(), "六张可清理表各清理一次（含分批重复调用）");
         assertEquals(3, jdbc.callsFor("local_message"), "满批后继续删，尾批后停止");
         assertEquals(1023, jdbc.totalRemoved);
     }
@@ -43,16 +44,16 @@ class DataRetentionJobTest {
         jdbc.responses.add(new int[]{1}); // notification
         jdbc.responses.add(new int[]{1}); // sync_diff
 
-        new DataRetentionJob(jdbc, true, 500, 20, 7, 30, 30, 180, 90).run();
+        new DataRetentionJob(jdbc, true, 500, 20, 7, 30, 30, 180, 90, 30).run();
 
-        assertEquals(4, jdbc.successfulTables(), "local_message 失败后其余 4 张表仍继续");
+        assertEquals(5, jdbc.successfulTables(), "local_message 失败后其余 5 张表仍继续");
     }
 
     @Test
     @DisplayName("关闭保留策略时不执行任何删除")
     void disabledSkipsEverything() {
         RecordingJdbcTemplate jdbc = new RecordingJdbcTemplate();
-        new DataRetentionJob(jdbc, false, 500, 20, 7, 30, 30, 180, 90).run();
+        new DataRetentionJob(jdbc, false, 500, 20, 7, 30, 30, 180, 90, 30).run();
         assertEquals(0, jdbc.totalCalls);
     }
 
@@ -104,11 +105,11 @@ class DataRetentionJobTest {
 
         private String identify(String sql) {
             for (String table : List.of("local_message", "fund_event_outbox", "publish_request",
-                    "notification", "recon_diff", "sync_diff")) {
+                    "notification", "recon_diff", "sync_diff", "grab_request")) {
                 if (sql.contains(" " + table) || sql.contains(table + "\n")) return table;
             }
             for (String table : List.of("local_message", "fund_event_outbox", "publish_request",
-                    "notification", "recon_diff", "sync_diff")) {
+                    "notification", "recon_diff", "sync_diff", "grab_request")) {
                 if (sql.contains(table)) return table;
             }
             throw new IllegalArgumentException(sql);

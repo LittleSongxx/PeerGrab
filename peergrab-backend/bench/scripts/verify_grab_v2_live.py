@@ -25,8 +25,9 @@ import urllib.request
 import uuid
 
 
-def call(base: str, method: str, path: str, body=None, token: str | None = None,
-         request_id: str | None = None, timeout: float = 15.0):
+def call_raw(base: str, method: str, path: str, body=None, token: str | None = None,
+             request_id: str | None = None, timeout: float = 15.0):
+    """Return (status, parsed_body, headers) even for non-2xx responses."""
     data = None if body is None else json.dumps(body).encode("utf-8")
     req = urllib.request.Request(base + path, data=data, method=method)
     req.add_header("Content-Type", "application/json")
@@ -37,14 +38,20 @@ def call(base: str, method: str, path: str, body=None, token: str | None = None,
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8")
-            return resp.status, json.loads(raw) if raw else None
+            return resp.status, (json.loads(raw) if raw else None), resp.headers
     except urllib.error.HTTPError as e:
         raw = e.read().decode("utf-8")
         try:
             parsed = json.loads(raw) if raw else None
         except json.JSONDecodeError:
             parsed = raw
-        return e.code, parsed
+        return e.code, parsed, e.headers
+
+
+def call(base: str, method: str, path: str, body=None, token: str | None = None,
+         request_id: str | None = None, timeout: float = 15.0):
+    status, payload, _ = call_raw(base, method, path, body, token, request_id, timeout)
+    return status, payload
 
 
 def expect(condition: bool, message: str) -> None:
@@ -99,6 +106,12 @@ def main() -> int:
         request_id = str(uuid.uuid4())
         status, payload = call(base, "POST", f"/api/errands/{errand_id}/grab-v2",
                                {"expectedRound": 0}, token=runner, request_id=request_id)
+        if status == 429:
+            # 与 live_api_smoke 共用演示身份时预算可能尚未恢复：按 Retry-After 等后用同一 ID 重试。
+            wait_ms = int(payload.get("data", {}).get("retryAfterMillis", 1000))
+            time.sleep(min(wait_ms, 5000) / 1000.0 + 0.1)
+            status, payload = call(base, "POST", f"/api/errands/{errand_id}/grab-v2",
+                                   {"expectedRound": 0}, token=runner, request_id=request_id)
         expect(status == 200 and payload.get("code") == "OK",
                f"grab-v2 first attempt failed: {status} {payload}")
         expect(payload["data"]["grabbed"] is True, f"not grabbed: {payload}")
@@ -120,6 +133,13 @@ def main() -> int:
         loser_id = str(uuid.uuid4())
         status, payload = call(base, "POST", f"/api/errands/{errand_id}/grab-v2",
                                {"expectedRound": 0}, token=runner2, request_id=loser_id)
+        if status == 429:
+            # 重复运行脚本时 runner2 的预算可能尚未恢复：按服务端 Retry-After 等待后
+            # 用同一 requestId 重试（幂等重放不会二次占名额）。
+            wait_ms = int(payload.get("data", {}).get("retryAfterMillis", 1000))
+            time.sleep(min(wait_ms, 5000) / 1000.0 + 0.1)
+            status, payload = call(base, "POST", f"/api/errands/{errand_id}/grab-v2",
+                                   {"expectedRound": 0}, token=runner2, request_id=loser_id)
         expect(status == 409 and payload.get("code") == "SLOT_FULL",
                f"loser should get SLOT_FULL: {status} {payload}")
         report["steps"].append("loser:SLOT_FULL")
@@ -127,16 +147,21 @@ def main() -> int:
         limited = False
         codes: list[str] = []
         for _ in range(8):
-            status, payload = call(base, "POST", f"/api/errands/{errand_id}/grab-v2",
-                                   {"expectedRound": 0}, token=runner2,
-                                   request_id=str(uuid.uuid4()))
+            status, payload, headers = call_raw(base, "POST", f"/api/errands/{errand_id}/grab-v2",
+                                                {"expectedRound": 0}, token=runner2,
+                                                request_id=str(uuid.uuid4()))
             codes.append(f"{status}:{payload.get('code') if payload else '?'}")
             if status == 429:
                 limited = True
+                retry_after = headers.get("Retry-After")
+                expect(retry_after is not None and retry_after.isdigit() and int(retry_after) >= 1,
+                       f"429 must carry numeric Retry-After header, got={retry_after!r}")
+                retry_ms = int(payload.get("data", {}).get("retryAfterMillis", 0))
+                expect(retry_ms > 0, f"429 body must carry retryAfterMillis, got={payload}")
+                report["steps"].append(f"rate-limit:429 Retry-After={retry_after}s")
                 break
             time.sleep(0.05)
         expect(limited, f"per-task rate limit did not trigger, attempts={codes}")
-        report["steps"].append("rate-limit:429")
 
         report["ok"] = True
     except AssertionError as e:

@@ -126,26 +126,57 @@ public class GrabRequestUseCase {
             if (expectedRound != errand.round()) {
                 return terminalReject(registered, ErrorCode.STALE_VERSION, 409);
             }
-            if (errand.status() != ErrandStatus.PUBLISHED) {
-                ErrorCode code = errand.status() == ErrandStatus.LOCKED
-                        ? ErrorCode.SLOT_FULL : ErrorCode.ERRAND_NOT_GRABBABLE;
-                return terminalReject(registered, code, 409);
-            }
+            // 不在这里按 errand.status 提前拒绝：v1 在 LOCKED/SLOT_FULL 时会把失败者放进候选队列，
+            // v2 必须复用同一语义；任务不可抢等确定性失败仍由 delegate 返回确定码。
             var grabbed = delegate.grab(new GrabErrandUseCase.Command(errandId, runnerId, requestId));
             if (grabbed.code() == ErrorCode.OK) {
                 GrabRequest done = step.finish(registered, ErrorCode.OK, 200, true);
                 return toResult(done, false);
+            }
+            // v1 的 GRAB_CONFLICT/INTERNAL_ERROR 表示“提交结果未知”（DB 异常时二次读取也可能失败），
+            // 不能直接持久化为 REJECTED，否则同一个 requestId 会被永久答错。先按 grab_record 复核：
+            // 已提交 → 收敛成功；未提交 → 保持 PROCESSING，交给重放/恢复线程按租约收敛。
+            if (grabbed.code() == ErrorCode.GRAB_CONFLICT || grabbed.code() == ErrorCode.INTERNAL_ERROR) {
+                if (step.hasCommitted(registered)) {
+                    GrabRequest done = step.finish(registered, ErrorCode.OK, 200, true);
+                    return toResult(done, false);
+                }
+                // 任务已流转（典型是并发竞争者抢中）时，GRAB_CONFLICT 是确定失败，
+                // 可以立即终结；只有任务仍 PUBLISHED 且无 grab_record 才是真正的“提交结果未知”。
+                Errand latest = errands.findById(errandId).orElse(null);
+                if (latest != null && latest.status() != ErrandStatus.PUBLISHED) {
+                    GrabRequest done = step.finish(registered, grabbed.code(),
+                            httpStatus(grabbed.code()), false);
+                    return toResult(done, false);
+                }
+                long retryAfter = retryAfterMillis(registered);
+                return response(ErrorCode.REQUEST_PROCESSING, requestId, 202, retryAfter);
             }
             GrabRequest done = step.finish(registered, grabbed.code(), httpStatus(grabbed.code()), false);
             return toResult(done, false);
         } catch (RuntimeException e) {
             // 业务成败未知时绝不猜测：保留请求行 PROCESSING，由查询/恢复线程按数据库事实收敛。
             log.warn("抢单请求结果暂不确定，保留持久请求待恢复 errandId={} requestId={}", errandId, requestId, e);
-            var current = requests.find(errand.campusId(), runnerId, requestId);
-            if (current.isPresent() && current.get().status().terminal()) {
-                return toResult(current.get(), true);
+            GrabRequest current = null;
+            try {
+                current = requests.find(errand.campusId(), runnerId, requestId).orElse(null);
+            } catch (RuntimeException ignored) {
+                // 连请求行都读不到：只能按依赖不可用返回，客户端保留 requestId 重试。
             }
-            return response(ErrorCode.REQUEST_PROCESSING, requestId, 202);
+            if (current != null && current.status().terminal()) {
+                return toResult(current, true);
+            }
+            if (current != null) {
+                long retryAfter = 1000L;
+                try {
+                    retryAfter = Math.max(
+                            current.leaseUntil().toEpochMilli() - requests.databaseNow().toEpochMilli(), 1000);
+                } catch (RuntimeException ignored) {
+                    // 读不到数据库时间就用保守值，客户端仍会保留 requestId。
+                }
+                return response(ErrorCode.REQUEST_PROCESSING, requestId, 202, retryAfter);
+            }
+            return response(ErrorCode.DEPENDENCY_UNAVAILABLE, requestId, 503);
         } finally {
             grabCapacity.release();
         }
@@ -181,14 +212,25 @@ public class GrabRequestUseCase {
             return response(ErrorCode.REQUEST_CONFLICT, request.requestId(), 409);
         }
         if (!request.status().terminal() && !request.leaseUntil().isAfter(requests.databaseNow())) {
-            var reconciled = step.reconcile(request);
-            request = reconciled.request();
-            if (reconciled.recoveredSuccess()) {
-                // 业务其实已提交，只是响应/请求终结没完成：补跑超时消息、缓存失效与通知。
-                sideEffects.run(request.errandId());
+            try {
+                var reconciled = step.reconcile(request);
+                request = reconciled.request();
+                if (reconciled.recoveredSuccess()) {
+                    // 业务其实已提交，只是响应/请求终结没完成：补跑超时消息、缓存失效与通知。
+                    sideEffects.run(request.errandId());
+                }
+            } catch (RuntimeException e) {
+                // 恢复裁决与并发终结竞争时不要 500：重读一次以当前持久状态为准。
+                log.warn("恢复裁决竞态，重读请求状态 requestId={}", request.requestId(), e);
+                GrabRequest latest = requests.findById(request.campusId(), request.id()).orElse(null);
+                if (latest != null) {
+                    return toResult(latest, true);
+                }
+                return response(ErrorCode.DEPENDENCY_UNAVAILABLE, request.requestId(), 503);
             }
         }
-        return toResult(request, true);
+        // PROCESSING 只是“已登记、结果未定”，不能标记成终态重放。
+        return toResult(request, request.status().terminal());
     }
 
     private Result terminalReject(GrabRequest request, ErrorCode code, int httpStatus) {
@@ -209,8 +251,17 @@ public class GrabRequestUseCase {
                 request.httpStatus() <= 0 ? 409 : request.httpStatus());
     }
 
+    private long retryAfterMillis(GrabRequest request) {
+        try {
+            return Math.max(request.leaseUntil().toEpochMilli() - requests.databaseNow().toEpochMilli(), 1000);
+        } catch (RuntimeException ignored) {
+            return 1000L;
+        }
+    }
+
     private static Result response(ErrorCode code, String requestId, int httpStatus) {
-        return response(code, requestId, httpStatus, httpStatus == 202 ? 1000 : 0);
+        long retryAfter = httpStatus == 202 || httpStatus == 429 || httpStatus == 503 ? 1000 : 0;
+        return response(code, requestId, httpStatus, retryAfter);
     }
 
     private static Result response(ErrorCode code, String requestId, int httpStatus, long retryAfterMillis) {

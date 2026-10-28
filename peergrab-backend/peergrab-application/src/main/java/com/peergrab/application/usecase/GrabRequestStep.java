@@ -1,6 +1,5 @@
 package com.peergrab.application.usecase;
 
-import com.peergrab.domain.errand.ports.ErrandRepository;
 import com.peergrab.domain.grab.model.GrabRequest;
 import com.peergrab.domain.grab.model.GrabRequestStatus;
 import com.peergrab.domain.grab.ports.GrabRecordRepository;
@@ -21,14 +20,11 @@ public class GrabRequestStep {
 
     private final GrabRequestRepository requests;
     private final GrabRecordRepository records;
-    private final ErrandRepository errands;
 
     public GrabRequestStep(GrabRequestRepository requests,
-                           GrabRecordRepository records,
-                           ErrandRepository errands) {
+                           GrabRecordRepository records) {
         this.requests = requests;
         this.records = records;
-        this.errands = errands;
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -44,6 +40,14 @@ public class GrabRequestStep {
     public GrabRequest finish(GrabRequest request, ErrorCode code, int httpStatus, boolean grabbed) {
         GrabRequest current = requests.lockById(request.campusId(), request.id()).orElseThrow();
         if (current.status().terminal()) {
+            if (grabbed && current.status() == GrabRequestStatus.EXPIRED && hasCommitted(current)) {
+                // 极端长事务/长 GC：恢复线程先判了 EXPIRED，但业务随后确实提交。
+                // 只有 grab_record 能证明提交，才允许 EXPIRED -> SUCCEEDED 单向升级。
+                if (requests.upgradeExpiredToSucceeded(current.campusId(), current.id(),
+                        ErrorCode.OK.name(), 200, resultJson(current, ErrorCode.OK, true))) {
+                    return requests.findById(current.campusId(), current.id()).orElseThrow();
+                }
+            }
             return current;
         }
         GrabRequestStatus target = grabbed ? GrabRequestStatus.SUCCEEDED : GrabRequestStatus.REJECTED;
@@ -70,17 +74,28 @@ public class GrabRequestStep {
         var committed = records.findGrabbedByRequestId(current.campusId(), current.errandId(),
                 current.requestId(), current.requestRound());
         if (committed.isPresent() && committed.get().runnerId() == current.runnerId()) {
-            requests.finishRecovered(current.campusId(), current.id(), GrabRequestStatus.SUCCEEDED,
-                    ErrorCode.OK.name(), 200, resultJson(current, ErrorCode.OK, true));
+            if (!requests.finishRecovered(current.campusId(), current.id(), GrabRequestStatus.SUCCEEDED,
+                    ErrorCode.OK.name(), 200, resultJson(current, ErrorCode.OK, true))) {
+                throw new IllegalStateException("请求恢复终结条件已失效 id=" + current.id());
+            }
             return new ReconcileResult(reload(current), true);
         }
-        requests.finishRecovered(current.campusId(), current.id(), GrabRequestStatus.EXPIRED,
-                ErrorCode.REQUEST_EXPIRED.name(), 409, resultJson(current, ErrorCode.REQUEST_EXPIRED, false));
+        if (!requests.finishRecovered(current.campusId(), current.id(), GrabRequestStatus.EXPIRED,
+                ErrorCode.REQUEST_EXPIRED.name(), 409, resultJson(current, ErrorCode.REQUEST_EXPIRED, false))) {
+            throw new IllegalStateException("请求恢复终结条件已失效 id=" + current.id());
+        }
         return new ReconcileResult(reload(current), false);
     }
 
     private GrabRequest reload(GrabRequest request) {
         return requests.findById(request.campusId(), request.id()).orElseThrow();
+    }
+
+    /** 按 grab_record + requestId + round 判断业务是否已提交（供 v2 对未知结果做非终态处理）。 */
+    public boolean hasCommitted(GrabRequest request) {
+        var committed = records.findGrabbedByRequestId(request.campusId(), request.errandId(),
+                request.requestId(), request.requestRound());
+        return committed.isPresent() && committed.get().runnerId() == request.runnerId();
     }
 
     /** 固定枚举 + UUID 生成的结果快照；不拼接任何用户输入，保证持久结果可重放。 */

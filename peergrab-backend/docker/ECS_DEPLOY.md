@@ -92,6 +92,8 @@ compose=(docker compose --env-file .env.prod -f docker-compose.prod.yaml)
   'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysql -uroot peer_grab' < migrate-query-indexes.sql
 "${compose[@]}" exec -T mysql sh -c \
   'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysql -uroot peer_grab' < migrate-wallet-per-errand.sql
+"${compose[@]}" exec -T mysql sh -c \
+  'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysql -uroot peer_grab' < migrate-grab-request-v2.sql
 "${compose[@]}" run --rm --no-deps mq-init
 "${compose[@]}" up -d --build app worker frontend
 "${compose[@]}" ps
@@ -117,6 +119,8 @@ compose=(docker compose --env-file .env.prod -f docker-compose.prod.yaml)
 
 - `migrate-runtime.sql` 追加 `errand.transfer_count`（本轮连续递补计数，回退后归零，用于修复"达到轮次上限后候选永久失效"）与 9001 仲裁员的零余额 `wallet_account` 行（`INSERT IGNORE`）。后者只保证账户模型一致，仲裁员在应用层已被禁止参与交易。
 - `migrate-wallet-per-errand.sql` 为每单托管户/佣金户迁移脚本；已有 HELD 托管单的旧卷必须执行，否则新代码会因每单账户缺失而拒绝结算。
+- `migrate-grab-request-v2.sql` 创建 `grab_request`（持久幂等抢单 v2 + Worker 恢复）。**旧卷必须执行**；前端已切 `/grab-v2`，缺表会导致抢单 500、Worker 恢复每轮报错。新卷由 `init.sql` 建表。
+- 可选生产加固：设置 `PEERGRAB_INTERNAL_TOKEN`（≥32 字节）后，`/api/internal/**` 除仲裁员 Bearer 外还要求 `X-Internal-Token`；不设置则仍由仲裁员身份与 Nginx 404 兜底。
 - `migrate-query-indexes.sql` 追加 5 个索引：`grab_record.idx_runner_errand`、`publish_request.idx_publish_created`、`notification.idx_read_time`、`local_message.idx_status_updated`、`fund_event_outbox.idx_outbox_status_updated`，服务于 runner 任务列表与保留期清理；两个脚本都可重复执行。
 - app / worker 容器新增 `TZ=Asia/Shanghai`：`credit.calibration-cron`、`recon.cron`、`retention.cron` 改按东八区解释。升级后须执行 `up -d --build` 重建容器，只重启进程不会更新环境变量。
 - Redis 由 `noeviction` 改为 `allkeys-lru`（`--maxmemory 512mb --maxmemory-samples 10`）：缓存、名额、布隆、榜单都可从 MySQL 重建，名额键被淘汰时抢单回退到数据库 CAS。

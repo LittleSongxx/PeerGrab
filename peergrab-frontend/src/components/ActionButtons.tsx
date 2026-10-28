@@ -12,8 +12,8 @@ const ALREADY_TEXT: Record<string, string> = {
 
 /**
  * v2 抢单失败的固定提示：后端 code 是稳定契约，文案在前端集中维护；
- * 未覆盖的 code 用后端 message 兜底。与 v1 的宽松重试不同，本分支契约里
- * 409/429/503 都是确定性结果，提示用户刷新或稍后重新发起即可。
+ * 未覆盖的 code 用后端 message 兜底。429/503 是瞬时状态（保留请求键，稍后重试同一 ID），
+ * 其余 4xx 是确定答案（清理请求键，用户换新 ID 重新发起）。
  */
 const GRAB_FAILURE_HINT: Record<string, string> = {
   SLOT_FULL: "名额已满，任务已被其他跑腿抢中",

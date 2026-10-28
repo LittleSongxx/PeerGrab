@@ -33,7 +33,7 @@ PROCESSING ──(抢中/确定失败)──> SUCCEEDED / REJECTED
 |---|---|
 | `campus_id, errand_id, runner_id, request_id` | 唯一作用域：`uk_grab_request_scope(campus_id, runner_id, operation, request_id)` |
 | `payload_hash` | 同一 requestId 只允许对应同一 `(errandId, round)`；内容不一致返回 `REQUEST_CONFLICT` |
-| `request_round, base_errand_version` | 请求发起时看到的轮次/版本，用于拒绝过期请求与恢复判定 |
+| `request_round, base_errand_version` | `request_round` 用于执行前比对与恢复判定；`base_errand_version` 仅存档用于审计/恢复定位（当前不做版本前置比对） |
 | `reservation_token` | 执行线程的租约令牌；只有持有令牌的线程能写终态，防止过期线程“复活” |
 | `lease_until` | 数据库时钟签发，**不随重试续期**；默认 30s |
 | `status, result_code, http_status, result_json` | 持久结果，重放时原样返回，不再执行业务 |
@@ -45,7 +45,7 @@ PROCESSING ──(抢中/确定失败)──> SUCCEEDED / REJECTED
 
 | 接口 | 说明 |
 |---|---|
-| `POST /api/errands/{id}/grab-v2`（Header `X-Request-Id` 必填 UUID，Body `{"expectedRound": N}`） | 登记并执行；HTTP 200=已确定结果，202=处理中，409=确定失败/冲突，429=限流，503=依赖暂不可用 |
+| `POST /api/errands/{id}/grab-v2`（Header `X-Request-Id` 必填 UUID，Body `{"expectedRound": N}`） | 登记并执行；200=已确定结果，202=处理中，400=参数/请求键非法，403=角色/信用/自抢限制，404=任务不存在，409=确定失败/冲突，429=限流，503=依赖暂不可用。429/503 带 `Retry-After`（秒）；202 的 body 带 `retryAfterMillis` |
 | `GET /api/errands/{id}/grab-requests/{requestId}` | 用同一 requestId 查询持久结果；202/网络失败后的唯一恢复入口 |
 
 响应体仍是统一 `Result<T>`，`data` 包含 `requestId, status, code, grabbed, appliedRound, replayed, retryAfterMillis, httpStatus`。
@@ -61,20 +61,21 @@ PROCESSING ──(抢中/确定失败)──> SUCCEEDED / REJECTED
 ```text
 1. 校验 requestId 为 UUID、expectedRound >= 0
 2. 读任务（campusId/round/version/status）
-3. 查已有请求：
-   - 终态 → 直接重放（replayed=true）
+3. 查已有请求并处理重放：
+   - 终态 → 直接重放（replayed=true），走查询预算
    - PROCESSING 且租约有效 → 202 + retryAfter
    - PROCESSING 且租约过期 → 进入恢复裁决（见 §5）
    - payloadHash 不一致 → 409 REQUEST_CONFLICT
 4. 获取进程内在途容量（Semaphore，默认 10）——满载 503，避免打满连接池
-5. 登记 grab_request(PROCESSING, token, lease)
+5. 新尝试消耗抢单预算（跨任务桶/单任务桶）；预算不足 429 + Retry-After
+6. 登记 grab_request(PROCESSING, token, lease)
    - 唯一键冲突 → 说明并发同 ID，重读后重放
-6. expectedRound / 任务状态前置校验，不满足则终结为 REJECTED
-7. 调 GrabErrandUseCase.grab（Redis 预占 + DB CAS + 候选队列 + 超时消息）
-8. 把结果写回请求行（条件 UPDATE token+PROCESSING+租约）
+7. expectedRound / 任务状态前置校验，不满足则终结为 REJECTED
+8. 调 GrabErrandUseCase.grab（Redis 预占 + DB CAS + 候选队列 + 超时消息）
+9. 把结果写回请求行（条件 UPDATE token+PROCESSING+租约）
    - 成功 → SUCCEEDED / 200
    - 业务失败 → REJECTED / 对应 HTTP 状态码
-   - 未知异常 → 保持 PROCESSING，返回 202；由恢复线程收敛
+   - 未知异常 → 保持 PROCESSING，返回 202/503；由恢复线程收敛
 ```
 
 **关键取舍：Redis 仍然是“提示与削峰”，不是事实来源。** v2 没有替换 Lua 预占，
@@ -90,6 +91,7 @@ PROCESSING ──(抢中/确定失败)──> SUCCEEDED / REJECTED
 | Redis 预占后、DB 提交前 | 无 grab_record | 同上 | 409 REQUEST_EXPIRED |
 | DB 提交后、请求行终结前 | grab_record 存在且 runner 匹配 | 请求置 SUCCEEDED，并补跑超时消息/缓存失效/实时通知 | 200 成功 |
 | 请求行终结后、响应丢失 | 终态已持久 | 重放 | 原结果 |
+| 租约过期先被判 EXPIRED、业务随后才提交 | grab_record 已存在 | `GrabRequestStep.finish` 凭 grab_record 受控执行 `EXPIRED → SUCCEEDED` 单向升级 | 200 成功（避免“请求行过期但任务已抢中”） |
 
 > `reconcile` 只认 `grab_record + requestId + round` 这一条证据：查不到就按 EXPIRED 收敛，
 > 绝不因为“没查到记录”猜测成功；查到但 runner 不匹配也不会把成功结果回放给别人。
@@ -115,13 +117,17 @@ PROCESSING ──(抢中/确定失败)──> SUCCEEDED / REJECTED
 ## 8. 已知边界
 
 1. **v2 与 v1 并存**：当前 v2 是增量端点，旧端点仍可写；正式切换后应删除 v1 或加开关，避免长期双路径。
-2. **429/503 的语义变化**：本分支把确定失败（含限流）持久化，客户端应换新 requestId 重试；
-   若需要“原 ID 重试”，需要额外的可重开状态，当前不做。
+2. **429/503 不是终态**：客户端保留同一 requestId，按 `Retry-After` 等待后重试；
+   服务端重放优先于抢单预算，确保已登记请求不会因一次限流丢失结果。只有 409 里的
+   `REQUEST_EXPIRED`/`REQUEST_CONFLICT` 等确定失败才需要换新 requestId。
 3. **Redis 补偿采用“丢弃陈旧快照”**：恢复时不盲目 INCR 名额（避免把已提交名额加回去），
    只清“数据库明确可抢且无人占用”的旧预占；代价是丢失一次 Redis 削峰机会，由 DB CAS 兜底。
-4. **进程内 Semaphore**：只约束单实例并发，不是跨实例限流；跨实例仍依赖网关/跑腿维度限流（后续 P2）。
+4. **进程内 Semaphore**：只约束单实例并发；跨实例的跑腿维度预算已在 P13 实现，来源 IP/网关路由预算留待后续。
 5. **无 repair-task 表**：当前恢复只有“请求收敛 + 丢弃陈旧快照”两个动作，足以保证正确性；
    若后续引入更复杂的跨存储补偿，再评估持久任务表。
+6. **未知结果不终态化**：v1 的 `GRAB_CONFLICT`/`INTERNAL_ERROR` 在 v2 中先按 `grab_record` 复核；已提交则成功，未提交保持 PROCESSING，交给重放/租约恢复，不会把“可能已成功”永久记成失败。
+7. **终态请求保留 30 天**（`peergrab.retention.grab-request-days`）；PROCESSING 行不清理。恢复任务输出 `peergrab.grab-request.recovery{outcome}` 指标，便于告警长期悬挂请求。
+8. **v2 尚未独立容量压测**：热路径新增登记/终结事务与多次主键读，默认 `max-in-flight=10` 是连接保护，不是吞吐承诺；上线前应按 S1/S2/S4 补测。
 
 ## 9. 验证
 

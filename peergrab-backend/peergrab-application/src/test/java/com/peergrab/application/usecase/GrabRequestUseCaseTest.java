@@ -124,6 +124,47 @@ class GrabRequestUseCaseTest {
     }
 
     @Test
+    @DisplayName("v1 返回结果未知（GRAB_CONFLICT）但 grab_record 已提交时收敛为成功")
+    void grab_unknown_conflict_with_committed_record_returns_success() {
+        Errand errand = errand(ErrandStatus.PUBLISHED, 0, 0);
+        GrabRequest processing = request(GrabRequestStatus.PROCESSING, null, 0, 0);
+        GrabRequest succeeded = request(GrabRequestStatus.SUCCEEDED, "OK", 200, 0);
+        when(errands.findById(ERRAND_ID)).thenReturn(Optional.of(errand));
+        when(requests.find(CAMPUS_ID, RUNNER_ID, REQUEST_ID))
+                .thenReturn(Optional.empty(), Optional.empty(), Optional.of(processing));
+        when(step.register(any())).thenReturn(true);
+        when(delegate.grab(any())).thenReturn(new GrabErrandUseCase.Result(ErrorCode.GRAB_CONFLICT, false, null));
+        when(step.hasCommitted(any())).thenReturn(true);
+        when(step.finish(any(), eq(ErrorCode.OK), eq(200), eq(true))).thenReturn(succeeded);
+
+        var result = useCase.grab(ERRAND_ID, RUNNER_ID, REQUEST_ID, 0);
+
+        assertTrue(result.grabbed());
+        assertEquals(ErrorCode.OK, result.code());
+        verify(step).finish(any(), eq(ErrorCode.OK), eq(200), eq(true));
+    }
+
+    @Test
+    @DisplayName("v1 返回结果未知且 grab_record 未提交时保持 PROCESSING，不永久落失败")
+    void grab_unknown_conflict_without_record_stays_processing() {
+        Errand errand = errand(ErrandStatus.PUBLISHED, 0, 0);
+        GrabRequest processing = request(GrabRequestStatus.PROCESSING, null, 0, 0);
+        when(errands.findById(ERRAND_ID)).thenReturn(Optional.of(errand));
+        when(requests.find(CAMPUS_ID, RUNNER_ID, REQUEST_ID))
+                .thenReturn(Optional.empty(), Optional.empty(), Optional.of(processing));
+        when(step.register(any())).thenReturn(true);
+        when(delegate.grab(any())).thenReturn(new GrabErrandUseCase.Result(ErrorCode.GRAB_CONFLICT, false, null));
+        when(step.hasCommitted(any())).thenReturn(false);
+        when(requests.databaseNow()).thenReturn(Instant.now());
+
+        var result = useCase.grab(ERRAND_ID, RUNNER_ID, REQUEST_ID, 0);
+
+        assertEquals(ErrorCode.REQUEST_PROCESSING, result.code());
+        assertEquals(202, result.httpStatus());
+        verify(step, never()).finish(any(), any(), anyInt(), eq(false));
+    }
+
+    @Test
     @DisplayName("同 requestId 终态重放直接返回持久结果，不再执行抢单")
     void grab_replays_terminal_request_without_executing() {
         Errand errand = errand(ErrandStatus.PUBLISHED, 0, 0);

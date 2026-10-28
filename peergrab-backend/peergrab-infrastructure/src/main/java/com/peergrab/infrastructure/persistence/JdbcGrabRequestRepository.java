@@ -130,6 +130,18 @@ public class JdbcGrabRequestRepository implements GrabRequestRepository {
     }
 
     @Override
+    public boolean upgradeExpiredToSucceeded(long campusId, long id, String resultCode,
+                                             int httpStatus, String resultJson) {
+        int updated = jdbc.update("""
+                UPDATE grab_request
+                   SET status = 'SUCCEEDED', result_code = ?, http_status = ?, result_json = ?,
+                       completed_at = CURRENT_TIMESTAMP(3)
+                 WHERE campus_id = ? AND id = ? AND status = 'EXPIRED'
+                """, resultCode, httpStatus, resultJson, campusId, id);
+        return updated == 1;
+    }
+
+    @Override
     public List<GrabRequest> findExpired(int limit) {
         if (limit < 1) {
             throw new IllegalArgumentException("扫描批次必须为正数");

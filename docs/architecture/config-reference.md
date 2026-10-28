@@ -164,6 +164,8 @@
 | `peergrab.credit.calibration-batch-size` | `1000` | 单批用户数 | worker |
 | `peergrab.credit.ranking-rebuild-interval-ms` | `60000` | 信用榜单重建周期 | worker |
 
+> `runner-limit.*` 的适配器在两个进程都会装配，但只有 API 的 v2 抢单入口读取；worker 不参与抢单。
+
 ## 抢单请求幂等（grab-request.*）
 
 | 键 | 默认值 | 作用 | 生效进程 |

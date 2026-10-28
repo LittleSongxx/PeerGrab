@@ -244,7 +244,9 @@ public class ErrandController {
             @RequestHeader(value = "X-Request-Id", required = false) String requestId,
             @RequestBody(required = false) GrabV2Request req) {
         if (requestId == null || requestId.isBlank()) {
-            throw new BizException(ErrorCode.INVALID_ARGUMENT, "X-Request-Id 必须为非空 UUID");
+            // 不能走 BizException：全局处理器会把业务异常映射成 HTTP 200，v2 入口缺键必须是 400。
+            return ResponseEntity.badRequest()
+                    .body(Result.fail(ErrorCode.INVALID_ARGUMENT, (GrabRequestUseCase.Result) null));
         }
         int expectedRound = req == null || req.expectedRound() == null ? 0 : req.expectedRound();
         return respondGrabRequest(grabRequestUseCase.grab(errandId, CurrentUser.get(), requestId, expectedRound));
@@ -260,7 +262,13 @@ public class ErrandController {
     private ResponseEntity<Result<GrabRequestUseCase.Result>> respondGrabRequest(GrabRequestUseCase.Result r) {
         Result<GrabRequestUseCase.Result> body = r.code() == ErrorCode.OK
                 ? Result.ok(r) : Result.fail(r.code(), r);
-        return ResponseEntity.status(r.httpStatus()).body(body);
+        ResponseEntity.BodyBuilder builder = ResponseEntity.status(r.httpStatus());
+        // HTTP 规范里 Retry-After 是秒；body 里的 retryAfterMillis 保留毫秒精度给前端。
+        if (r.retryAfterMillis() > 0 && (r.httpStatus() == 429 || r.httpStatus() == 503)) {
+            long seconds = Math.max(1, (r.retryAfterMillis() + 999) / 1000);
+            builder.header("Retry-After", Long.toString(seconds));
+        }
+        return builder.body(body);
     }
 
     public record GrabV2Request(Integer expectedRound) {}

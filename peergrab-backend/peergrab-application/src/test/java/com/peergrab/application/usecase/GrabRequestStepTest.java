@@ -1,11 +1,11 @@
 package com.peergrab.application.usecase;
 
-import com.peergrab.domain.errand.ports.ErrandRepository;
 import com.peergrab.domain.grab.model.GrabRecord;
 import com.peergrab.domain.grab.model.GrabRequest;
 import com.peergrab.domain.grab.model.GrabRequestStatus;
 import com.peergrab.domain.grab.ports.GrabRecordRepository;
 import com.peergrab.domain.grab.ports.GrabRequestRepository;
+import com.peergrab.shared.ErrorCode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -33,7 +33,7 @@ class GrabRequestStepTest {
     void setUp() {
         requests = mock(GrabRequestRepository.class);
         records = mock(GrabRecordRepository.class);
-        step = new GrabRequestStep(requests, records, mock(ErrandRepository.class));
+        step = new GrabRequestStep(requests, records);
     }
 
     @Test
@@ -76,7 +76,25 @@ class GrabRequestStepTest {
     }
 
     @Test
-    @DisplayName("已被其他线程终结的请求直接返回当前状态，不重复写")
+    @DisplayName("业务提交晚于恢复判定：EXPIRED 可凭 grab_record 单向升级为 SUCCEEDED")
+    void finish_upgrades_expired_when_business_committed() {
+        GrabRequest expired = request(GrabRequestStatus.EXPIRED, 0);
+        GrabRequest succeeded = request(GrabRequestStatus.SUCCEEDED, 0);
+        when(requests.lockById(CAMPUS_ID, 1L)).thenReturn(Optional.of(expired));
+        when(records.findGrabbedByRequestId(CAMPUS_ID, ERRAND_ID, REQUEST_ID, 0))
+                .thenReturn(Optional.of(GrabRecord.grabbed(8L, CAMPUS_ID, ERRAND_ID, RUNNER_ID, 1, 0, REQUEST_ID)));
+        when(requests.upgradeExpiredToSucceeded(eq(CAMPUS_ID), eq(1L), eq("OK"), eq(200), anyString()))
+                .thenReturn(true);
+        when(requests.findById(CAMPUS_ID, 1L)).thenReturn(Optional.of(succeeded));
+
+        GrabRequest result = step.finish(expired, ErrorCode.OK, 200, true);
+
+        assertEquals(GrabRequestStatus.SUCCEEDED, result.status());
+        verify(requests).upgradeExpiredToSucceeded(eq(CAMPUS_ID), eq(1L), eq("OK"), eq(200), anyString());
+    }
+
+    @Test
+    @DisplayName("未被其他线程终结的请求直接返回当前状态，不重复写")
     void reconcile_is_idempotent_on_terminal_request() {
         GrabRequest succeeded = request(GrabRequestStatus.SUCCEEDED, 0);
         when(requests.lockById(CAMPUS_ID, 1L)).thenReturn(Optional.of(succeeded));

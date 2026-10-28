@@ -110,7 +110,9 @@ export default function Detail({ errandId }: Props) {
   // 查询终态，避免出现「其实已抢中、页面却还显示可抢」的误导。
   useEffect(() => {
     if (grabRecoveryDone.current) return;
-    if (!card || card.status !== 'PUBLISHED' || !card.availableActions.includes('GRAB')) return;
+    // 只要这个用户在当前任务上存在未终结请求键就恢复一次；不要求卡片仍可抢——
+    // “已抢中但响应丢失”时卡片通常已是 LOCKED，按 PUBLISHED+GRAB 过滤会永远不恢复。
+    if (!card) return;
     grabRecoveryDone.current = true;
     recoverPendingGrab(card.id, card.round)
       .then((outcome) => {
@@ -119,10 +121,11 @@ export default function Detail({ errandId }: Props) {
           showToast('success', '上次抢单已成功，正在刷新任务状态。');
           load();
         } else if (outcome.kind === 'failure') {
-          showToast('error', `${outcome.message}（${outcome.code}）`);
-          load();
+          showToast(outcome.retryable ? 'info' : 'error', `${outcome.message}（${outcome.code}）`);
+          if (!outcome.retryable) load();
+        } else if (outcome.kind === 'processing') {
+          showToast('info', outcome.message);
         }
-        // processing：预算内仍未确定，持久键保留给下一次恢复。
       })
       .catch(() => {
         // 恢复查询失败不阻断详情加载；用户手动抢单时会复用同一 requestId 再次收敛。

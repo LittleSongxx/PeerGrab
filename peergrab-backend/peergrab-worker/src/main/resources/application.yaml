@@ -82,6 +82,7 @@ peergrab:
     publish-request-days: 30    # 发布幂等窗口：不得短于客户端离线重试/补发上限
     notification-days: 180
     sync-diff-days: 90
+    grab-request-days: 30   # 终态请求保留幂等窗口；PROCESSING 永不清理
 
 server:
   port: 8082

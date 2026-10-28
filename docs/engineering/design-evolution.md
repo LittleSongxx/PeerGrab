@@ -350,7 +350,7 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 
 - `RunnerRateLimitIT`：跨任务桶共享、单任务桶独立、查询桶独立、Retry-After > 0（真实 Redis）。
 - `InternalAuthInterceptorTest`：未配置/正确/错误/短 token 启动失败。
-- 2026-10-28 隔离 MySQL/Redis 全量运行：`mvn -B -ntp -Dpeergrab.it=true test` 合计 **342 项、0 失败、0 错误、0 跳过，其中 88 项 IT 真实执行**。
+- 2026-10-28 隔离 MySQL/Redis 全量运行：`mvn -B -ntp -Dpeergrab.it=true test` 合计 **342 项、0 失败、0 错误、0 跳过，其中 88 项 IT 真实执行**；交付前审查补强后最终为 **350 项、0 失败、0 错误、0 跳过，其中 93 项 IT 真实执行（34 个 IT 报表文件）**。
 - 真实栈联调（独立库 `peer_grab_live` + 独立 Redis DB）：`bench/scripts/verify_grab_v2_live.py` 8 步全过；前端 `live_api_smoke.py` 对同一 API 11/11 通过，证明 v2 幂等/限流在真实 HTTP 链路上的契约成立。
 
 ## 5. 基础设施替换指引
@@ -500,7 +500,7 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 | 代码基线 | `c73389e`（2026-10-22；之后仅文档修订） | `git log --oneline -- peergrab-backend`（最近代码提交） |
 | 工作区 | 干净（`git status --short` 无输出） | `git status --short` |
 | 账户拓扑 | 每单 `ESCROW`/`COMMISSION`（`owner_id=errandId`），`ensureAccount` 幂等开户；旧 `-1`/`-2` 仅作历史/迁移数据；已提交 `9a8159d` | `WalletRepository`、`PublishErrandUseCase`、`Settle/Refund/Arbitrate`、`docker/init.sql`；[ADR](../architecture/wallet-account-topology.md) |
-| 后端测试 | **342 项、0 失败、0 错误、0 跳过；88 项 IT 真实执行**（2026-10-28） | [README](../../README.md) |
+| 后端测试 | **350 项、0 失败、0 错误、0 跳过；93 项 IT 真实执行（34 个 IT 报表文件）**（2026-10-28，含审查补强） | [README](../../README.md) |
 | 前端构建 | `npm run build` 通过 | 分析报告 §7；README 上线记录 |
 | 生产版本 | `5ace500`（2026-09-28 部署；当前代码基线未部署） | [后端 README](../../peergrab-backend/README.md) |
 | 当前代码基线是否上线 | README 未声明 `c73389e` 已部署 | README 上线段落 |
@@ -518,7 +518,7 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 - **289 / 0 跳过**：第二轮审计后的快照（§9.4）。
 - **318 / 80 IT**：2026-10-22 P11 口径（新增每单账户相关测试）；更早的 308/78 IT 为第三轮审计后口径。
 - **332 / 85 IT**：2026-10-28 P12 口径（新增持久幂等抢单 v2：9 项单测 + 5 项 IT）；与上一行不同代码与测试集，不能拿来算“测试增长”。
-- **342 / 88 IT**：2026-10-28 P2 口径（新增跑腿双桶限流与内部端点凭证：7 项单测 + 3 项 IT）。
+- **350 / 93 IT**：2026-10-28 P13 口径（新增跑腿双桶限流与内部端点凭证：7 项单测 + 3 项 IT；交付前审查补强 +3 项单测、+5 项 HTTP 契约 IT）。
 
 这些数字对应不同代码与测试集，不能拿来算“测试增长”或“覆盖率提升”。
 
