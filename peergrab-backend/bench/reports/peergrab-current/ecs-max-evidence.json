@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "project": "PeerGrab",
   "series": "peergrab-ecs-2026-09-26",
-  "provenance": "PeerGrab measurements on the owner's Alibaba Cloud ECS; separate from archived original-project experiments",
+  "provenance": "PeerGrab measurements on the owner's Alibaba Cloud ECS; separate from archived 2026-08 local same-machine historical experiments",
   "measurementDatesLocal": ["2026-09-26", "2026-09-27"],
   "source": {
     "ecsBenchCheckoutBaseCommit": "1d26dd2970fed5f62116af805e331251e3047cc4",

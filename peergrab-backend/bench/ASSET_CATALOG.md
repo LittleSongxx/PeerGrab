@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | 当前可执行计划 | `bench/jmeter/`、`bench/scripts/preflight.py`、`seed_bench.py`、`verify_fund.sql`、`cleanup.sh` | 跟踪在 Git；修改后跑测试、JMX 校验和隔离栈冒烟 |
 | 当前 ECS 报告 | [JMeter ECS 复测](reports/peergrab-current/report-ecs-jmeter-20260928.md)、[同镜像原工具六场景报告](reports/peergrab-current/report-ecs-spectrum-20260928.md) | 跟踪在 Git；按镜像、工具、路径、窗口和错误分母分开引用 |
-| 历史实验 | [PeerGrab 按版本报告索引](reports/peergrab-current/README.md)、[迁入前原版](reports/original-project/README.md) | 保留原结果和失效轮；不得把历史数字改标为现行 JMeter 或生产容量 |
+| 历史实验 | [PeerGrab 按版本报告索引](reports/peergrab-current/README.md)、[2026-08 本地同机历史实验](reports/historical-2026-08/README.md) | 保留原结果和失效轮；不得把历史数字改标为现行 JMeter 或生产容量 |
 | 私有原始证据 | Git 忽略的 `bench/runs/`；归档路径、大小和 SHA-256 见[私有归档索引](reports/private-evidence-index.json) | 当前本地共有 19 个压缩归档；不提交 JTL、JWT CSV、脱敏时序、生产备份或路由令牌 |
 | 可再生临时文件 | `bench/runs/jmeter-s2-*` 逐轮展开文件、`spectrum-20260928/server-extracted/`、本地 `jmeter-local-*` 测试输出 | 只有在逐文件确认已收入对应归档且哈希匹配后才可清理；需要时从归档重新展开 |
 

@@ -1,10 +1,10 @@
 # PeerGrab 历史压测工具运行手册
 
-> 本文从旧运行手册原样迁来，保留 2026-09 Vegeta、Java 和 Python 客户端的历史轮次复现说明，其中的固定项目名、路径和阈值不作为当前新测量的默认操作入口。现行 JMeter 入口与清理门禁见[压测运行手册](README.md)、[JMeter 场景计划](jmeter/README.md)。
+> 本文基于早期运行手册整理，保留 2026-09 Vegeta、Java 和 Python 客户端的历史轮次复现说明，其中的固定项目名、路径和阈值不作为当前新测量的默认操作入口。现行 JMeter 入口与清理门禁见[压测运行手册](README.md)、[JMeter 场景计划](jmeter/README.md)。
 
 这些工具只用于**可销毁的独立压测栈**。同机客户端要求本地 Docker 预检；异机 S2 客户端先通过 SSH 核对 ECS 的隔离栈，再走回环隧道或经身份校验的临时 HTTPS 白名单路由。公开演示库与旧项目卷绝不能作为压测目标。
 
-原版历史报告与 PeerGrab 当前实测分开存放，见[评测报告索引](reports/README.md)。
+2026-08 本地同机历史实验报告与 PeerGrab 当前实测分开存放，见[评测报告索引](reports/README.md)。
 
 ## 建立隔离栈
 

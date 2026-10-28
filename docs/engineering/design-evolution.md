@@ -54,7 +54,7 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 
 ## 4. P1–P11：分期、取舍与验证
 
-> **分期来源说明**：P1–P7 的编号来自源码注释（例如 `GrabErrandUseCase` 写“P7 引入”、`GrabRecord` 写“P1 索引没带 round、P2 暴露”、`DelayTaskPolicy` 写“P2/P3/P4”、`ErrandQueryPort` 写“P6 改造计划”），但本仓库公开提交从 P8 前后才开始，无法用 `git log` 还原 P1–P7 的交付顺序。P8–P10 可按提交与报告逐项核对；P11 是 2026-10 的每单账户模型，已提交为 `9a8159d`，并有迁移脚本、ADR 与本机 IT 观测报告；尚无 ECS/批量结算独立压测。下面的“验证”既引用当期报告，也引用今天仍可复跑的测试；两者会明确区分。
+> **分期来源说明**：P1–P7 为早期迭代，公开提交自 P8 阶段起可逐项核对；P1–P7 的分期编号来自源码注释与历史报告归档，交付细节以当期报告为准。P8–P10 可按提交与报告逐项核对；P11 是 2026-10 的每单账户模型，已提交为 `9a8159d`，并有迁移脚本、ADR 与本机 IT 观测报告；尚无 ECS/批量结算独立压测。下面的“验证”既引用当期报告，也引用今天仍可复跑的测试；两者会明确区分。
 
 ### P1：骨架与发布托管
 
@@ -232,7 +232,7 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 - 隔离栈工具链：`new_bench_env.py`、`preflight.py`、`seed_bench.py`、`collect_metrics.py`、`cleanup.sh`、`verify_fund.sql`。
 - HTTP 压测统一到 JMeter 5.6.3：`bench/jmeter/{business,s2,s6}` 共 7 个现行 JMX；S1/S3/S4 由 `run.py` 驱动，S2 支持异机公网与本机 HTTPS，S6 由 JMeter 发详情读、Python 控制暂停。
 - Java 客户端与探针：`SpikeLoadClient`、`CacheLoadClient`、`FundsHttpLoadClient`、`OpenLoopLoadClient`、`MixedWorkloadClient`、`S5TimelineProbe`、`DelayMessageProbe`。
-- 报告分层：`peergrab-current`（当前版本）与 `original-project`（迁入前原版）分开；失败轮与有效轮分开；私有证据哈希进 `ASSET_CATALOG.md` 与 `private-evidence-index.json`。
+- 报告分层：`peergrab-current`（当前版本）与 `historical-2026-08`（2026-08 本地同机历史实验）分开；失败轮与有效轮分开；私有证据哈希进 `ASSET_CATALOG.md` 与 `private-evidence-index.json`。
 
 **关键取舍**
 
