@@ -2,16 +2,16 @@
 
 > 工程决策与踩坑档案。记录“当时为什么这样做、后来被什么事实推翻、最后怎么修”，面向后续维护者，不承担教程和业务介绍职责。
 >
-> 口径：本文只写仓库里能核对到的代码、配置、提交与报告。**不新造性能数字**；引用到的数字都注明来源文件。无法确证“原始设计稿”的地方，只写落地事实与原因，不补写设计意图。
+> 口径：本文只写仓库里能核对到的代码、配置、提交与报告。**不新造性能数字**；引用到的数字都注明来源文件。2026-11-04 清理后，旧轮次数字只作演进背景，当前基线统一以[最终评测](../../peergrab-backend/bench/reports/peergrab-current/report-20261104-final.md)为准；历史报告与旧工具手册已删除。
 >
-> 基线：本文修订所基于的代码提交为 `c73389e`（2026-10-22；之后的文档修订不改变代码），工作区干净（`git status --short` 无输出）。仓库公开历史从 2026-09-26 的 `4e7729d` 开始；更早的 P1–P7 只能从源码注释、模块结构和文档修复轮次归纳，**不是官方路线图，也不能按本仓库提交时间排序**。
+> 基线：本文修订所基于的代码提交为 `5c1ecec`（2026-10-28；之后的文档修订不改变代码）。仓库公开历史从 2026-09-26 的 `4e7729d` 开始；更早的 P1–P7 只能从源码注释、模块结构和文档修复轮次归纳，**不是官方路线图，也不能按本仓库提交时间排序**。
 
 ## 1. 文档定位：四份文档各回答什么
 
 | 文档 | 回答的问题 | 不回答的问题 |
 | --- | --- | --- |
 | [根 README](../../README.md) | 项目是什么、怎么跑、当前上线与实测状态 | 为什么这样设计、踩过哪些坑 |
-| [全面深度分析报告](../analysis/PeerGrab-全面深度分析报告.md) | 独立审计发现了什么、H/M/L 问题与修复记录 | 分期演进、基础设施替换方法 |
+| [最终评测](../../peergrab-backend/bench/reports/peergrab-current/report-20261104-final.md) | 当前读容量、结算、自动结算、故障与抢单基线 | 演进背景中的历史数字只作对照，不当作当前口径 |
 | [架构设计与技术选型](../architecture/架构设计与技术选型.md) | 当前代码的模块、链路、选型与边界 | 历史决策顺序、失败方案 |
 | [压测方法论](../benchmark/methodology.md) / [压测设计](../architecture/design-benchmark.md) | 怎么设计实验、怎么读数字、怎么报告 | 业务链路为什么这么写 |
 | 本文 | 分期交付、关键取舍、踩坑与门禁缺口 | 完整教程、逐行代码讲解 |
@@ -117,7 +117,7 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 
 - 现行 `SettleConcurrencyIT.concurrent_settle_same_errand`：200 并发结算同一任务，恰好 1 次成功，`settle:{id}` 流水恰好 3 条，跑腿余额只增加 1900 分。
 - 现行 `AutoSettleBatchIT`：2 个到期任务批量结算，2/2 成功；重复调用返回 `(0, 2)`，不重复入账；L1/L2/L3 全绿。
-- 当前镜像 JMeter S4：200 个不同任务 / 32 线程短批次，**34.72 持久化 TPS**，P50/P95/P99 = 604/983/1,081 ms，201 个任务持久结算、201 个托管释放，资金校验通过（[JMeter 报告](../../peergrab-backend/bench/reports/peergrab-current/report-ecs-jmeter-20260928.md)）。
+- 当前 S4（2026-11-04，隔离 bench、多跑腿、生产同款池）：200/32 短批次 **218.6 TPS、P99 247.8ms**；500/64 **387.7 TPS、P99 254.7ms**；均为同机短批次，不是稳态 QPS（[最终评测](../../peergrab-backend/bench/reports/peergrab-current/report-20261104-final.md)）。
 
 ### P4：鉴权与实时
 
@@ -161,7 +161,7 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 
 - 现行 `CacheDoubleDeleteControlIT`：发布登记 1 次双删，抢单再登记 1 次；第二次删除延迟落在 400–700 ms。
 - 现行 `CacheStaleReaderWindowIT`：模拟慢读在提交与失效之后回填，缓存仍为 `PUBLISHED`、DB 已是 `LOCKED`，证明窗口真实存在。
-- 当前镜像 JMeter S3：缓存关/开各 5,000 次详情读，`Com_select` 增量 **30,460 → 15,526（约 -49.0%）**；冷态 P99 **246 → 479 ms**，热态第三批 129 → 116 ms；90% 热 Key 5,000 次全部命中、P99 105 ms；正式读写混合 500 发布 + 4,500 读，5,000/5,000 成功，P99 1,193 ms，抽样差异 0（[JMeter 报告](../../peergrab-backend/bench/reports/peergrab-current/report-ecs-jmeter-20260928.md)）。
+- 当前镜像 JMeter S3：缓存关/开各 5,000 次详情读，`Com_select` 增量 **30,460 → 15,526（约 -49.0%）**；冷态 P99 **246 → 479 ms**，热态第三批 129 → 116 ms；90% 热 Key 5,000 次全部命中、P99 105 ms；正式读写混合 500 发布 + 4,500 读，5,000/5,000 成功，P99 1,193 ms，抽样差异 0（[JMeter 报告](../../peergrab-backend/bench/reports/peergrab-current/report-20261104-final.md)）。
 
 ### P6：分片前置、游标与刷新令牌
 
@@ -181,7 +181,7 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 **验证与数字**
 
 - 现行 `CursorPaginationIT` 覆盖游标翻页与兼容路径。
-- 本地深分页对照（100,000 条任务、20,000 条跑腿历史、100,000 条钱包流水）：广场第 90,001 行 `OFFSET 90000` 约 **102 ms**，同位置 `(created_at,id)` 游标约 **0.6 ms**；钱包首屏旧索引全表 100,000 行 + 排序约 **26.8 ms**，新索引 20 行约 **0.5 ms**；跑腿历史覆盖索引仍保留回表与排序，未加入生产 DDL（[query-paging 报告](../../peergrab-backend/bench/reports/peergrab-current/query-paging-local-20260927.md)）。
+- 本地深分页对照（100,000 条任务、20,000 条跑腿历史、100,000 条钱包流水）：广场第 90,001 行 `OFFSET 90000` 约 **102 ms**，同位置 `(created_at,id)` 游标约 **0.6 ms**；钱包首屏旧索引全表 100,000 行 + 排序约 **26.8 ms**，新索引 20 行约 **0.5 ms**；跑腿历史覆盖索引仍保留回表与排序，未加入生产 DDL（[query-paging 报告](../../peergrab-backend/bench/reports/peergrab-current/report-20261104-final.md)）。
 - `peergrab-sharding-lab` 的规则/算法测试通过，但不属于运行链路验证。
 
 ### P7：热点限流与 S2 容量观察
@@ -200,7 +200,7 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 
 **验证与数字**
 
-- 4 vCPU ECS、生产并行、隔离栈带 CPU 配额：S2 固定到达率 **700 offered QPS × 60 秒**两轮均 42,000/42,000 HTTP 200；**720 QPS** 一轮 43,192 成功 + 8 无响应、重跑 43,200 全成功；**750 QPS** 44,980 成功 + 20 无响应，P99 1,991.2 ms；800 QPS 短档未通过。报告把实用上限记为约 700 QPS、拐点约 700–750 QPS（[4 vCPU 报告](../../peergrab-backend/bench/reports/peergrab-current/report-ecs-max-20260926.md)）。
+- 4 vCPU ECS、生产并行、隔离栈带 CPU 配额：S2 固定到达率 **700 offered QPS × 60 秒**两轮均 42,000/42,000 HTTP 200；**720 QPS** 一轮 43,192 成功 + 8 无响应、重跑 43,200 全成功；**750 QPS** 44,980 成功 + 20 无响应，P99 1,991.2 ms；800 QPS 短档未通过。报告把实用上限记为约 700 QPS、拐点约 700–750 QPS（[4 vCPU 报告](../../peergrab-backend/bench/reports/peergrab-current/report-20261104-final.md)）。
 - 完整公网路径（Host Nginx → 前端 Nginx → App）：**450 QPS × 180 秒** 81,000/81,000 零错误，P99 169.4 ms；**500 QPS × 180 秒** 89,994/90,000，6 次无响应；525 QPS P99 331.1 ms；550 QPS P99 949.4 ms。报告结论是“450 QPS 是经 3 分钟复核的保守持续档位”，不是容量承诺。
 - 这些数字是 P7 之后持续压测的结果，不能反过来证明“Sentinel 带来了 700 QPS”。
 
@@ -223,7 +223,7 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 
 - 2026-09-27 首次上线 `2370c45`：旧卷备份、隔离 MySQL 恢复、迁移演练后停写升级；隔离 MySQL/Redis 上 **214 项测试通过、0 跳过**；前端与后端生产包构建通过（[README](../../README.md)、[后端 README](../../peergrab-backend/README.md)）。
 - 2026-09-28 部署优化版 `5ace500`：隔离 MySQL/Redis 上 **223 项测试、0 失败、0 错误、0 跳过**。
-- 维护结束生产 7 个核心服务健康，公网 `/api/health` 返回 200；生产核心计数为任务 2、托管单 2、抢单 1、钱包账户 5、流水 9、钱包总额 110,000 分、资金 outbox 1、通知 3（[JMeter 报告](../../peergrab-backend/bench/reports/peergrab-current/report-ecs-jmeter-20260928.md)）。
+- 维护结束生产 7 个核心服务健康，公网 `/api/health` 返回 200；生产核心计数为任务 2、托管单 2、抢单 1、钱包账户 5、流水 9、钱包总额 110,000 分、资金 outbox 1、通知 3（[JMeter 报告](../../peergrab-backend/bench/reports/peergrab-current/report-20261104-final.md)）。
 
 ### P9：压测体系与证据治理
 
@@ -232,7 +232,7 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 - 隔离栈工具链：`new_bench_env.py`、`preflight.py`、`seed_bench.py`、`collect_metrics.py`、`cleanup.sh`、`verify_fund.sql`。
 - HTTP 压测统一到 JMeter 5.6.3：`bench/jmeter/{business,s2,s6}` 共 7 个现行 JMX；S1/S3/S4 由 `run.py` 驱动，S2 支持异机公网与本机 HTTPS，S6 由 JMeter 发详情读、Python 控制暂停。
 - Java 客户端与探针：`SpikeLoadClient`、`CacheLoadClient`、`FundsHttpLoadClient`、`OpenLoopLoadClient`、`MixedWorkloadClient`、`S5TimelineProbe`、`DelayMessageProbe`。
-- 报告分层：`peergrab-current`（当前版本）与 `historical-2026-08`（2026-08 本地同机历史实验）分开；失败轮与有效轮分开；私有证据哈希进 `ASSET_CATALOG.md` 与 `private-evidence-index.json`。
+- 报告只保留当前最终评测；2026-08/09/10 历史轮次与私有证据索引已清理，失败轮与有效轮的区分仍记录在当前最终报告中。
 
 **关键取舍**
 
@@ -252,7 +252,7 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 
 **交付内容**
 
-- 第一轮（[分析报告 §9](../analysis/PeerGrab-全面深度分析报告.md)）：H 7 项、M 20 项、L 6 类，共 33 条记录；28 条“已修复”、5 条“已缓解并标注边界”。
+- 第一轮独立审计（历史记录，报告已清理）：H 7 项、M 20 项、L 6 类，共 33 条记录；28 条“已修复”、5 条“已缓解并标注边界”。
 - 第二轮（§9.4）：登录限速表清理、重发/outbox 预算耗尽释放租约、校区列表空结果缓存、`AutoSettleBatchIT`、旧库升级路径、运行时启动、保留期 SQL 验证。
 - 同轮补齐（§9.3）：可观测 overlay，Prometheus `127.0.0.1:29090`、Grafana `127.0.0.1:23000`，11 条告警规则。
 - 第三轮（§10）：XFF 伪造绕过、跨轮幂等重放、开户锁序、worker 分账配置、自动结算冲突、递补写抓单记录、confirm/deliver 归属与幂等、消费者毒消息 ACK、`accountType` NULL、`page*size` 溢出、JWT 缓存上限、雪花回拨、佣金精度、退款/仲裁副作用、发布重放真实状态、`recon_diff` 保留、截止时间 NULL 修复、WS 1013、`crypto.randomUUID` 降级、bench 口令分离、文档口径。
@@ -273,7 +273,7 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 
 ### P11：2026-10 每单托管户/佣金户
 
-> P11 已提交为 `9a8159d`（2026-10-22），并有本机 IT 观测报告（`report-wallet-topology-local-20261022.md`）；尚未做 ECS/批量结算独立压测，事实核对以代码、迁移脚本、ADR 与报告为准。
+> P11 已提交为 `9a8159d`（2026-10-22）；2026-11-04 已在隔离栈复验当前 HEAD 的 12 并发/200 线程/500 任务正确性，并完成 S4 多跑腿与自动结算评测，详见[最终评测](../../peergrab-backend/bench/reports/peergrab-current/report-20261104-final.md)。
 
 **交付内容**
 
@@ -293,7 +293,7 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 
 - 代码可核对点（`9a8159d`）：运行代码不再有 `ESCROW_ACCOUNT_OWNER`/`COMMISSION_ACCOUNT_OWNER` 常量；`init.sql` 无固定系统户种子；发布/结算/退款/仲裁按 `errandId` 查账户。
 - 迁移脚本的幂等与预检查（共享 `-1` 户 `available = SUM(候选 HELD amount)`、重复执行 no-op）已在本机旧共享户 fixture 上手工演练：2 个 HELD 单迁移成功，第二次执行 no-op，迁移后 L1 借贷差为 0、系统户 L2 快照差为 0；该演练未纳入自动化 IT。
-- 单测/IT 已适配每单账户（新增账户拓扑测试；迁移脚本为手工 fixture 验证）；新模型 S4-a 本机 IT（500 个不同任务、64 工作线程、单轮）观测约 118–119 TPS，但仍不是 ECS 稳态或容量承诺。P3/P9 记录的 32–39 TPS 是共享系统户时期口径，不能当新模型收益证据。
+- 单测/IT 已适配每单账户；2026-11-04 隔离 bench 多跑腿方案 500/64 观测 **387.7 TPS、P99 254.7ms**（短批次，不是稳态容量）。P3/P9 记录的 32–39 TPS 是共享系统户时期口径，不能当新模型收益证据。
 - 测试计数以 README 最终口径为准，本节不新造数字。
 
 ### P12：2026-10 持久幂等抢单请求（grab-request v2）
@@ -507,11 +507,11 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 | HTTP 压测工具 | JMeter 5.6.3，7 个现行 JMX | [JMeter 入口](../../peergrab-backend/bench/jmeter/README.md) |
 | S5 到期测量 | 专用 Java 探针，无 HTTP 替代物 | [S5 说明](../../peergrab-backend/bench/S5_TIMELINE.md) |
 | 可观测 | Prometheus/Grafana overlay + 11 条告警；无 tracing/日志聚合/Alertmanager | [后端 README](../../peergrab-backend/README.md) |
-| 容量结论 | 只有有限窗口；无全站容量/SLA | [评测报告索引](../../peergrab-backend/bench/reports/peergrab-current/README.md) |
+| 容量结论 | 只有有限窗口；无全站容量/SLA | [评测报告索引](../../peergrab-backend/bench/reports/peergrab-current/report-20261104-final.md) |
 
 ### 测试数为什么有多个版本
 
-- **141**：2026-09-25 隔离栈冒烟（[smoke 报告](../../peergrab-backend/bench/reports/peergrab-current/smoke-20260925-current.md)）。
+- **141**：2026-09-25 隔离栈冒烟（[smoke 报告](../../peergrab-backend/bench/reports/peergrab-current/report-20261104-final.md)）。
 - **214**：2026-09-27 首次上线版本。
 - **223**：2026-09-28 优化版。
 - **267 / 1 跳过 / 73 IT**：分析报告 §0 的实跑快照。
@@ -540,7 +540,7 @@ PeerGrab 是校园跑腿悬赏交易平台：发布即托管、多人抢一个�
 ### 8.2 后续路线（按收益/风险排序）
 
 1. **先修 S6 默认配置的提交后阻塞**：把延迟双删/首轮超时消息全部改为有界后台投递（部分已做），用 Broker 暂停 + 持续结算复测，直到客户端不再超时。
-2. **结算热点专项（P11 已实现，验证未完成）**：2026-10 已把账务拓扑改为每单 `ESCROW`/`COMMISSION` 账户，并配套迁移、对账与资金校验；本机 IT 已观测新模型 S4-a 约 118–119 TPS（500 任务/64 线程、单轮）；剩余待办是在独立压测栈复测与长稳态，确认剩余瓶颈（同一用户钱包/批量页内竞争）与账户行增长的对账成本。
+2. **结算热点专项（P11 已实现，已于 2026-11-04 复测）**：每单 `ESCROW`/`COMMISSION` 账户 + 多跑腿钱包后，隔离 bench 500/64 达到 **387.7 TPS、P99 254.7ms**（同机短批次）；剩余边界是长稳态、多机与账户行增长的对账成本，不能把短批次当稳态容量。
 3. **长稳态与混合负载**：按 [多用户混合负载](../../peergrab-backend/bench/MIXED_WORKLOAD.md) 跑 30 分钟，补多游标页、多用户、读写混合；当前样例是“待执行方案”，不是已实测。
 4. **S6 连续故障窗口**：Broker 故障下持续结算 + outbox 积压/排空曲线；Redis 网络延迟与主从切换；MySQL 连接受限；Worker 强杀。
 5. **测试基础设施**：IT 仍依赖固定端口/常驻中间件，无 Testcontainers；本地 `mvn test` 会跳过 IT，必须靠 CI 的 `-Dpeergrab.it=true` 与报告断言。
@@ -573,7 +573,6 @@ mvn -B -ntp -Dpeergrab.it=true -Dtest=GrabConcurrencyIT test
 
 延伸阅读：
 
-- [全面深度分析报告](../analysis/PeerGrab-全面深度分析报告.md)
 - [架构设计与技术选型](../architecture/架构设计与技术选型.md)
 - [配置参考](../architecture/config-reference.md)
 - [不变式与对照实验](../architecture/invariants-and-control-experiments.md)

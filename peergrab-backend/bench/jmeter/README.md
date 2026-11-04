@@ -13,4 +13,4 @@
 
 JMeter 的线程数、目标 RPS、已发送请求数是不同概念。S2 的固定用户池可复用连接，但当全部线程等待响应时会低于目标速率，**不等同于严格开放到达模型**；与旧 Vegeta 的连接和定时模型不同，不能直接计算 P99 改善。S1 的 Synchronizing Timer 释放线程并不等于网络请求在同一时刻进入应用；S3/S4 的短批次完成率不叫长期稳态 TPS。每轮同时披露预热、样本窗口、JTL 业务断言、传输错误、客户端资源和数据库真值。
 
-安装二进制时从[Apache 官方下载页](https://jmeter.apache.org/download_jmeter.cgi)获取并核验 SHA-512；负载测试按[Apache 官方建议](https://jmeter.apache.org/usermanual/best-practices.html)使用 `-n` CLI，关闭 GUI 大监听器并只保存必要的 JTL 字段。[当前镜像的 JMeter ECS 实测](../reports/peergrab-current/report-ecs-jmeter-20260928.md)与[先前 Vegeta／Java 的 ECS 报告](../reports/peergrab-current/report-ecs-spectrum-20260928.md)分开归档，不能因为替换了工具就计算性能收益。JMeter 的静态 HTML 测试报告也不等于生产 Grafana 指标看板。
+安装二进制时从[Apache 官方下载页](https://jmeter.apache.org/download_jmeter.cgi)获取并核验 SHA-512；负载测试按[Apache 官方建议](https://jmeter.apache.org/usermanual/best-practices.html)使用 `-n` CLI，关闭 GUI 大监听器并只保存必要的 JTL 字段。当前评测统一见[2026-11-04 最终评测](../reports/peergrab-current/report-20261104-final.md)；JMeter 计划仍保留为可执行工具，不与 Vegeta/Maven 数字合并计算收益。JMeter 的静态 HTML 测试报告也不等于生产 Grafana 指标看板。

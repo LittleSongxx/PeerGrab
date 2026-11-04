@@ -1,6 +1,6 @@
 # PeerGrab 压测运行手册
 
-现有 HTTP 场景主要使用 [Apache JMeter 5.6.3 计划](jmeter/README.md)；持续的[读+发布混合负载](MIXED_WORKLOAD.md)使用新 Java 固定到达率客户端。两种工具的到达分布、连接模型和结果必须分别标注。[ECS JMeter 实测](reports/peergrab-current/report-ecs-jmeter-20260928.md)与[旧工具报告](reports/peergrab-current/README.md)分开归档。S5 测量的是 Worker 到期事件，仍由专用探针造数和核验。预检、SQL 资金核对和故障解冻脚本不属于 HTTP 发压器，继续保留。旧 Vegeta／Java／Python 发压命令集中在[历史运行手册](LEGACY_RUNBOOK.md)，不得把旧数字重标为 JMeter 结果。
+现有 HTTP 场景保留 [JMeter 计划](jmeter/README.md)；2026-11-04 最终评测使用 Vegeta／Maven 客户端，统一见[最终评测](reports/peergrab-current/report-20261104-final.md)。S5 测量的是 Worker 到期事件，仍由[专用探针](S5_TIMELINE.md)造数和核验。预检、SQL 资金核对和故障解冻脚本不属于 HTTP 发压器，继续保留。旧的 Vegeta／Java／Python 运行手册与历史报告已清理，不得把旧数字重标为当前结果。
 
 压测只允许使用**全新、可销毁的 `peergrab-bench-*` Compose 项目和独立数据卷**。`run_id` 用于追溯，不提供数据隔离；[`cleanup.sh`](scripts/cleanup.sh)仅删除重新核验身份的整套测试栈，不按轮次删业务行。正式 ECS 加压安排停站维护窗口或同规格独立目标机，禁止对演示库或生产数据发压。
 

@@ -2,7 +2,7 @@
 
 > 本文定义“系统必须始终成立什么”，并给出断言点、代码落点、验证测试与对照实验。它不重复[架构设计](架构设计与技术选型.md)的链路讲解，也不重复[压测方法论](../benchmark/methodology.md)的运行步骤。
 >
-> 配套阅读：[压测方法论](../benchmark/methodology.md)、[压测设计](design-benchmark.md)、[设计演进记录](../engineering/design-evolution.md)、[全面深度分析报告](../analysis/PeerGrab-全面深度分析报告.md)。
+> 配套阅读：[压测方法论](../benchmark/methodology.md)、[压测设计](design-benchmark.md)、[设计演进记录](../engineering/design-evolution.md)。
 >
 > 口径：只写当前代码可核对的事实；实测数字未回填的地方保留占位符，不编造。
 
@@ -217,7 +217,6 @@ mvn -B -ntp -Dpeergrab.it=true -Dtest=CacheStaleReaderWindowIT test
 - [压测方法论](../benchmark/methodology.md)：环境隔离、预热、指标口径、拐点判定、报告模板。
 - [压测设计](design-benchmark.md)：场景与实验设计、变量控制、样本量。
 - [设计演进记录](../engineering/design-evolution.md)：这些不变式是为什么变成现在这样的，以及踩过哪些坑。
-- [全面深度分析报告](../analysis/PeerGrab-全面深度分析报告.md)：独立审计发现与修复记录。
 
 如果代码修改触及以下任一位置，应先更新本文的断言表，再改测试：
 

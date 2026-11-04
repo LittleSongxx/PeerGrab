@@ -1,0 +1,123 @@
+{
+  "schemaVersion": 1,
+  "project": "PeerGrab",
+  "series": "final-2026-11-04",
+  "measurementTimezone": "Asia/Shanghai",
+  "codeBaseline": "5c1ecec",
+  "environment": {
+    "serviceHost": "Alibaba Cloud ECS, 8 vCPU, 14 GiB, single Docker Compose host",
+    "loadGenerator": "separate 4 vCPU / 7.4 GiB host, Vegeta fixed arrival for read; Maven bench clients for S1/S4; Python for S6 detail",
+    "isolatedStacks": "peergrab-bench-* disposable MySQL 8 / Redis 7 / RocketMQ 5; destroyed after each run",
+    "productionStoppedDuringBench": true,
+    "readStack": "bench app with production-like Hikari 50 / Tomcat 400; MySQL max_connections=300; HTTP; 10k hot-page seed",
+    "s4Stack": "bench app with Hikari 50 / Tomcat 400; 512 runner wallets; same-host load client",
+    "autoSettleStack": "bench app/worker, MQ disabled, 1s scan, batch 500",
+    "faultStack": "bench app/worker, MQ enabled; single-node pause 25-30s"
+  },
+  "readCapacity": {
+    "scenario": "S2 cursor first page, campus=1, size=20, 10k PUBLISHED, HTTP, 200 workers",
+    "runs": [
+      {"offeredRps": 2450, "durationSeconds": 60, "rounds": 3, "actualRps": [2450.046, 2450.011, 2450.011], "transportErrors": 0, "p99Ms": [12.771, 14.400, 122.025], "maxMs": [42.317, 70.252, 454.425], "verdict": "0-error ceiling"},
+      {"offeredRps": 2500, "durationSeconds": 60, "rounds": 3, "actualRps": [2438.263, 2487.692, 2487.043], "transportErrors": [2, 2, 2], "p99Ms": [663.225, 556.097, 571.908], "verdict": "failure point"}
+    ],
+    "hikariComparison": [
+      {"hikariPool": 50, "offeredRps": 2450, "durationSeconds": 30, "p99Ms": 11.726},
+      {"hikariPool": 50, "offeredRps": 2500, "durationSeconds": 30, "p99Ms": 15.556},
+      {"hikariPool": 50, "offeredRps": 2550, "durationSeconds": 30, "actualRps": 2514.9, "p99Ms": 661.675, "transportErrors": 2},
+      {"hikariPool": 100, "offeredRps": 2450, "durationSeconds": 30, "actualRps": 2440.778, "p99Ms": 242.446},
+      {"hikariPool": 100, "offeredRps": 2500, "durationSeconds": 30, "actualRps": 2464.821, "p99Ms": 241.975},
+      {"hikariPool": 100, "offeredRps": 2525, "durationSeconds": 30, "actualRps": 2491.386, "p99Ms": 377.906, "transportErrors": 2},
+      {"hikariPool": 100, "offeredRps": 2550, "durationSeconds": 30, "actualRps": 2512.471, "p99Ms": 416.940}
+    ],
+    "decision": "keep Hikari 50; 2450 RPS zero-error ceiling, 2500 not stable; Hikari 100 worse"
+  },
+  "settlementS4": {
+    "scenario": "distinct tasks, HTTP lifecycle preparation, timed settle; 512 runner wallets; production-like pool",
+    "runs": [
+      {"count": 200, "threads": 32, "durableSettledTps": 218.62, "p50Ms": 123.677, "p95Ms": 230.971, "p99Ms": 247.841, "systemErrors": 0, "duplicateRejected": 0, "sameTaskAttempts": 8, "sameTaskDuplicateRejected": 7, "status": "PASS"},
+      {"count": 500, "threads": 64, "durableSettledTps": 387.70, "p50Ms": 151.403, "p95Ms": 221.594, "p99Ms": 254.735, "systemErrors": 0, "duplicateRejected": 0, "sameTaskAttempts": 8, "sameTaskDuplicateRejected": 7, "status": "PASS"}
+    ],
+    "dbInvariants": {"settled": [201, 501], "refunded": 2, "badLedger": 0, "globalDebitCredit": 0, "systemSnapshotDiffs": 0, "totalDelta": 0},
+    "note": "short batch, same-host, not steady-state TPS"
+  },
+  "autoSettle": {
+    "scenario": "1000 orders due at same time; worker scan-only; batch/page sizes as noted",
+    "runs": [
+      {"scanIntervalMs": 5000, "batchSize": 100, "p50Ms": 10682, "p95Ms": 22538, "p99Ms": 22572, "maxMs": 22581, "completed": 1000, "unprocessed": 0, "duplicates": 0, "fundsDiff": 0},
+      {"scanIntervalMs": 1000, "batchSize": 100, "p50Ms": 7133, "p95Ms": 14981, "p99Ms": 15017, "maxMs": 15026, "completed": 1000, "unprocessed": 0, "duplicates": 0, "fundsDiff": 0},
+      {"scanIntervalMs": 1000, "batchSize": 500, "p50Ms": 3156, "p95Ms": 11271, "p99Ms": 11307, "maxMs": 11316, "completed": 1000, "unprocessed": 0, "duplicates": 0, "fundsDiff": 0}
+    ],
+    "decision": "production applied 1000ms / batch 500"
+  },
+  "faultInjection": {
+    "redis": {
+      "pauseSeconds": 25,
+      "detailLoad": "Python 10 RPS random detail reads",
+      "runs": [
+        {"timeoutMs": 500, "pausedReads": 250, "p95Ms": 507.947, "maxMs": 519.057, "errors": 0},
+        {"timeoutMs": 100, "pausedReads": 250, "p95Ms": 107.532, "maxMs": 116.778, "errors": 0}
+      ],
+      "fundsDiff": 0,
+      "decision": "production applied 100ms timeout"
+    },
+    "mq": {
+      "pauseSeconds": 30,
+      "settleResponseMs": 180,
+      "dbSettledMsAfterPause": 19,
+      "outboxSentAfterRecoverySeconds": 2.7,
+      "notifications": 2,
+      "settlementLedgerRows": 3,
+      "fundsDiff": 0,
+      "note": "single settlement, single node"
+    }
+  },
+  "grabSpike": {
+    "concurrency": 2000,
+    "success": 1,
+    "slotFull": 1996,
+    "grabConflict": 3,
+    "rateLimited": 0,
+    "systemErrors": 0,
+    "totalMs": 3020,
+    "p50Ms": 1725,
+    "p95Ms": 2609,
+    "p99Ms": 2702,
+    "maxMs": 2804,
+    "dbSlotTaken": 1,
+    "note": "same-host, limiter disabled, only correctness claim"
+  },
+  "revalidatedITs": {
+    "PublishIdempotencyIT": {"tests": 1, "failures": 0, "errors": 0, "skipped": 0},
+    "SettleConcurrencyIT": {"tests": 2, "failures": 0, "errors": 0, "skipped": 0, "elapsedSeconds": 20.81}
+  },
+  "productionChanges": {
+    "file": "peergrab-backend/docker/docker-compose.tune.yaml",
+    "SPRING_DATA_REDIS_TIMEOUT": "100ms",
+    "PEERGRAB_SETTLE_SCAN_INTERVAL_MS": "1000",
+    "PEERGRAB_SETTLE_SCAN_BATCH_SIZE": "500",
+    "hikariPool": 50,
+    "backupGlob": "/root/docker-compose.tune.yaml.bak-*"
+  },
+  "retiredClaims": [
+    "500 target RPS / 269608 requests / P99 255ms (2026-09 JMeter)",
+    "shared-system-account 32-39 TPS",
+    "single-runner 90.2/77.4 TPS as final numbers",
+    "old 45.7->17.3s S5 and 8s/2.013s S6 control numbers",
+    "100-120 TPS settlement and 500 RPS square claims",
+    "18000 publishes / 30min as current parallel baseline"
+  ],
+  "privateEvidence": {
+    "directory": "peergrab-backend/bench/runs/20261104-final/",
+    "gitIgnored": true,
+    "files": [
+      "s4_multi_200.log", "s4_multi_500.log", "s1-2000.log",
+      "auto_settle_scan5.log", "auto_settle_scan_1s.log", "auto_settle_scan_batch500.log",
+      "s6_redis_100ms.log", "s6-redis.json", "s6-mq.json",
+      "peergrab-benchj-hikari50-summary.json", "peergrab-benchj-hikari100-summary.json",
+      "peergrab-benchj-2450x60-summary.json", "peergrab-benchj-2500x60-summary.json",
+      "peergrab-rerun-2450x60-w200-20261104-summary.json",
+      "peergrab-rerun-2500x60-w200-20261104-summary.json",
+      "it_revalidate.log", "it-publish.txt", "it-settle.txt"
+    ]
+  }
+}

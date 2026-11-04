@@ -71,7 +71,7 @@ docker compose --env-file .env -f docker-compose.yaml -f docker-compose.full.yam
 
 如果旧环境调整过确认或自动结算期限，执行 `migrate-runtime.sql` 前先按[生产迁移说明](docker/ECS_DEPLOY.md)在同一 MySQL 会话中设置原期限并验证回填。升级后检查 app、worker 的健康状态与 `/actuator/health/readiness`。
 
-2026-09-27 首次在单 ECS 演示站部署 `2370c45`：旧卷先备份、在隔离 MySQL 中恢复并试跑迁移，再停写执行正式迁移。新资金事件使用 `errand-fund-event-v2` 普通 Topic；一笔上线验收交易的 outbox 为 `SENT`、持久通知已落库、消费组积压为 0。S5 压测夹具的截止时间修正见后续提交 `7da0a92`。2026-09-28 生产 API 与 Worker 已切换到 `5ace500`；[当前镜像 ECS 六类场景实测](bench/reports/peergrab-current/report-ecs-spectrum-20260928.md)覆盖完整 HTTPS 首屏、并发抢单、缓存、结算、到期处理及受限故障注入。
+2026-09-27 首次在单 ECS 演示站部署 `2370c45`：旧卷先备份、在隔离 MySQL 中恢复并试跑迁移，再停写执行正式迁移。新资金事件使用 `errand-fund-event-v2` 普通 Topic；一笔上线验收交易的 outbox 为 `SENT`、持久通知已落库、消费组积压为 0。S5 压测夹具的截止时间修正见后续提交 `7da0a92`。2026-09-28 生产 API 与 Worker 已切换到 `5ace500`；[2026-11-04 最终评测](bench/reports/peergrab-current/report-20261104-final.md)覆盖当前 HEAD 的读容量、S4 结算、自动结算、S6 故障、S1 抢单与旧 IT 复验。
 
 ## 本机开发
 
@@ -117,7 +117,7 @@ export PEERGRAB_TEST_DB_PASSWORD='<独立测试 MySQL 密码>'
 mvn -Dpeergrab.it=true test
 ```
 
-2026-09-27 的旧版在可丢弃 MySQL/Redis 上运行 **214 项后端测试，0 失败、0 跳过**；前端 `npm run build` 与后端 `mvn -DskipTests package` 通过。真实 RocketMQ 的普通 Topic 类型、发送和消费读回另经独立契约脚本验证。2026-09-28 优化版在全新隔离 MySQL/Redis 上运行 `mvn -Dpeergrab.it=true test`，按 Maven 各模块汇总 **223 项执行、0 失败、0 错误、0 跳过**；独立栈的 S1/S4/S5 运行验收见下文报告。2026-10-22 版本在隔离栈上运行 `mvn -B -ntp -Dpeergrab.it=true clean test` 合计 **318 项、0 失败、0 错误、0 跳过，其中 80 项集成测试真实执行**（更早的 308/298 项属于不同提交）。2026-10-28 当前版本新增持久幂等抢单 v2 后，同一命令在隔离 MySQL/Redis 上合计 **332 项、0 失败、0 错误、0 跳过，其中 85 项集成测试真实执行**；P13 边缘加固（跑腿双桶限流 + 内部端点凭证）后同一命令为 **342 项、0 失败、0 错误、0 跳过，其中 88 项集成测试真实执行**；交付前审查补强再新增 3 项单测 + 5 项 HTTP 契约 IT（缺失/非法 requestId=400、429+Retry-After、202+PROCESSING、重放），同一命令最终为 **350 项、0 失败、0 错误、0 跳过，其中 93 项集成测试真实执行（34 个 IT 报表文件）**；同时验证 API/Worker 运行时 readiness 与保留期 SQL。测试数量以同一条命令 + [`tools/summarize_tests.py`](tools/summarize_tests.py) 汇总为唯一口径，CI 的 backend job 会输出该汇总，并按 failures/errors/IT 未跳过做门禁校验（不硬编码数字）。
+当前基线为 **350 项后端测试、0 失败、0 错误、0 跳过；其中 93 项集成测试真实执行（34 个 IT 报表文件）**（2026-10-28 同一条命令口径）。2026-11-04 在隔离 MySQL/Redis 上复验了 `PublishIdempotencyIT`（1/1）与 `SettleConcurrencyIT`（2/2），覆盖 12 并发同键发布、200 线程同单结算和 500 任务三层对账。测试数量以 [`tools/summarize_tests.py`](tools/summarize_tests.py) 汇总为唯一口径，CI backend job 输出该汇总并按 failures/errors/IT 未跳过门禁。
 
 在可丢弃的本地演示库上可运行 `python3 bench/scripts/smoke_e2e.py --env-file docker/.env`；脚本验证发布、抢单、结算、退款、仲裁和通知，**会创建任务并改变演示账户余额**。只读资金不变式检查可执行：
 
@@ -129,12 +129,18 @@ docker compose -f docker/docker-compose.yaml --env-file docker/.env exec -T mysq
 
 ## 实验记录与边界
 
-[当前镜像 ECS 六类场景实测](bench/reports/peergrab-current/report-ecs-spectrum-20260928.md)以已部署的 `5ace500` API／Worker 为对象，停站备份后逐场景建立可丢弃的 MySQL、Redis、RocketMQ 卷。S2 广场游标首屏走异机公网 HTTPS，600 RPS × 180 秒三轮各发出 108,000 次，客户端 P99 为 **46.919／52.332／47.839 ms**；第三轮有 **4 次传输超时**，所以尚无该档零错误稳态容量结论。S1 两轮各 2,000 个虚拟客户端同单抢一名额，均只成功 1 人且 0 超卖，但请求 P99 **4.682／5.081 秒**。S4 共享钱包热点 200 单／32 线程短批次两轮持久化结算 **39.52／36.09 TPS**，P99 **1.446／1.483 秒**，资金校验通过。
+2026-11-04 最终评测（当前 HEAD `5c1ecec`）是当前唯一基线，完整报告见[最终评测](bench/reports/peergrab-current/report-20261104-final.md)，脱敏摘要见[证据 JSON](bench/reports/peergrab-current/final-2026-11-04-evidence.json)。2026-08/09/10 的旧报告、旧镜像证据和旧工具口径已清理。
 
-S3 缓存开启后热态详情回源为 0，三个批次累计 MySQL `Com_select` 较关闭缓存约少 **49.5%**，但首次冷态 P99 更高，不能宣称稳定吞吐提升。S5 两个独立栈分别处理 1,000 单同刻到期，MQ／扫描兜底的到期至状态日志 P99 为 **9.512／25.100 秒**，均最终排空。S6 的 Redis 暂停轮详情读 250/250 成功、P95 **2.013 秒**；Broker 暂停时，默认配置的一次结算已经在数据库提交，却触发客户端 **8 秒超时**。另起新栈仅关闭延迟双删后，结算在 Broker 暂停期间约 **0.095 秒**返回，这只是定位对照，线上默认配置尚未修复。六类负载的计时起止与发压模型不同，不能将短批次 TPS、秒级尖峰和 HTTP 首屏 RPS 合成全站 SLA。
+| 场景 | 最终结果 | 口径 |
+|---|---|---|
+| 读容量 | **2450 RPS×60s×3 轮 0 错误**；P99 典型 12.8–14.4ms、最差轮 122ms；2500 RPS 起每轮 2 次超时 | 隔离 bench、8C ECS、HTTP、10k 热页、Hikari 50 |
+| S4 结算 | **200/32：218.6 TPS、P99 247.8ms；500/64：387.7 TPS、P99 254.7ms** | 隔离 bench、同机、短批次、生产同款池、多跑腿 |
+| 自动结算 | **1s 扫描 + 500/批：P50 3.2s / P95 11.3s / P99 11.3s** | 隔离 bench、scan-only；生产已应用 |
+| Redis 故障 | **暂停 25s，250 次详情读 0 错误、P95 107.5ms（100ms 超时）** | 隔离 bench、Python 10 RPS、单次故障；生产已应用 |
+| Broker 故障 | **暂停 30s，结算 180ms 返回、DB SETTLED；恢复后 outbox 约 3s 投递、资金差 0** | 隔离 bench、单笔结算 |
+| 2,000 线程 | **1 成功、1,996 名额满、3 冲突、0 系统错误；DB slot_taken=1** | 隔离 bench、同机、限流关闭；只证明正确性 |
 
-[当前 JMeter 复测](bench/reports/peergrab-current/report-ecs-jmeter-20260928.md)、[原工具六类场景实测](bench/reports/peergrab-current/report-ecs-spectrum-20260928.md)和[优化分析](bench/reports/peergrab-current/performance-optimization-analysis-20260929.md)分别记录负载、错误分母和阶段性改动；代码、路径、工具和窗口不同，不能据此计算跨工具优化增益。复测须按[压测运行手册](bench/README.md)使用独立环境，不能作用于演示库。
-
-当前 HTTP 压测统一使用 [JMeter 5.6.3 场景计划](bench/jmeter/README.md)，[ECS JMeter 复测](bench/reports/peergrab-current/report-ecs-jmeter-20260928.md)与前述原工具历史数字分开：广场游标首屏 500 目标 RPS × 180 秒 × 3 轮实际 269,608 次全部通过，最差轮 P99 255 ms；600 目标 RPS 长档第二轮有 1 次连接超时。JMeter 2,000 用户线程抢单恰好 1 人成功、0 超卖，但请求开始横跨 2.228 秒；结算 200 单／32 线程短批次 34.72 持久化 TPS，资金校验通过。两种工具不能直接比较收益。[评测资产目录](bench/ASSET_CATALOG.md)记录证据归档与清理规则；生产尚未部署持续看板、告警或分布式追踪。
-
-当前公开 API 限制 `slotTotal=1`；完整故障注入矩阵、故障恢复容量、多库资金方案仍待验证。ES/Canal 已退出运行架构，缓存一致性靠失效、TTL 与校验任务，不使用 binlog 秒级纠偏。相关评测入口见 `bench/README.md` 与 `bench/ASSET_CATALOG.md`。
+- Hikari 100 在读容量中反而更差（2450/2500 P99 约 242ms），保持 Hikari 50；读路径优化方向是查询/缓存，不是扩池。
+- 生产已应用 `SPRING_DATA_REDIS_TIMEOUT=100ms`、`SETTLE_SCAN_INTERVAL_MS=1000`、`SETTLE_SCAN_BATCH_SIZE=500`；其余生产配置未改。
+- 边界：读容量是单接口热页/HTTP 上限；S4 是同机短批次；S6 是单节点单次故障；2,000 线程 P99 含同机发压端开销；均不是稳态 QPS、HA 或全站 SLA。
+- 复测须按[压测运行手册](bench/README.md)使用独立环境；`bench/runs/20261104-final/` 只保留本轮私有证据。

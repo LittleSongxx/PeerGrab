@@ -63,7 +63,7 @@
 
 S1 有两个子场景，必须分开：
 
-- **同单尖峰**：`s1.jmx` 为每个线程准备不同跑腿 JWT 和 requestId，`Synchronizing Timer` 释放后抢同一个名额；数据库验收要求 `slot_taken=grabbed_rows=1`、超卖 0。2,000 线程档的结果见 [JMeter 报告](../../peergrab-backend/bench/reports/peergrab-current/report-ecs-jmeter-20260928.md)。
+- **同单尖峰**：`s1.jmx` 为每个线程准备不同跑腿 JWT 和 requestId，`Synchronizing Timer` 释放后抢同一个名额；数据库验收要求 `slot_taken=grabbed_rows=1`、超卖 0。2,000 线程档的结果见[最终评测](../../peergrab-backend/bench/reports/peergrab-current/report-20261104-final.md)。
 - **独立任务固定到达率**：`s1_distinct.jmx` 或 `run_s1_distinct_fixed.py` 先为每个任务分配独立跑腿和 requestId，再按固定速率各发一次；指标是 `offered/sent/completed`、窗口内完成率、P99 和数据库逐单 `LOCKED`/`GRABBED`。`run_s1_distinct_fixed.py` 使用 Python `urllib`，每次独立连接，不能与 JMeter 复用连接的 P99 直接比较。
 
 S1 的关键不是“QPS 多高”，而是“在给定并发/到达率下，名额与记录是否始终自洽”。业务拒绝 `SLOT_FULL`/`GRAB_CONFLICT` 是预期结果，不计系统错误，但它们的等待时间仍计入客户感知延迟。
@@ -325,19 +325,13 @@ caveat 行、代码块和多引用示例会跳过。
 
 ## 7. 证据索引
 
-- 当前镜像 JMeter：[report-ecs-jmeter-20260928.md](../../peergrab-backend/bench/reports/peergrab-current/report-ecs-jmeter-20260928.md)
-- 同镜像原工具六场景：[report-ecs-spectrum-20260928.md](../../peergrab-backend/bench/reports/peergrab-current/report-ecs-spectrum-20260928.md)
-- 4 vCPU 维护窗口：[report-ecs-max-20260926.md](../../peergrab-backend/bench/reports/peergrab-current/report-ecs-max-20260926.md)
-- 8 vCPU 复测：[report-ecs-8cpu-20260927.md](../../peergrab-backend/bench/reports/peergrab-current/report-ecs-8cpu-20260927.md)
-- 上线后复测：[report-ecs-release-20260927.md](../../peergrab-backend/bench/reports/peergrab-current/report-ecs-release-20260927.md)
-- 优化与补测：[performance-optimization-analysis-20260929.md](../../peergrab-backend/bench/reports/peergrab-current/performance-optimization-analysis-20260929.md)、[report-ecs-remediation-20260929.md](../../peergrab-backend/bench/reports/peergrab-current/report-ecs-remediation-20260929.md)
-- 按版本索引：[peergrab-current/README.md](../../peergrab-backend/bench/reports/peergrab-current/README.md)
-- 资产与保留规则：[ASSET_CATALOG.md](../../peergrab-backend/bench/ASSET_CATALOG.md)、[private-evidence-index.json](../../peergrab-backend/bench/reports/private-evidence-index.json)
+- 当前唯一评测：[2026-11-04 最终评测](../../peergrab-backend/bench/reports/peergrab-current/report-20261104-final.md)
+- 脱敏机读摘要：[final-2026-11-04-evidence.json](../../peergrab-backend/bench/reports/peergrab-current/final-2026-11-04-evidence.json)
+- 资产与保留规则：[ASSET_CATALOG.md](../../peergrab-backend/bench/ASSET_CATALOG.md)
 - 运行手册：[bench/README.md](../../peergrab-backend/bench/README.md)；JMeter 入口：[jmeter/README.md](../../peergrab-backend/bench/jmeter/README.md)
-- 历史工具复现：[LEGACY_RUNBOOK.md](../../peergrab-backend/bench/LEGACY_RUNBOOK.md)
+- 历史 2026-08/09/10 报告与私有证据已清理，不再保留链接；需要复现时按本方法论新建隔离栈，不能把旧数字当当前基线。
 
-私有 JTL、JWT CSV、生产备份不在 Git 中；公开报告只写脱敏汇总与哈希。引用证据时优先链接报告，不链接私有目录中的具体文件。
-
+私有 JTL、JWT CSV、生产备份不在 Git 中；公开报告只写脱敏汇总与哈希。引用证据时优先链接最终报告，不链接私有目录中的具体文件。
 ## 8. 执行前检查清单
 
 - [ ] 正式报告同一档位至少 3 轮；`canonicalize.py` 已运行并贴出 n/中位数/min-max 与警告。

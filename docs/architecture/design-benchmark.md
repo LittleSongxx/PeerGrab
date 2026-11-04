@@ -8,7 +8,7 @@
 
 ### 0.1 这份文档回答什么
 
-PeerGrab 已有三类文档：架构结论（[架构设计与技术选型.md](架构设计与技术选型.md)）、配置清单（[config-reference.md](config-reference.md)）、问题与修复记录（[PeerGrab 全面深度分析报告](../analysis/PeerGrab-全面深度分析报告.md)）。它们分别回答"是什么""怎么配""哪里错过"，**都不回答"为什么不是另一种做法"**。
+PeerGrab 已有三类文档：架构结论（[架构设计与技术选型.md](架构设计与技术选型.md)）、配置清单（[config-reference.md](config-reference.md)）、问题与修复记录（[设计演进记录](../engineering/design-evolution.md)）。它们分别回答"是什么""怎么配""哪里错过"，**都不回答"为什么不是另一种做法"**。
 
 设计基准补的就是这一段：每条主链路先给不变式，再给代码落点，再给候选方案矩阵（含"为什么不够"），最后主动认账边界。它面向三类读者：
 
@@ -24,7 +24,7 @@ PeerGrab 已有三类文档：架构结论（[架构设计与技术选型.md](�
 | --- | --- | --- |
 | [架构设计与技术选型.md](架构设计与技术选型.md) | 系统由哪些模块组成、选了什么技术 | 结论层；本文是它的论证展开。两处冲突时以本文的代码落点为准，并回改前者 |
 | [config-reference.md](config-reference.md) | 每个 `peergrab.*` 键的默认值与生效进程 | 本文只引用键名与关键取值，不复制默认值表；共享键一致性见该文"共享键矩阵" |
-| [PeerGrab 全面深度分析报告](../analysis/PeerGrab-全面深度分析报告.md) | 曾经有哪些问题、修了什么 | 本文把其 §9/§10 的修复记录当作"已解决"的证据引用，不重复叙述缺陷细节 |
+| [设计演进记录](../engineering/design-evolution.md) | 工程分期、关键取舍与踩坑档案 | 本文引用当前架构结论，不重复叙述历史缺陷细节 |
 | [压测运行手册](../../peergrab-backend/bench/README.md) / [评测方法论](../benchmark/methodology.md) | 数字怎么测出来的 | 本文 §9 只引用结果与窗口，不重新解释方法论 |
 | [设计演进](../engineering/design-evolution.md) | 方案是怎么一步步变成现在这样的 | 本文给"当前态 + 候选方案"，演进叙事在那篇 |
 | [wallet-account-topology.md](wallet-account-topology.md) | 每单 ESCROW/COMMISSION 账户的动机、模型、锁序、收益/代价、迁移与回滚 | 本文 §5.1–§5.6 的账户口径以该 ADR 为决策记录 |
@@ -571,23 +571,14 @@ stateDiagram-v2
 
 | 指标 | 口径定义 | 数据来源 | 当前值 |
 | --- | --- | --- | --- |
-| 零超卖（Java 客户端尖峰） | 单任务 `slot_total=1`，N 个客户端同刻抢；成功数 = 1，且 SQL 复核 `slot_taken=1`、当前轮 `grab_record` 恰好 1 行 | [后端 README](../../peergrab-backend/README.md#实验记录与边界)、[ECS 六类场景实测](../../peergrab-backend/bench/reports/peergrab-current/report-ecs-spectrum-20260928.md) | 2,000 客户端 × 2 轮：每轮恰好 1 人成功、0 超卖；请求 P99 4.682 / 5.081 秒（ECS 回环，单次开闸尖峰，不是稳态 TPS） |
-| 零超卖（JMeter） | 同上，JMeter 2,000 线程 + Synchronizing Timer | [JMeter ECS 复测](../../peergrab-backend/bench/reports/peergrab-current/report-ecs-jmeter-20260928.md) | 恰好 1 人成功、0 超卖；请求实际开始横跨 2.228 秒，P99 8.735 秒 |
-| 广场游标首屏 P99（公网 HTTPS） | 异机固定到达率，600 目标 RPS × 180 秒 × 3 轮，每轮 108,000 次；客户端 P99 | 后端 README、频谱报告 | 46.919 / 52.332 / 47.839 ms；第三轮 4 次传输超时，因此没有该档零错误稳态容量结论 |
-| 广场游标首屏 P99（JMeter） | 500 目标 RPS × 180 秒 × 3 轮，实际 269,608 次全部通过 HTTP 与业务断言 | 根 README、JMeter 报告 | 最差轮 P99 255 ms；600 目标 RPS 长档第二轮 1 次连接超时后按门禁停止 |
-| 缓存对数据库读的削减 | 开/关缓存两个独立栈、同负载下 MySQL `Com_select` 与详情回源次数 | 后端 README S3 | 热态详情回源 0；三批累计 `Com_select` 较关缓存少 49.5%；冷态 P99 更高，不能宣称稳定吞吐提升 |
-| 结算短批次吞吐（旧模型） | 200 个独立任务、32 工作线程；分子是数据库持久 `SETTLED` 数，分母是该批次耗时 | 频谱报告、JMeter 报告、[remediation 报告](../../peergrab-backend/bench/reports/peergrab-current/report-ecs-remediation-20260929.md) | 39.52 / 36.09（频谱两轮）、34.72（JMeter）、32.04（v1 共享钱包）/ 33.27（v2 分散）/ 32.86（v3 优化）TPS；均为约 5–6 秒短批次，不是稳态容量。**以上均为共享系统户时期口径，不得与新模型混算** |
-| 结算短批次吞吐（每单账户模型） | 500 个不同任务、64 工作线程、单轮；分子是数据库持久 `SETTLED` 数，分母是批次耗时 | 本机隔离 MySQL/Redis 的 `SettleConcurrencyIT` / `bench_run` | 约 118–119 TPS（两轮 IT 观测）；这是本地 IT 观测，不是 ECS 稳态或容量承诺 |
-| 到期流转时延 | 1,000 单同刻到期；到期时刻 → 事务内状态日志写入的 P99 | 后端 README S5 | MQ 通道 9.512 秒、纯扫描通道 25.100 秒；两栈均最终排空 |
-| Redis 故障读降级 | 暂停 Redis 容器后连续详情读 | 后端 README S6 | 250/250 成功，P95 2.013 秒 |
-| Broker 故障下资金正确性 | 暂停 Broker 时发起结算，比对 HTTP 结果与数据库资金事实 | 后端 README S6 | 结算已在数据库提交，但客户端 8 秒超时；另起新栈关闭延迟双删后约 0.095 秒返回（仅定位对照，非默认配置） |
-| 资金/一致性差异 | `recon_diff`、`sync_diff` 行数（目标恒为 0） | 各轮 S4 的 SQL 校验 | 各轮资金借贷差额、每单系统账户快照、托管闭环均为 0；`sync_diff` 正常为空 |
-| 后端测试门禁 | `mvn -Dpeergrab.it=true test` 的 surefire 汇总（隔离 MySQL/Redis） | 后端 README（2026-10） | 2026-10-28（P13 边缘加固 + 交付前审查补强后）为 350 项、0 失败、0 错误、0 跳过，其中 93 项集成测试真实执行（34 个 IT 报表文件）；同日 P12 为 332/85 IT；2026-10-22 为 318/80 IT；2026-09-28 为 223 项 |
-| 分片规则验证 | `peergrab-sharding-lab` 单测：任务共片、用户维度路由、生产 SQL 不按 `errand_id` 单查 | `peergrab-sharding-lab` | 规则层测试通过；分片后的容量、跨片事务表现 `[待补充]` |
-| 事务消息协议对照 | `peergrab-txmsg-lab` 的 6 个场景：半消息可见性、commit/rollback 幂等、三态回查、半消息失败短路 | `peergrab-txmsg-lab`（`TransactionMessageLabTest`） | 离线测试通过（`mvn -o -pl peergrab-txmsg-lab test`）；真实 Broker 对照 `[待补充]` |
+| 零超卖（同单尖峰） | 单任务 `slot_total=1`，2,000 个客户端同刻抢；成功数 = 1，且 SQL 复核 `slot_taken=1`、当前轮 `grab_record` 恰好 1 行 | [最终评测](../../peergrab-backend/bench/reports/peergrab-current/report-20261104-final.md)、[后端 README](../../peergrab-backend/README.md#实验记录与边界) | 1 成功、1,996 名额满、3 冲突、0 系统错误；DB `slot_taken=1`；同机 P99 2.702s（只证明正确性，不是稳态容量） |
+| 读容量（HTTP 热页） | 异机固定到达率，10k PUBLISHED、`campus=1`、`size=20` 首屏、200 workers；60s × 3 轮；客户端 P99 | [最终评测](../../peergrab-backend/bench/reports/peergrab-current/report-20261104-final.md) | **2450 RPS 三轮 0 错误**，P99 典型 12.8–14.4ms、最差轮 122ms；2500 RPS 起每轮 2 次超时；Hikari 50 |
+| 结算短批次吞吐（每单账户 + 多跑腿） | 200/32 与 500/64，HTTP 履约准备不计时；分子是数据库持久 `SETTLED` 数，分母是批次耗时 | [最终评测](../../peergrab-backend/bench/reports/peergrab-current/report-20261104-final.md) | **200/32：218.6 TPS、P99 247.8ms；500/64：387.7 TPS、P99 254.7ms**；同机短批次，不是稳态 QPS |
+| 自动结算 | 1,000 单同刻到期；1s 扫描、500/批；到期 → 事务内状态日志 P99 | [最终评测](../../peergrab-backend/bench/reports/peergrab-current/report-20261104-final.md) | **P50 3.2s / P95 11.3s / P99 11.3s**；1000/1000、0 重复、资金差 0 |
+| Redis 故障读降级 | 暂停 Redis 25s，Python 10 RPS 详情读；100ms 超时 | [最终评测](../../peergrab-backend/bench/reports/peergrab-current/report-20261104-final.md) | 250 次读 0 错误、**P95 107.5ms**；抢单由 DB CAS 裁决，资金差 0 |
+| Broker 故障下资金正确性 | 暂停 Broker 30s 时发起单笔结算，比对 HTTP、DB、outbox 与通知 | [最终评测](../../peergrab-backend/bench/reports/peergrab-current/report-20261104-final.md) | 结算 **180ms** 返回、DB 已 SETTLED；恢复后 outbox 约 **3s** 投递、2 条通知、3 条流水、资金差 0 |
 
-**口径纪律**：写进任何材料前，先能回答"哪个镜像/提交、什么工具、什么负载模型、多长窗口、错误分母是多少"。答不出来就写 `[待补充]`。
-
+旧 2026-08/09/10 的 JMeter/Vegeta/ECS 轮次与旧共享系统户数字已清理，不再作为当前指标；需要历史对照时以最终报告中的“已退役数字”一节为准。
 ## 10. 微服务演进路径
 
 ### 10.1 先拆什么

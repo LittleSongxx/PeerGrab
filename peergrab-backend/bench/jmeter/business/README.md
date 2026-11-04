@@ -2,7 +2,7 @@
 
 这四个 JMX 使用 Apache JMeter 5.6.3 的 HTTP 采样器发压；`JMeterFixtureExporter` 在**经 `preflight.py` 核验的独立 Compose 栈**中创建 JWT session、任务和私有 CSV。`run.py` 负责 JMeter CLI 执行、JTL 业务结果分类及数据库验收。需要新轮次时新建隔离项目和卷；CSV 中含 JWT，仅存于被 `.gitignore` 排除的 `bench/runs/`，目录权限 0700、CSV 权限 0600。
 
-在独立压测栈的 Docker 宿主机，从 `peergrab-backend` 目录运行，先按 `bench/S3_S5_ECS_RUNBOOK.md` 或维护窗口总流程建立隔离栈，设置并核验以下变量：
+在独立压测栈的 Docker 宿主机，从 `peergrab-backend` 目录运行，先按 [`bench/README.md`](../../README.md) 或维护窗口总流程建立隔离栈，设置并核验以下变量：
 
 ```bash
 export PEERGRAB_BENCH_DISPOSABLE=YES

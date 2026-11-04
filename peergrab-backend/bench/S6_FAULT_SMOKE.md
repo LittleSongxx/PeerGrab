@@ -1,6 +1,6 @@
 # S6：隔离栈小流量故障与恢复冒烟
 
-此入口验证 **Redis 暂不可用时一个真实抢单能否由 MySQL 裁决**，以及 **RocketMQ Broker 暂不可用时一笔真实结算能否及时应答、资金 outbox 能否在恢复后投递并生成持久通知**。Redis 详情读负载当前默认由 JMeter 发起；故障控制、数据库核验及 MQ 单笔结算的功能探针仍由 Python 执行。它不是稳态负载、主从切换、跨主机高可用或 RPO/RTO 测量。[2026-09-28 ECS 实测](reports/peergrab-current/report-ecs-spectrum-20260928.md)中默认配置的 Broker 暂停结算**客户端超时但数据库已提交**，该场景不通过。
+此入口验证 **Redis 暂不可用时一个真实抢单能否由 MySQL 裁决**，以及 **RocketMQ Broker 暂不可用时一笔真实结算能否及时应答、资金 outbox 能否在恢复后投递并生成持久通知**。Redis 详情读负载当前默认由 JMeter 发起；故障控制、数据库核验及 MQ 单笔结算的功能探针仍由 Python 执行。它不是稳态负载、主从切换、跨主机高可用或 RPO/RTO 测量。[2026-11-04 最终评测](reports/peergrab-current/report-20261104-final.md)中 Redis 暂停 25s、250 次详情读 0 错误、P95 107.5ms；Broker 暂停 30s 时结算 180ms 返回、DB 已 SETTLED、恢复后 outbox 约 3s 投递、资金差 0；仍不构成持续积压/HA 结论。
 
 ## 建栈与门禁
 

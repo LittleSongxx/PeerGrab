@@ -28,7 +28,7 @@
 
 **PeerGrab 是一个可运行的 C2C 任务交易与履约演示平台。** 发单人发布任务并把赏金托管到平台，跑腿抢单、确认、取货、送达；平台按状态机推进，完成后结算，异常时退款或由仲裁员裁决。发布、资金、异步事件、通知与对账在同一条链路里闭环。
 
-在线演示：<https://www.peergrab.cn> · 文档入口：[docs/README.md](docs/README.md) · 快速开始：[↓](#快速开始)
+演示站（域名 ICP 备案未完成，暂不保证可访问） · 文档入口：[docs/README.md](docs/README.md) · 快速开始：[↓](#快速开始)
 
 ---
 
@@ -176,14 +176,21 @@ python3 peergrab-backend/bench/scripts/verify_grab_v2_live.py --base http://127.
 
 ## 实测与边界
 
-这些数字只代表注明的工具、负载窗口和隔离栈，不是生产容量或 SLA：
+2026-11-04 最终评测（当前 HEAD `5c1ecec`，隔离 bench / 生产停机窗口）是当前唯一基线。数字只代表注明的工具、窗口和隔离栈，不是生产容量或 SLA；完整报告见[最终评测](peergrab-backend/bench/reports/peergrab-current/report-20261104-final.md)与[脱敏证据摘要](peergrab-backend/bench/reports/peergrab-current/final-2026-11-04-evidence.json)。
 
-- **任务广场**：JMeter 500 目标 RPS × 180 秒 × 3 轮，实际开始 **269,608** 次请求，0 请求错误；最差轮客户端 P99 **255 ms**。
-- **同单抢名额**：2,000 个 JMeter 用户线程同抢 1 个名额，恰好 **1 人成功、0 超卖**。
-- **资金正确性**：200 并发重复结算只入账一次；1,000 单同刻到期最终排空，无重复结算；Broker 暂停窗口内 32 笔结算全部成功。
-- **结算吞吐**：旧共享系统户模型下 200 单 / 32 线程短批次约 **32–39 TPS**（历史口径）；改为每任务独立账户后，本机隔离 IT 500 任务 / 64 线程单笔结算约 **118–119 TPS**。两者负载和环境不同，不能直接算提升倍数，也没有做 ECS 复测。
+| 场景 | 最终结果 | 口径 |
+|---|---|---|
+| 读接口容量 | **2450 RPS × 60s × 3 轮，0 错误**；P99 典型 12.8–14.4ms，最差轮 122ms；**2500 RPS 起每轮 2 次超时** | 隔离 bench、8C ECS、HTTP、10k 热页、Hikari 50 |
+| S4 HTTP 结算 | **200/32：218.6 TPS、P99 247.8ms；500/64：387.7 TPS、P99 254.7ms** | 隔离 bench、同机、短批次、生产同款池、多跑腿 |
+| 自动结算 | **1,000 单，1s 扫描 + 500/批：P50 3.2s / P95 11.3s / P99 11.3s** | 隔离 bench、scan-only；生产已应用该配置 |
+| Redis 故障 | **暂停 25s：250 次详情读 0 错误、P95 107.5ms（100ms 超时）** | 隔离 bench、Python 10 RPS、单次故障；生产已应用 100ms |
+| Broker 故障 | **暂停 30s：结算 180ms 返回、DB 已 SETTLED；恢复后 outbox 约 3s 投递、资金差 0** | 隔离 bench、单笔结算 |
+| 同单抢名额 | **2,000 线程：1 成功、1,996 名额满、3 冲突、0 系统错误；DB slot_taken=1** | 隔离 bench、同机、限流关闭；只证明正确性 |
 
-> 截图来自本地 Compose 真实栈，数据是一次性演示任务，不是生产数据；页面里的余额和任务与截图生成时的本地库一致。
+- **Hikari 池**：Hikari 100 在隔离读容量中反而更差（2450/2500 P99 约 242ms），保持 Hikari 50；读容量优化方向是 DB 查询/缓存，不是扩池。
+- **旧口径已退役**：500 RPS / 269,608 请求、100–120 TPS、45.7→17.3s、18,000 发布/30min、单跑腿 90.2/77.4 TPS 等，不再作为当前数字。
+- **旧正确性指标当前 HEAD 复验**：`PublishIdempotencyIT` 1/1、`SettleConcurrencyIT` 2/2 通过；12 并发、200 线程同单、500 任务三层对账仍成立。
+- **边界**：读容量是单接口热页/HTTP 上限；S4 是同机短批次；S6 是单节点单次故障；2,000 线程 P99 含同机发压端开销；均不是稳态 QPS、HA 或全站 SLA。
 
 ## 这个仓库里没有什么
 
@@ -199,7 +206,7 @@ python3 peergrab-backend/bench/scripts/verify_grab_v2_live.py --base http://127.
 - 设计基准与取舍：[design-benchmark](docs/architecture/design-benchmark.md)
 - 账户拓扑与迁移：[wallet-account-topology](docs/architecture/wallet-account-topology.md)
 - 工程演进与踩坑：[design-evolution](docs/engineering/design-evolution.md)
-- 压测方法与历史报告：[benchmark/methodology](docs/benchmark/methodology.md)
+- 压测方法论与最终报告：[benchmark/methodology](docs/benchmark/methodology.md) · [最终评测](peergrab-backend/bench/reports/peergrab-current/report-20261104-final.md)
 
 ## 截图
 

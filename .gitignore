@@ -13,11 +13,5 @@ peergrab-frontend/verification/**/*.png
 **/playwright-report/
 **/test-results/
 
-# Personal interview, recruiting, and resume materials; keep outside the repository.
-docs/面经/
-peergrab-backend/docs/
-peergrab-backend/bench/reports/peergrab-current/report-resume-*
-
-# 个人本地物料：教程、架构图/教程图、功能截图、真实验收证据，不随仓库分发。
-docs/tutorial/
+# 个人面试/招聘材料与本地验收证据不随仓库分发。
 peergrab-frontend/verification/
