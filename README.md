@@ -26,9 +26,9 @@
 
 ---
 
-**PeerGrab 是一个可运行的 C2C 任务交易与履约演示平台。** 发单人发布任务并把赏金托管到平台，跑腿抢单、确认、取货、送达；平台按状态机推进，完成后结算，异常时退款或由仲裁员裁决。发布、资金、异步事件、通知与对账在同一条链路里闭环。
+**PeerGrab 是一个可运行的 C2C 任务交易与履约平台。** 发单人发布任务并把赏金托管到平台，跑腿抢单、确认、取货、送达；平台按状态机推进，完成后结算，异常时退款或由仲裁员裁决。发布、资金、异步事件、通知与对账在同一条链路里闭环。
 
-演示站（域名 ICP 备案未完成，暂不保证可访问） · 文档入口：[docs/README.md](docs/README.md) · 快速开始：[↓](#快速开始)
+文档入口：[docs/README.md](docs/README.md) · 快速开始：[↓](#快速开始)
 
 ---
 
@@ -208,6 +208,3 @@ python3 peergrab-backend/bench/scripts/verify_grab_v2_live.py --base http://127.
 - 工程演进与踩坑：[design-evolution](docs/engineering/design-evolution.md)
 - 压测方法论与最终报告：[benchmark/methodology](docs/benchmark/methodology.md) · [最终评测](peergrab-backend/bench/reports/peergrab-current/report-20261104-final.md)
 
-## 截图
-
-所有页面截图都在 [`docs/assets/screenshots/`](docs/assets/screenshots/)：桌面 1440×900，包含登录、广场、发布、详情、钱包、信用、消息、仲裁；另有三张 390×844 移动端截图。
